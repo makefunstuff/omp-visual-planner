@@ -49,6 +49,21 @@ function branchTokenOf(ctx: ExtensionContext): string {
 	return `${sessionKey(ctx)}:${ctx.sessionManager.getLeafId() ?? "root"}`;
 }
 
+/**
+ * Session state, restored on first use.
+ *
+ * A plugin reload re-executes this module, so the in-memory map starts empty
+ * while the session keeps running: nothing would re-emit `session_start`. Every
+ * entry point therefore adopts the session's own metadata on first touch.
+ */
+async function ensureSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<PlannerSession> {
+	const session = sessionFor(pi, ctx);
+	if (session.store.document === undefined && session.registry.entries.length === 0) {
+		await adoptSession(pi, ctx);
+	}
+	return session;
+}
+
 function sessionFor(pi: ExtensionAPI, ctx: ExtensionContext): PlannerSession {
 	const key = sessionKey(ctx);
 	const existing = SESSIONS.get(key);
@@ -272,7 +287,7 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 				ctx.ui.notify(HELP_TEXT, "info");
 				return;
 			}
-			const session = sessionFor(pi, ctx);
+			const session = await ensureSession(pi, ctx);
 			if (trimmed === "new") {
 				const document = session.store.newDocument({ title: "New architecture" }, defaultDocumentPath(ctx.cwd));
 				session.stack = [document.root.id];
@@ -320,9 +335,9 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 		approval: "read",
 		loadMode: "discoverable",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const session = SESSIONS.get(sessionKey(ctx));
-			const document = session?.store.document;
-			if (!session || !document) {
+			const session = await ensureSession(pi, ctx);
+			const document = session.store.document;
+			if (!document) {
 				return {
 					content: [
 						{
@@ -374,9 +389,9 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 		approval: "write",
 		loadMode: "discoverable",
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			const session = SESSIONS.get(sessionKey(ctx));
-			const document = session?.store.document;
-			if (!session || !document) {
+			const session = await ensureSession(pi, ctx);
+			const document = session.store.document;
+			if (!document) {
 				return {
 					content: [{ type: "text" as const, text: "no visual planner document is open in this session" }],
 					details: { error: "no-document" },

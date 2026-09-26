@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { createBlock, createDiagram, createDocument, createEdge, validateDocument } from "../src/model.ts";
 import {
@@ -122,6 +122,28 @@ describe("save and reload", () => {
 		const alternative = join(dir, "copy.json");
 		expect((await store.saveAs(alternative)).ok).toBe(true);
 		expect(JSON.parse(await readFile(alternative, "utf8")).title).toBe("Service");
+	});
+
+	test("a relative path is resolved once and stored absolutely", async () => {
+		const dir = await workspace();
+		const store = new DocumentStore(type);
+		store.adopt(sample(), join(dir, "architecture.json"));
+		expect((await store.saveAs(join(dir, "copy.json"))).ok).toBe(true);
+
+		const reopened = new DocumentStore(type);
+		const previous = process.cwd();
+		process.chdir(dir);
+		try {
+			// Opened the way a user types it; persisted the way the session needs it.
+			const opened = await reopened.open("./copy.json");
+			expect(opened.ok).toBe(true);
+			// Absolute, resolved against the cwd it was opened from.
+			expect(reopened.path).toBe(resolve(process.cwd(), "copy.json"));
+			expect(reopened.path?.startsWith("/")).toBe(true);
+			expect(await reopened.currentDiskDigest()).toBe(reopened.diskDigest);
+		} finally {
+			process.chdir(previous);
+		}
 	});
 
 	test("reports a missing file without clearing current state", async () => {

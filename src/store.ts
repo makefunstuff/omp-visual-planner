@@ -199,6 +199,7 @@ export class DocumentStore {
 	}
 
 	async open(path: string): Promise<OpenResult> {
+		path = resolve(path);
 		let text: string;
 		try {
 			text = await readFile(path, "utf8");
@@ -295,6 +296,7 @@ export class DocumentStore {
 	}
 
 	async saveAs(path: string): Promise<SaveResult> {
+		path = resolve(path);
 		const document = this.#document;
 		if (!document) return { ok: false, kind: "no-document", errors: ["no project document is open"] };
 		const text = serializeDocument(document);
