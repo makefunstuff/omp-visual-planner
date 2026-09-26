@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { nextOpenBlock, nextStatus, outlineRows, projectActions, verbsFor } from "../src/flow.ts";
+import { nextOpenBlock, nextStatus, nextStep, outlineRows, projectActions, verbsFor } from "../src/flow.ts";
 import { PURPOSES, createBlock, createDiagram, createDocument } from "../src/model.ts";
 
 /** root: a (settled, children: a1 open), b (open) */
@@ -67,5 +67,21 @@ describe("purpose vocabulary", () => {
 		expect(nextStatus("plan", "done")).toBe("open");
 		expect(nextStatus("plan", "open")).toBe("settled");
 		expect(nextStatus("brainstorm", "open")).toBeUndefined();
+	});
+});
+
+describe("next step", () => {
+	test("a written open leaf is Execute, not a status lecture", () => {
+		const document = createDocument({ title: "Tool", purpose: "plan" });
+		const block = createBlock({ id: "input", title: "Input", description: "Check the file.", status: "open" });
+		document.root.blocks.push(block);
+		expect(nextStep(document, block)).toMatchObject({ label: "Execute", act: "verb", verb: "execute" });
+	});
+
+	test("a written brainstorm idea points at Implement", () => {
+		const document = createDocument({ title: "Tool", purpose: "brainstorm" });
+		const block = createBlock({ id: "idea", title: "Idea", description: "A note." });
+		document.root.blocks.push(block);
+		expect(nextStep(document, block).act).toBe("implement");
 	});
 });

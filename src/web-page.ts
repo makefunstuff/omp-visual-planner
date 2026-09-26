@@ -159,7 +159,14 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
 .hud.bl { left: 12px; bottom: 12px; border: none; background: transparent; color: var(--faint); font-size: 12px; padding: 0; }
 .hud .doc { border: 1px solid transparent; background: transparent; font-weight: 700; width: 22ch; padding: 1px 4px; }
 .hud .doc:hover { border-color: var(--line); }
-.hud select { width: auto; padding: 0 6px; }
+.hud .purpose { position: relative; }
+.hud .purpose > button { border: 1px solid var(--line); background: transparent; padding: 0 8px; }
+.menu { position: absolute; top: calc(100% + 4px); left: 0; z-index: 8; display: flex; flex-direction: column; min-width: 14ch; background: var(--bg); border: 1px solid var(--ink); padding: 4px; }
+.menu button { text-align: left; background: transparent; border: none; }
+.menu button.on { background: var(--ink); color: var(--on-ink); }
+.seg { display: inline-flex; border: 1px solid var(--line); }
+.seg button { border: none; background: transparent; }
+.seg button.on { background: var(--ink); color: var(--on-ink); }
 .hud .muted { color: var(--muted); white-space: nowrap; }
 .hud .dirty { color: var(--warn); font-weight: 700; display: none; } .hud .dirty.on { display: inline; }
 .hud .crumbs { display: flex; gap: 6px; white-space: nowrap; overflow: hidden; }
@@ -264,7 +271,7 @@ body.busy, body.busy * { cursor: progress; }
 </div>
 <header class="hud tl">
   <input class="doc" id="docTitle" title="Document title" spellcheck="false">
-  <select id="purpose" title="What this document is for"></select>
+  <div class="purpose" id="purposeWrap"><button type="button" id="purpose" title="What this document is for"></button><div class="menu" id="purposeMenu" hidden></div></div>
   <span class="muted" id="progress"></span>
   <span class="dirty" id="dirty" title="unsaved edits">*</span>
   <span class="crumbs" id="crumbs"></span>
@@ -300,11 +307,25 @@ let grounded = false;
 function cardCols(title) { return Math.max(12, Math.min(32, [...title].length + 2)); }
 
 let state = null, message = "", messageIsError = false, opCount = 0;
+let purposeOpen = false, newPurpose = "plan", confirming = false;
 let selectedEdge = null, preview = null, gesture = null, editTitleOf = null, editBodyOf = null, centerOn = null;
 let surface = "page";
 const views = new Map(); // diagram id -> map pan and zoom, not document content
-const insights = new Map(); // only inspected anchors; never index the whole workspace
 const $ = id => document.getElementById(id);
+function choices(values, current, onPick) {
+  return el("div", { class: "seg", role: "group" }, ...values.map(value => el("button", { type: "button", class: value === current ? "on" : "", text: value, onclick: () => { if (value !== current) onPick(value); } })));
+}
+function ask(text, yes, onYes) {
+  confirming = true;
+  const host = $("modal");
+  const close = () => { confirming = false; host.hidden = true; host.replaceChildren(); };
+  host.hidden = false;
+  host.replaceChildren(el("div", { class: "modal", role: "dialog", "aria-label": text },
+    el("h3", { text }),
+    el("div", { class: "row" },
+      el("button", { class: "primary", text: yes, onclick: () => { close(); onYes(); } }),
+      el("button", { text: "Cancel", onclick: close }))));
+}
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
   if (props) for (const [key, value] of Object.entries(props)) {
@@ -518,6 +539,7 @@ function renderWalk() {
     if (cite) card.append(el("button", { class: "cite", text: cite, title: "Open the cited range", onclick: () => openFile(block.sources[0].path, block.sources[0].startLine) }));
     else if (doc.purpose === "explore") card.append(el("p", { class: "subtle", text: block.evidence === "observed" ? "observed, no range" : block.evidence + " — not grounded in a citation" }));
     card.append(el("div", { class: "note" }, inlineText(block.description, "One line about it", value => patch({ description: value }))));
+    card.append(el("div", { class: "actions" }, stepButton(block)));
   }
   const moves = walkMoves(block);
   const list = el("div", { class: "moves" });
@@ -538,6 +560,7 @@ function renderWalk() {
       op(block ? { op: "addBlock", parentId: block.id, title } : { op: "addBlock", title });
     });
     card.append(input);
+    if (block) card.append(el("div", { class: "actions" }, implementButton(block)));
   } else if (block) {
     card.append(el("div", { class: "actions" }, ...state.flow.verbs.map(verb => el("button", { text: verb.label + " →", onclick: () => openPreview(verb.id, block.id) }))));
   }
@@ -602,20 +625,16 @@ function renderWorkspace() {
         if (editBodyOf === block.id) requestAnimationFrame(() => input.focus());
       }
     } else if (field === "criteria") cell.append(checklist(block.acceptanceCriteria, "Acceptance criterion", value => patch({ acceptanceCriteria: value })));
-    else if (field === "venue") {
-      const select = el("select", { onchange: () => patch({ venue: select.value }) },
-        ...["here", "subagent", "worktree"].map(value => el("option", { value, text: value, selected: value === (block.venue || "here") })));
-      cell.append(select);
-    } else if (field === "evidence") {
-      const select = el("select", { onchange: () => patch({ evidence: select.value }) },
-        ...["unknown", "inferred", "observed"].map(value => el("option", { value, text: value, selected: value === block.evidence })));
-      cell.append(select);
-    } else if (field === "expectedOutput") cell.append(inlineText(block.expectedOutput, "What does it produce?", value => patch({ expectedOutput: value })));
+    else if (field === "venue") cell.append(choices(["here", "subagent", "worktree"], block.venue || "here", value => patch({ venue: value })));
+    else if (field === "evidence") cell.append(choices(["unknown", "inferred", "observed"], block.evidence, value => patch({ evidence: value })));
+    else if (field === "expectedOutput") cell.append(inlineText(block.expectedOutput, "What does it produce?", value => patch({ expectedOutput: value })));
     fields.append(cell);
   }
   content.append(el("section", null, fields));
   const actions = el("div", { class: "actions" },
-    ...state.flow.verbs.map(verb => el("button", { class: verb.id === "replan" ? "primary" : "", text: verb.label + " →", onclick: () => openPreview(verb.id, block.id) })),
+    stepButton(block),
+    ...state.flow.verbs.map(verb => el("button", { text: verb.label + " →", onclick: () => openPreview(verb.id, block.id) })),
+    state.document.purpose === "brainstorm" ? implementButton(block) : null,
     el("button", { text: "+ inside", onclick: () => op({ op: "addBlock", parentId: block.id }) }),
     el("button", { class: "danger", text: "Delete block", onclick: () => removeBlock(block) }));
   content.append(actions);
@@ -848,11 +867,14 @@ function renderHud() {
   title.disabled = !doc;
   const purpose = $("purpose");
   purpose.hidden = !doc;
-  if (doc && purpose.value !== doc.purpose) purpose.value = doc.purpose;
+  purpose.textContent = doc ? doc.purpose : "";
+  const menu = $("purposeMenu");
+  menu.hidden = !purposeOpen || !doc;
+  if (!menu.hidden) menu.replaceChildren(...PURPOSES.map(value => el("button", { class: value === doc.purpose ? "on" : "", text: value, onclick: event => { event.stopPropagation(); purposeOpen = false; if (value !== doc.purpose) op({ op: "setPurpose", purpose: value }); else render(); } })));
   $("progress").textContent = state.flow ? state.flow.progress : "";
   $("dirty").classList.toggle("on", state.dirty);
   $("session").textContent = "web · " + state.sessionId.slice(0, 8);
-  $("message").textContent = message || HINT;
+  $("message").textContent = message || (state.flow && state.flow.next ? state.flow.next.detail : HINT);
   $("message").parentElement.classList.toggle("hint", !message);
   $("message").classList.toggle("error", messageIsError);
   $("undo").disabled = !state.canUndo;
@@ -895,9 +917,9 @@ function renderStart() {
   }
   if (!doc) {
     const title = el("input", { type: "text", placeholder: "title" });
-    const purpose = el("select", null, ...PURPOSES.map(value => el("option", { value, text: value, selected: value === "plan" })));
+    let purpose = newPurpose;
     host.append(el("h1", { text: "New document" }), title,
-      el("div", { class: "row" }, purpose, el("button", { class: "primary", text: "Create", onclick: () => op({ op: "newDocument", title: title.value.trim() || undefined, purpose: purpose.value }) })));
+      el("div", { class: "row" }, choices(PURPOSES, purpose, value => { newPurpose = value; renderStart(); }), el("button", { class: "primary", text: "Create", onclick: () => op({ op: "newDocument", title: title.value.trim() || undefined, purpose: newPurpose }) })));
     return;
   }
   if (emptyRoot) {
@@ -1047,9 +1069,25 @@ function nodeBody(block) {
   return body;
 }
 
+function runStep(block) {
+  const step = state.flow.next;
+  if (!step) return;
+  if (step.act === "verb" && step.verb) openPreview(step.verb, block.id);
+  else if (step.act === "implement") implementBlock(block.id);
+  else if (step.act === "status") stepStatus(block);
+  else if (step.act === "enter") op({ op: "enter", id: block.id });
+  else if (state.flow.nextOpen) { centerOn = state.flow.nextOpen; op({ op: "focus", id: state.flow.nextOpen }); }
+  else op(block ? { op: "addBlock", afterId: block.id } : { op: "addBlock" });
+}
+function stepButton(block) {
+  const step = state.flow.next;
+  return step ? el("button", { class: "primary", title: step.detail, onclick: () => runStep(block) }, step.label) : null;
+}
 function toolbar(block) {
   const flow = state.flow;
   return el("div", { class: "toolbar" },
+    stepButton(block),
+    el("span", { class: "sep" }),
     ...flow.verbs.map(verb => el("button", { title: verb.label + " (" + verb.key + ")", onclick: () => openPreview(verb.id, block.id) }, verb.label, el("kbd", { text: verb.key }))),
     el("span", { class: "sep" }),
     el("button", { title: "Add a block inside (O)", onclick: () => op({ op: "addBlock", parentId: block.id }) }, "+ inside", el("kbd", { text: "O" })),
@@ -1286,6 +1324,7 @@ async function openPreview(verb, id) {
 }
 function closeModal() { preview = null; renderModal(); }
 function renderModal() {
+  if (confirming) return;
   const host = $("modal");
   host.hidden = !preview;
   host.replaceChildren();
@@ -1308,11 +1347,21 @@ function renderModal() {
       el("button", { text: "Cancel", onclick: closeModal }),
       el("span", { class: "hint", text: "Submitting sends this prompt to the OMP session; its proposal comes back here for review." }))));
 }
+function implementButton(block) {
+  return el("button", { class: "primary", title: "Turn this into a plan and open Execute for this block", onclick: () => implementBlock(block.id) }, "Implement");
+}
+async function implementBlock(id) {
+  if (state.document.purpose === "brainstorm") {
+    const switched = await op({ op: "setPurpose", purpose: "plan" });
+    if (!switched.ok) return;
+  }
+  await openPreview("execute", id);
+}
 async function submitVerb(verb, id) {
   let result = await op({ op: "submit", verb, id });
   if (result.status === 409 && result.data.needsSave) {
-    if (!confirm("Save and submit?")) { flash("not submitted: the document has unsaved edits", true); render(); return; }
-    result = await op({ op: "submit", verb, id, saveFirst: true });
+    ask("This document has unsaved edits. Save them and submit?", "Save and submit", () => op({ op: "submit", verb, id, saveFirst: true }).then(next => { if (next.ok) closeModal(); }));
+    return;
   }
   if (result.ok) closeModal();
 }
@@ -1332,7 +1381,7 @@ async function addAt(world) {
   if (result.ok) { editTitleOf = state.selected; renderCanvas(); }
 }
 function removeBlock(block) {
-  if (confirm("Delete " + block.title + " and everything inside it?")) op({ op: "removeBlock", id: block.id });
+  ask("Delete " + (block.title || "this block") + " and everything inside it?", "Delete", () => op({ op: "removeBlock", id: block.id }));
 }
 function stepStatus(block) {
   const flow = state.flow;
@@ -1476,12 +1525,12 @@ $("viewport").addEventListener("wheel", event => {
 $("undo").addEventListener("click", () => op({ op: "undo" }));
 $("redo").addEventListener("click", () => op({ op: "redo" }));
 $("save").addEventListener("click", () => op({ op: "save" }));
+$("purpose").addEventListener("click", event => { event.stopPropagation(); purposeOpen = !purposeOpen; render(); });
+document.addEventListener("click", () => { if (purposeOpen) { purposeOpen = false; render(); } });
 $("tidy").addEventListener("click", async () => { await op({ op: "tidy" }); fit(); });
 $("fit").addEventListener("click", fit);
 $("mapToggle").addEventListener("click", () => { surface = surface === "map" ? "page" : "map"; render(); if (surface === "map") fit(); });
 $("filesToggle").addEventListener("click", () => { filesOpen = !filesOpen; if (filesOpen) loadFiles(); render(); });
-for (const value of PURPOSES) $("purpose").append(el("option", { value, text: value }));
-$("purpose").addEventListener("change", () => op({ op: "setPurpose", purpose: $("purpose").value }));
 $("docTitle").addEventListener("keydown", event => { if (event.key === "Enter" || event.key === "Escape") event.target.blur(); });
 $("docTitle").addEventListener("change", () => { const title = $("docTitle").value.trim(); if (title) op({ op: "patchDocument", title }); });
 window.addEventListener("resize", () => state && render());
@@ -1490,7 +1539,8 @@ document.addEventListener("keydown", event => {
   const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT");
   const mod = event.metaKey || event.ctrlKey;
   if (mod && event.key.toLowerCase() === "s") { event.preventDefault(); op({ op: "save" }); return; }
-  if (event.key === "Escape" && preview) { closeModal(); return; }
+  if (event.key === "Escape" && (preview || confirming)) { if (confirming) { confirming = false; } closeModal(); return; }
+  if (event.key === "Escape" && purposeOpen) { purposeOpen = false; render(); return; }
   if (event.key === "Escape" && viewer && !typing) { viewer = null; renderViewer(); return; }
   if (event.key === "/" && !typing) { event.preventDefault(); filesOpen = true; loadFiles(); render(); requestAnimationFrame(() => { const input = document.querySelector("#files input"); if (input) input.focus(); }); return; }
   if (typing || preview) return;

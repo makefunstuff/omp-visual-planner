@@ -29,7 +29,6 @@ describe("execute dispatch", () => {
 		expect(dispatch.run.map(leaf => leaf.id)).toEqual(["ready"]);
 		expect(dispatch.run[0]).toMatchObject({ venue: "subagent", notes: "keep the parser strict" });
 		expect(dispatch.held.map(item => item.kind)).toEqual(["container", "brainstorm", "done"]);
-
 		const prompt = composePrompt(document, { kind: "block", id: "parent" }, "execute").text;
 		expect(prompt).toContain("Subagent — one subagent per leaf");
 		expect(prompt).toContain("[ready] Flags");
@@ -37,6 +36,20 @@ describe("execute dispatch", () => {
 		expect(prompt).not.toContain("decide yourself");
 		expect(prompt).toContain("Not run");
 	});
+
+	test("Execute on an open leaf that already has a description runs it", () => {
+		const document = createDocument({ title: "Tool", purpose: "plan" });
+		addBlock(document.root, document.root.id, createBlock({
+			id: "input",
+			title: "Validating the input file",
+			description: "Confirm the input is a readable file.",
+			status: "open",
+		}));
+		const dispatch = planDispatch(document, { kind: "block", id: "input" });
+		expect(dispatch.run.map(leaf => leaf.id)).toEqual(["input"]);
+		expect(dispatch.held).toEqual([]);
+	});
+
 
 	test("a blocked leaf is not run, and an unblocked one is ordered after its neighbor", () => {
 		const document = createDocument({ title: "Tool", purpose: "plan" });

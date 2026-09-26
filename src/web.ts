@@ -24,6 +24,7 @@ import {
 	composeRequest,
 	fieldLabel,
 	nextOpenBlock,
+	nextStep,
 	pageFields,
 	progressLabel,
 	projectActions,
@@ -307,6 +308,7 @@ export interface WebFlow {
 	projectActions: ProjectAction[];
 	progress: string;
 	nextOpen: string | undefined;
+	next: { label: string; detail: string; verb?: string; act: "verb" | "status" | "implement" | "enter" | "add" };
 }
 
 export interface WebState {
@@ -347,6 +349,7 @@ function flowOf(document: DiagramDocument, selected: string | undefined): WebFlo
 		projectActions: projectActions(purpose),
 		progress: progressLabel(document),
 		nextOpen: nextOpenBlock(document, selected),
+		next: nextStep(document, selected ? findBlockLocation(document.root, selected)?.block : undefined),
 	};
 }
 

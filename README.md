@@ -46,7 +46,7 @@ In OMP, run `/diagram open architecture.json`. Move through the outline with `j`
 | `/diagram discover [path]` | Ask the model to map an existing codebase (default: cwd) |
 | `/diagram web` / `/diagram web stop` | Open/stop the browser view of this session |
 
-The terminal opens on a nested outline and the selected block's page. `space` advances its status; `n` selects the next open block. `r`, `b`, and `t` preview the purpose's refine/investigate, breakdown/map-inside, and replan actions; `R` reviews a staged proposal. `v` switches to the coordinate map, `E` edits a block as Markdown in `$VISUAL`/`$EDITOR`, and `s` saves. Press `?` for the full key list.
+The terminal opens on a nested outline and the selected block's page. The focused block leads with one next step; `r`, `b`, `t`, and `X` are the rest. `space` advances its status; `n` selects the next open block. `R` reviews a staged proposal. `v` switches to the coordinate map, `E` edits a block as Markdown in `$VISUAL`/`$EDITOR`, and `s` saves. Press `?` for the full key list.
 
 Brainstorm, and an explore block you have not settled, open on a **walk**: the focused block, what is inside it, and the blocks it connects to. Dump a line onto the focused idea (Enter in the browser, `O` in the terminal). In explore, a citation is the subtitle, uncited blocks are dim, and **grounded** (`g`) hides them. Mark a block explored to get the full page. Plan documents stay on that page. **Map** is coordinates. Both views share the session.
 
@@ -68,7 +68,7 @@ You have a product thought and no structure. You do not want implementation step
 /diagram new brainstorm
 ```
 
-The document opens on a walk. Dump the first line (`O` in the terminal, Enter in the browser). Dump the next line onto that idea to nest it, or onto the empty project to add a sibling. `r` previews Refine for the focused idea: title and note only, no new blocks. `b` previews Expand: sub-ideas come back as children. Accept the diff, then walk into one child and repeat. `space` does nothing here. Ideas have no status. Do not Execute. There is no Execute verb on a brainstorm.
+The document opens on a walk. Dump the first line (`O` in the terminal, Enter in the browser). Dump the next line onto that idea to nest it, or onto the empty project to add a sibling. `r` previews Refine for the focused idea: title and note only, no new blocks. `b` previews Expand: sub-ideas come back as children. Accept the diff, then walk into one child and repeat. `space` does nothing here. Ideas have no status. There is no Execute verb. Once the idea has a note, the next step is **Implement**: it switches the document to a plan and opens Execute on that block.
 
 When the map is the thing you want to look at, `v` (or Map in the browser). Relationships are context, not a schedule.
 
@@ -109,7 +109,7 @@ A plan already exists. One block is thin, or the nesting is wrong. You do not wa
 
 Accept, then `s`. Acceptance is unsaved until you save. Undo is still available before that.
 
-Execute is not refine. A leaf has to be planned (`space` once) and have acceptance criteria. Set its venue on the block page, or Enter on the venue row in the terminal: `here`, `subagent`, or `worktree`. Unset means here. `X` on a parent does not run the parent. It dispatches the ready leaves under it, in edge order, and lists everything else as not run. Execute ready leaves, from `a` or the project page, does that for the whole plan. The prompt names the venue. This plugin does not spawn the subagent or the worktree, and it does not mark the leaf done. You do, after you have looked at the result.
+Execute is not refine. On the block you clicked, a written leaf runs even while it is still todo. A parent does not run: `X` dispatches only the ready leaves under it, and a leaf in that sweep still has to be planned and have acceptance criteria. Set venue on the block page, or Enter on the venue row in the terminal: `here`, `subagent`, or `worktree`. Unset means here. Execute ready leaves, from `a` or the project page, is that sweep for the whole plan. The prompt names the venue. This plugin does not spawn the subagent or the worktree, and it does not mark the leaf done. You do, after you have looked at the result.
 
 ## Review and evidence
 

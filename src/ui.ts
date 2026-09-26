@@ -41,6 +41,7 @@ import {
 	composeRequest,
 	fieldLabel,
 	nextOpenBlock,
+	nextStep,
 	nextStatus,
 	outlineRows,
 	pageFields,
@@ -2756,17 +2757,18 @@ export class DiagramScreen implements Component {
 				lines.push(value(`${outgoing ? "→" : "←"} ${other?.title ?? "?"}${name}`));
 			}
 		}
-		const hint = [
+		const step = nextStep(this.#document, block);
+		const keys = [
 			...verbsFor(purpose).map(verb => `${verb.key} ${verb.label.toLowerCase()}`),
 			...(purpose === "brainstorm" ? [] : ["space status"]),
 			"n next open",
 		].join("   ");
-		// Keep the focused field on screen and the hint pinned to the bottom row.
-		const room = Math.max(1, height - 1);
+		const room = Math.max(1, height - 2);
 		const start = focusLine >= room ? focusLine - room + 2 : 0;
 		const visible = lines.slice(start, start + room);
 		while (visible.length < room) visible.push("");
-		visible.push(muted(hint));
+		visible.push(muted(`${step.label} — ${step.detail}`));
+		visible.push(muted(keys));
 		return visible.slice(0, height).map(line => truncateToWidth(line, width, Ellipsis.Unicode));
 	}
 
@@ -2811,6 +2813,7 @@ export class DiagramScreen implements Component {
 		});
 		lines.push("", theme.fg("muted", "next"), ...(next.length > 0 ? next : [theme.fg("muted", "  no relationships")]));
 		if (purpose === "explore") lines.push("", theme.fg("muted", "enter opens the cited source   g grounded   space marks explored"));
+		lines.push("", theme.fg("accent", nextStep(this.#document, block).detail));
 		return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode)).slice(0, height);
 	}
 

@@ -134,6 +134,56 @@ export function progressLabel(document: DiagramDocument): string {
 	return `${planned}/${blocks.length} planned · ${done} done`;
 }
 
+export interface NextStep {
+	/** The one control to put first. */
+	label: string;
+	/** One sentence for the idle hint. */
+	detail: string;
+	verb?: VerbId;
+	act: "verb" | "status" | "implement" | "enter" | "add";
+}
+
+/** What to do with the focused block. Both surfaces show this instead of a key list. */
+export function nextStep(document: DiagramDocument, block: Block | undefined): NextStep {
+	const purpose = document.purpose;
+	if (!block) {
+		return document.root.blocks.length === 0
+			? { label: "Add a block", detail: "Start with one block. The next action is always on the focused block.", act: "add" }
+			: { label: "Select a block", detail: "Select a block. The next action is on that block, not on the project.", act: "add" };
+	}
+	const children = block.children?.blocks ?? [];
+	const written = block.description.trim().length > 0 || block.acceptanceCriteria.length > 0;
+	if (purpose === "brainstorm") {
+		return written
+			? { label: "Implement", detail: "The idea is written. Implement turns this into a plan and opens Execute on this block.", act: "implement" }
+			: { label: "Expand", detail: "This is still a title. Expand it, or dump a line onto it.", verb: "breakdown", act: "verb" };
+	}
+	if (purpose === "explore") {
+		if (block.sources.length === 0) {
+			return { label: "Investigate", detail: "No citation yet. Investigate fills this block from code you can open.", verb: "refine", act: "verb" };
+		}
+		if (block.status === "open") return { label: "Mark explored", detail: "Cited. Marking it explored leaves the walk for the full page.", act: "status" };
+		return children.length === 0
+			? { label: "Map inside", detail: "Explored, and nothing is nested yet. Map inside only if this block still hides structure.", verb: "breakdown", act: "verb" }
+			: { label: "Open inside", detail: "The internals are mapped. Open them.", act: "enter" };
+	}
+	if (children.length > 0) {
+		const open = children.find(child => child.status !== "done");
+		return open
+			? { label: "Open inside", detail: `"${open.title}" is not done. Execute runs a leaf, not this parent.`, act: "enter" }
+			: { label: "Execute", detail: "The children are done or ready. Execute dispatches the ready leaves.", verb: "execute", act: "verb" };
+	}
+	if (!written) return { label: "Refine", detail: "No description yet. Refine this block before executing it.", verb: "refine", act: "verb" };
+	if (block.status === "done") return { label: "Next open", detail: "This leaf is done. n selects the next open block.", act: "add" };
+	return {
+		label: "Execute",
+		detail: block.status === "open" ? "Written. Execute runs this leaf. Space marks it planned if you want that recorded first." : "Planned. Execute runs this leaf.",
+		verb: "execute",
+		act: "verb",
+	};
+}
+
+
 export type PageField =
 	| "title"
 	| "description"
@@ -367,9 +417,16 @@ export function planDispatch(document: DiagramDocument, scope: Scope): DispatchP
 			held.push({ id: block.id, title, kind: "done", reason: "already done" });
 			continue;
 		}
-		if (block.status !== "settled" || block.acceptanceCriteria.length === 0) {
-			const kind = block.status === "open" && block.description.trim().length === 0 && block.acceptanceCriteria.length === 0 ? "brainstorm" : "refine";
-			const reason = block.status === "settled" ? "settled, but it has no acceptance criteria" : kind === "brainstorm" ? "still an idea — refine or break it down first" : "still open — settle it before executing";
+		const named = scope.kind === "block" && scope.id === block.id;
+		const authored = block.description.trim().length > 0 || block.acceptanceCriteria.length > 0;
+		const planned = block.status === "settled" && block.acceptanceCriteria.length > 0;
+		if (named ? !authored : !planned) {
+			const kind = !authored ? "brainstorm" : "refine";
+			const reason = !authored
+				? "still an idea — refine or break it down first"
+				: block.status === "settled"
+					? "settled, but it has no acceptance criteria"
+					: "still open — settle it before executing";
 			held.push({ id: block.id, title, kind, reason });
 			continue;
 		}
