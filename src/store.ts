@@ -112,7 +112,7 @@ export type OpenResult =
 	| { ok: false; kind: "missing" | "malformed"; path: string; errors: string[] };
 
 export type SaveResult =
-	| { ok: true; path: string; digest: string }
+	| { ok: true; path: string; digest: string; replaced?: boolean }
 	| { ok: false; kind: "conflict" | "error" | "no-document" | "no-path"; path?: string; errors: string[] };
 
 export interface StoreSnapshot {
@@ -302,18 +302,20 @@ export class DocumentStore {
 		const text = serializeDocument(document);
 		const digest = digestOfText(text);
 
-		// Refuse to overwrite a file that changed since it was loaded.
+		// Refuse to overwrite a file that changed since *we* last read or wrote it.
+		// With no baseline there is nothing of ours to protect: the path was
+		// chosen explicitly (Save As, or the tool's derived output path), so
+		// writing it is the requested action. Treating that case as a conflict
+		// made a re-run of a command that targets its own file impossible.
 		const existing = await readFile(path, "utf8").catch(() => undefined);
-		if (existing !== undefined) {
-			const existingDigest = digestOfText(existing);
-			if (this.#diskDigest === undefined || existingDigest !== this.#diskDigest) {
-				return {
-					ok: false,
-					kind: "conflict",
-					path,
-					errors: [`${path} changed on disk since it was loaded; reload or save elsewhere`],
-				};
-			}
+		const replaced = existing !== undefined;
+		if (replaced && this.#diskDigest !== undefined && digestOfText(existing) !== this.#diskDigest) {
+			return {
+				ok: false,
+				kind: "conflict",
+				path,
+				errors: [`${path} changed on disk since it was loaded; reload or save elsewhere`],
+			};
 		}
 
 		const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
@@ -328,7 +330,7 @@ export class DocumentStore {
 		this.#path = path;
 		this.#diskDigest = digest;
 		this.#dirty = false;
-		return { ok: true, path, digest };
+		return { ok: true, path, digest, replaced };
 	}
 
 	/** Digest of the project file as it is on disk right now, or undefined when there is none. */

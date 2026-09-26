@@ -97,6 +97,31 @@ describe("save and reload", () => {
 		expect(entries).toEqual(["architecture.json"]);
 	});
 
+	test("a fresh document may be written over an existing file, and says so", async () => {
+		const dir = await workspace();
+		const path = join(dir, "discovery", "fixture.json");
+		const first = new DocumentStore(type);
+		first.newDocument({ title: "Discovery: fixture" }, path);
+		expect(await first.save()).toMatchObject({ ok: true, replaced: false });
+
+		// Same derived output path, second run: a new document with no baseline.
+		const second = new DocumentStore(type);
+		second.newDocument({ title: "Discovery: fixture" }, path);
+		const result = await second.save();
+		expect(result).toMatchObject({ ok: true, replaced: true });
+		const savedDigest = result.ok ? result.digest : undefined;
+		expect(savedDigest).toBe(second.diskDigest);
+
+		// And a baseline, once set, still protects the file.
+		const reopened = new DocumentStore(type);
+		expect((await reopened.open(path)).ok).toBe(true);
+		await writeFile(path, "{}\n", "utf8");
+		const refused = await reopened.save();
+		expect(refused.ok).toBe(false);
+		if (refused.ok) throw new Error("unreachable");
+		expect(refused.kind).toBe("conflict");
+	});
+
 	test("refuses to overwrite a file changed on disk", async () => {
 		const dir = await workspace();
 		const path = defaultDocumentPath(dir);

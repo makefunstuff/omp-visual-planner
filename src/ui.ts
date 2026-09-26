@@ -1701,14 +1701,14 @@ export class DiagramScreen implements Component {
 			this.#openTextPrompt("save as", this.#options.documentPathHint, value => {
 				if (value.length === 0) return;
 				void this.#options.store.saveAs(value).then(result => {
-					this.#message = result.ok ? `saved ${displayPath(result.path, this.#options.cwd)}` : result.errors.join("; ");
+					this.#message = result.ok ? savedMessage(result, this.#options.cwd) : result.errors.join("; ");
 					this.#options.tui.requestRender();
 				});
 			});
 			return;
 		}
 		void this.#options.store.save().then(result => {
-			this.#message = result.ok ? `saved ${displayPath(result.path, this.#options.cwd)}` : result.errors.join("; ");
+			this.#message = result.ok ? savedMessage(result, this.#options.cwd) : result.errors.join("; ");
 			this.#options.tui.requestRender();
 		});
 	}
@@ -2206,6 +2206,12 @@ export class DiagramScreen implements Component {
 		lines.push(theme.fg("muted", "Enter accept   r reject   Esc later   accepted edits stay unsaved until you press s"));
 		return lines.map(line => truncateToWidth(line, width));
 	}
+}
+
+/** Save confirmation, saying when an existing file was replaced. */
+export function savedMessage(result: { path: string; replaced?: boolean }, cwd: string): string {
+	const target = displayPath(result.path, cwd);
+	return result.replaced === true ? `saved ${target} (replaced the existing file)` : `saved ${target}`;
 }
 
 function firstLine(text: string): string {
