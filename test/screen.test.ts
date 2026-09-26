@@ -371,6 +371,64 @@ describe("interaction", () => {
 		expect(plain(h.screen.render(120)).join("\n")).toContain("blocks 4");
 	});
 
+	test("opening the planner with a staged proposal lands on the review", async () => {
+		const document = fixture();
+		const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-review-"));
+		directories.push(directory);
+		const path = join(directory, "architecture.json");
+		await writeFile(path, serializeDocument(document), "utf8");
+		const store = new DocumentStore(type);
+		await store.open(path);
+		const registry = new ActionRegistry("session:leaf");
+		registry.begin({
+			requestId: "req-1",
+			kind: "enhance",
+			intent: "enhance",
+			scope: { kind: "block", id: "api" },
+			label: 'block "API"',
+			branchKey: "session:leaf",
+			documentId: document.id,
+			baseRevision: 0,
+			baseDigest: undefined,
+			prompt: "payload",
+		});
+		const staged = registry.stage(
+			"req-1",
+			"refined the API block",
+			createBlock({ id: "api", title: "API v2", description: "HTTP surface" }),
+			{ branchKey: "session:leaf", documentId: document.id, diskDigest: undefined, arktype: type },
+		);
+		expect(staged.ok).toBe(true);
+
+		const screen = new DiagramScreen(
+			{
+				tui: { terminal: { columns: 120, rows: 24 }, requestRender: () => {} } as never,
+				theme,
+				ui: uiStub,
+				store,
+				registry,
+				arktype: type,
+				cwd: directory,
+				branchKey: "session:leaf",
+				documentPathHint: path,
+				hasUI: true,
+				isIdle: () => true,
+				hasPendingMessages: () => false,
+			},
+			() => {},
+		);
+		const lines = plain(screen.render(120));
+		expect(lines.join("\n")).toContain("review proposal");
+		expect(lines.join("\n")).toContain("refined the API block");
+		expect(lines.join("\n")).toContain("Enter accept");
+		// Escape leaves the review and returns to the diagram.
+		screen.handleInput("\x1b");
+		const after = plain(screen.render(120));
+		expect(after.join("\n")).not.toContain("review proposal");
+		expect(after.join("\n")).toContain("API");
+		for (const line of after) expect(visibleWidth(line)).toBe(120);
+	});
+
 	test("a modal is drawn over the diagram, not instead of it", async () => {
 		const h = await harness();
 		h.screen.render(120);

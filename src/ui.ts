@@ -690,8 +690,15 @@ export class DiagramScreen implements Component {
 				: `${options.store.importNotice}; press s to choose a new path`;
 		const staged = this.#stagedEntry();
 		if (staged) this.#message = `proposal staged for ${staged.label}; press R to review`;
-		if (start?.action === "draft") this.#beginDraft();
-		if (start?.action === "discover") this.#beginDiscover(start.target ?? ".");
+		if (start?.action === "draft") {
+			this.#beginDraft();
+		} else if (start?.action === "discover") {
+			this.#beginDiscover(start.target ?? ".");
+		} else if (staged && staged.documentId === document.id) {
+			// Opening the planner is how a human comes back to a staged proposal,
+			// so show it rather than making them find the R binding.
+			this.#openReview();
+		}
 	}
 
 	/** Diagram ids from the root to the diagram on screen. */

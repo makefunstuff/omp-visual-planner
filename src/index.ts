@@ -398,6 +398,13 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 				};
 			}
 			persist(pi, session);
+			// The overlay closes when a request is submitted, so the human is
+			// usually back in the transcript when this arrives: say so here
+			// instead of waiting to be discovered in the planner.
+			ctx.ui.notify(
+				`visual planner: proposal staged for ${outcome.entry.label} — run /diagram to review it`,
+				"info",
+			);
 			return {
 				content: [
 					{
