@@ -91,15 +91,15 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
 .node { position: absolute; background: var(--bg); border: 1px solid var(--line-strong); user-select: none; }
 .node.selected { border-color: var(--accent); outline: 1px solid var(--accent); z-index: 3; }
 .node.target { border-color: var(--accent); }
-.node .head { display: flex; align-items: baseline; gap: 6px; padding: 5px 10px 2px; cursor: grab; }
+.node .head { display: flex; align-items: flex-start; gap: 6px; padding: 5px 10px 2px; cursor: grab; }
 .node .glyph { color: var(--accent); cursor: pointer; flex: none; }
-.node .title { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.node .title { font-weight: 700; flex: 1; min-width: 0; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.25; white-space: normal; }
 .node .title-edit { font-weight: 700; padding: 0 4px; }
 .node .badge { flex: none; color: var(--faint); } .node .badge.unknown { color: var(--warn); } .node .badge.observed { color: var(--ok); }
 .node .mark { flex: none; color: var(--accent); }
 .node .inside { flex: none; color: var(--muted); cursor: pointer; }
 .node .inside:hover { color: var(--accent); }
-.node .desc { margin: 0 10px; color: var(--body); font-size: 12px; line-height: 18px; max-height: 36px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.node .desc { margin: 0 10px; color: var(--body); font-size: 12px; line-height: 18px; max-height: 18px; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 .node .desc.none { color: var(--faint); }
 .node .port { position: absolute; top: 11px; width: 9px; height: 9px; background: var(--bg); border: 1px solid var(--line-strong); cursor: crosshair; }
 .node .port.in { left: -5px; } .node .port.out { right: -5px; }
@@ -997,13 +997,60 @@ function renderCanvas() {
   }
 }
 
-function portPoint(node, side) {
-  const x = parseFloat(node.style.left) + (side === "out" ? node.offsetWidth : 0);
-  return { x, y: parseFloat(node.style.top) + 15 };
+function nodeBox(node) {
+  return { x: parseFloat(node.style.left) || 0, y: parseFloat(node.style.top) || 0, w: node.offsetWidth || 120, h: node.offsetHeight || 80 };
 }
-function curve(a, b) {
-  const dx = Math.max(40, Math.abs(b.x - a.x) / 2);
-  return "M" + a.x + "," + a.y + " C" + (a.x + dx) + "," + a.y + " " + (b.x - dx) + "," + b.y + " " + b.x + "," + b.y;
+const OPPOSITE_SIDE = { east: "west", west: "east", north: "south", south: "north" };
+function facingSides(from, to) {
+  const dx = (to.x + to.w / 2) - (from.x + from.w / 2);
+  const dy = (to.y + to.h / 2) - (from.y + from.h / 2);
+  return Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? ["east", "west"] : ["west", "east"]) : (dy >= 0 ? ["south", "north"] : ["north", "south"]);
+}
+function edgeSides(edge, from, to) {
+  const out = edge.fromPort && edge.fromPort !== "auto" ? edge.fromPort : null;
+  const into = edge.toPort && edge.toPort !== "auto" ? edge.toPort : null;
+  if (out && into) return [out, into];
+  if (out) return [out, OPPOSITE_SIDE[out]];
+  if (into) return [OPPOSITE_SIDE[into], into];
+  return facingSides(from, to);
+}
+function sidePoint(box, side, slot, count) {
+  const t = (slot + 1) / (count + 1);
+  const x0 = box.x + 12, x1 = box.x + box.w - 12, y0 = box.y + 12, y1 = box.y + box.h - 12;
+  if (side === "east") return { x: box.x + box.w, y: y0 + (y1 - y0) * t };
+  if (side === "west") return { x: box.x, y: y0 + (y1 - y0) * t };
+  if (side === "south") return { x: x0 + (x1 - x0) * t, y: box.y + box.h };
+  return { x: x0 + (x1 - x0) * t, y: box.y };
+}
+function edgePoints(from, to, out, into, outSlot, outCount, inSlot, inCount) {
+  const start = sidePoint(from, out, outSlot, outCount);
+  const end = sidePoint(to, into, inSlot, inCount);
+  const stub = 18;
+  const step = { east: [stub, 0], west: [-stub, 0], south: [0, stub], north: [0, -stub] };
+  const leave = { x: start.x + step[out][0], y: start.y + step[out][1] };
+  const arrive = { x: end.x + step[into][0], y: end.y + step[into][1] };
+  const elbow = out === "east" || out === "west" ? { x: arrive.x, y: leave.y } : { x: leave.x, y: arrive.y };
+  const points = [start, leave];
+  if (elbow.x !== leave.x || elbow.y !== leave.y) points.push(elbow);
+  if (arrive.x !== points[points.length - 1].x || arrive.y !== points[points.length - 1].y) points.push(arrive);
+  points.push(end);
+  return points;
+}
+function edgePath(points) {
+  return points.map((point, index) => (index ? "L" : "M") + point.x + "," + point.y).join(" ");
+}
+function labelPoint(points) {
+  let best = null, length = 48;
+  for (let index = points.length - 1; index >= 1; index -= 1) {
+    const span = Math.hypot(points[index].x - points[index - 1].x, points[index].y - points[index - 1].y);
+    if (span >= length) {
+      best = { x: (points[index].x + points[index - 1].x) / 2, y: (points[index].y + points[index - 1].y) / 2 - 8 };
+      break;
+    }
+  }
+  if (best) return best;
+  const last = points[points.length - 1], prev = points[points.length - 2];
+  return { x: (last.x + prev.x) / 2, y: (last.y + prev.y) / 2 - 8 };
 }
 function drawEdges(diagram, nodes) {
   const edges = $("edges");
@@ -1015,13 +1062,29 @@ function drawEdges(diagram, nodes) {
   }
   edges.append(defs);
   const rects = [...nodes.values()].map(node => ({ x: parseFloat(node.style.left), y: parseFloat(node.style.top), w: node.offsetWidth, h: node.offsetHeight }));
-  for (const edge of diagram.edges) {
-    const from = nodes.get(edge.from), to = nodes.get(edge.to);
-    if (!from || !to) continue;
-    const a = portPoint(from, "out"), b = portPoint(to, "in");
+  const boxes = new Map([...nodes].map(([id, node]) => [id, nodeBox(node)]));
+  const routed = diagram.edges.flatMap(edge => {
+    const from = boxes.get(edge.from), to = boxes.get(edge.to);
+    if (!from || !to) return [];
+    const [out, into] = edgeSides(edge, from, to);
+    return [{ edge, from, to, out, into }];
+  });
+  const slots = new Map();
+  for (const route of routed) {
+    for (const [id, side] of [[route.edge.from, route.out], [route.edge.to, route.into]]) {
+      const key = id + ":" + side;
+      if (!slots.has(key)) slots.set(key, []);
+      slots.get(key).push(route.edge.id);
+    }
+  }
+  const labels = [];
+  for (const route of routed) {
+    const edge = route.edge;
+    const outSlots = slots.get(edge.from + ":" + route.out), inSlots = slots.get(edge.to + ":" + route.into);
+    const points = edgePoints(route.from, route.to, route.out, route.into, outSlots.indexOf(edge.id), outSlots.length, inSlots.indexOf(edge.id), inSlots.length);
+    const d = edgePath(points);
     const on = edge.id === selectedEdge;
     const group = svg("g", { class: "edge" + (on ? " selected" : "") });
-    const d = curve(a, b);
     const line = svg("path", { class: "edge-line", d });
     const marker = "url(#" + (on ? "arrow-on" : "arrow") + ")";
     if (edge.direction !== "none") line.setAttribute("marker-end", marker);
@@ -1030,7 +1093,7 @@ function drawEdges(diagram, nodes) {
     hit.addEventListener("pointerdown", event => event.stopPropagation());
     hit.addEventListener("click", event => { event.stopPropagation(); selectedEdge = edge.id; renderCanvas(); applyView(); });
     group.append(line, hit);
-    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    const mid = labelPoint(points);
     if (edge.label && !on) {
       const text = svg("text", { class: "edge-label", x: mid.x, y: mid.y + 4, "text-anchor": "middle" });
       text.textContent = edge.label;
@@ -1040,8 +1103,10 @@ function drawEdges(diagram, nodes) {
         try {
           const box = text.getBBox();
           // Like the terminal: a label goes in free space or not at all; the wire keeps it as a tooltip.
-          const covered = rects.some(r => box.x < r.x + r.w && r.x < box.x + box.width && box.y < r.y + r.h && r.y < box.y + box.height);
-          if (covered) { text.remove(); bg.remove(); const tip = svg("title"); tip.textContent = edge.label; hit.append(tip); return; }
+          const hitsCard = rects.some(r => box.x < r.x + r.w && r.x < box.x + box.width && box.y < r.y + r.h && r.y < box.y + box.height);
+          const hitsLabel = labels.some(r => box.x < r.x + r.width && r.x < box.x + box.width && box.y < r.y + r.height && r.y < box.y + box.height);
+          if (hitsCard || hitsLabel) { text.remove(); bg.remove(); const tip = svg("title"); tip.textContent = edge.label; hit.append(tip); return; }
+          labels.push(box);
           bg.setAttribute("x", box.x - 4); bg.setAttribute("y", box.y - 1); bg.setAttribute("width", box.width + 8); bg.setAttribute("height", box.height + 2);
         } catch {}
       });
@@ -1156,8 +1221,8 @@ function freeArea() {
   const files = $("files"), viewerPane = $("viewer");
   const left = files.hidden ? 0 : files.getBoundingClientRect().right;
   const right = viewerPane.hidden ? window.innerWidth : viewerPane.getBoundingClientRect().left;
-  const top = 48;
-  return { left, top, width: Math.max(200, right - left), height: window.innerHeight - top };
+  const top = 56, bottom = 32;
+  return { left, top, width: Math.max(200, right - left), height: Math.max(160, window.innerHeight - top - bottom) };
 }
 function fit() {
   const diagram = currentDiagram();
@@ -1165,9 +1230,9 @@ function fit() {
   const rects = diagram.blocks.map(rectOf);
   const minX = Math.min(...rects.map(r => r.x)), minY = Math.min(...rects.map(r => r.y));
   const maxX = Math.max(...rects.map(r => r.x + r.w)), maxY = Math.max(...rects.map(r => r.y + r.h));
-  const v = view();
-  const area = freeArea();
-  v.k = Math.max(0.3, Math.min(1.5, Math.min((area.width - 80) / (maxX - minX), (area.height - 80) / (maxY - minY))));
+  const area = freeArea(), v = view();
+  const spanX = Math.max(1, maxX - minX), spanY = Math.max(1, maxY - minY);
+  v.k = Math.min(1.25, Math.max(1, area.width - 48) / spanX, Math.max(1, area.height - 48) / spanY);
   v.x = area.left + (area.width - (maxX - minX) * v.k) / 2 - minX * v.k;
   v.y = area.top + (area.height - (maxY - minY) * v.k) / 2 - minY * v.k;
   applyView();

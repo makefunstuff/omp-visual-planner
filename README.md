@@ -2,11 +2,11 @@
 
 An OMP extension for planning systems and mapping codebases as nested blocks. Work on one block at a time in a terminal or browser; use the map when relationships or layout matter. A model can stage a proposal, but only a person can accept it.
 
-![Focused block page in the browser](docs/web-workspace.png)
+![Block page](docs/web-block.png)
 
-[Terminal demo (MP4)](docs/demo.mp4) · [GIF](docs/demo.gif) · [asciicast](docs/demo.cast.gz)
+![Coordinate map](docs/web-map.png)
 
-The demo runs in real OMP against a temporary copy of this extension's source. It opens a cited file, scrolls beyond the citation, previews a project prune, and switches to the map. It does **not** call a model or accept a proposal.
+Both images are the browser view of one plan. The block page edits intent, acceptance, and a cited source range; **Inspect syntax** names the Tree-sitter node for that range. **Map** shows the same blocks as coordinates, with each wire leaving the facing side. No model is called.
 
 ## Install
 
@@ -76,11 +76,11 @@ bun run check
 bun test
 ```
 
-To reproduce the demo media, use Python with Pillow plus `omp`, Bun, and FFmpeg:
+The optional terminal recording is [docs/demo.mp4](docs/demo.mp4) ([GIF](docs/demo.gif), [asciicast](docs/demo.cast.gz)). Reproduce it with Python, Pillow, `omp`, Bun, and FFmpeg:
 
 ```sh
 python3 scripts/demo/scenario_full.py /tmp/planner-demo.cast
 python3 scripts/demo/render.py /tmp/planner-demo.cast /tmp/planner-demo-frames
 ```
 
-The recorder creates and removes its temporary workspace. `docs/demo.cast.gz` is the compressed, replayable recording; `docs/demo.mp4` and `docs/demo.gif` are rendered from it.
+The recorder creates and removes its own workspace. It previews a request and does not submit one.
