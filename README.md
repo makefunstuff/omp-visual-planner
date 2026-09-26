@@ -1,6 +1,12 @@
 # omp-visual-planner
 
-An OMP extension for planning systems and mapping codebases as nested blocks. Work on one block at a time in a terminal or browser; use the map when relationships or layout matter. A model can stage a proposal, but only a person can accept it.
+An OMP extension for planning systems and mapping codebases as nested blocks. It is built for OMP, not as a plugin for other harnesses. Work on one block at a time in a terminal or browser; use the map when relationships or layout matter. A model can stage a proposal, but only a person can accept it.
+
+The same decomposition, without the map, is one skill: [`skills/decompose`](skills/decompose/SKILL.md). One markdown file, nested bullets, the way Logseq nests blocks. OMP loads it with this plugin. For pi, link the directory:
+
+```sh
+ln -s /path/to/omp-visual-planner/skills/decompose ~/.pi/agent/skills/decompose
+```
 
 [![Discovery of omp-visual-planner](docs/visual-planner-demo.png)](docs/visual-planner-demo.mp4)
 
