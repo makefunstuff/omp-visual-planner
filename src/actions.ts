@@ -232,6 +232,21 @@ export function retentionErrors(
 		`this ${request.intent} would drop settled work: ${names}${more} — a ${request.intent} keeps every block the human settled, under its id`,
 	];
 }
+/**
+ * The branch token to restore when the same session is opened again.
+ *
+ * A resume gets a new leaf id, but that is not a branch move. A pending or
+ * staged request must keep the token it was created with, or the generated
+ * proposal is marked stale and the reopened planner looks empty.
+ */
+export function resumeBranchToken(journal: readonly Pick<JournalEntry, "state" | "branchKey">[], liveToken: string): string {
+	for (let index = journal.length - 1; index >= 0; index -= 1) {
+		const entry = journal[index];
+		if (!entry) continue;
+		if ((entry.state === "pending" || entry.state === "staged") && entry.branchKey.length > 0) return entry.branchKey;
+	}
+	return liveToken;
+}
 
 /**
  * One journal per session. `branchKey` identifies the branch/tree position a

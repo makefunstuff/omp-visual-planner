@@ -2,11 +2,9 @@
 
 An OMP extension for planning systems and mapping codebases as nested blocks. Work on one block at a time in a terminal or browser; use the map when relationships or layout matter. A model can stage a proposal, but only a person can accept it.
 
-![Block page](docs/web-block.png)
+[![Discovery of omp-visual-planner](docs/visual-planner-demo.png)](docs/visual-planner-demo.mp4)
 
-![Coordinate map](docs/web-map.png)
-
-Both images are the browser view of one plan. The block page edits intent, acceptance, and a cited source range; **Inspect syntax** names the Tree-sitter node for that range. **Map** shows the same blocks as coordinates, with each wire leaving the facing side. No model is called.
+[36s demo](docs/visual-planner-demo.mp4). A live browser session: the discovery map of this repo, a cited block opened from the file tree, and the investigate preview before submit. The still above is the poster; the link is the recording.
 
 ## Install
 
@@ -50,7 +48,7 @@ In OMP, run `/diagram open architecture.json`. Move through the outline with `j`
 
 The terminal opens on a nested outline and the selected block's page. `space` advances its status; `n` selects the next open block. `r`, `b`, and `t` preview the purpose's refine/investigate, breakdown/map-inside, and replan actions; `R` reviews a staged proposal. `v` switches to the coordinate map, `E` edits a block as Markdown in `$VISUAL`/`$EDITOR`, and `s` saves. Press `?` for the full key list.
 
-The browser opens on the same block page. Edit its title, description, expected output, criteria, status, and source citations directly. The project page offers replan and prune; **Map** opens spatial layout and relationship wiring. **Files** shows workspace files and their cited ranges. Both views share the session.
+Brainstorm, and an explore block you have not settled, open on a **walk**: the focused block, what is inside it, and the blocks it connects to. Dump a line onto the focused idea (Enter in the browser, `O` in the terminal). In explore, a citation is the subtitle, uncited blocks are dim, and **grounded** (`g`) hides them. Mark a block explored to get the full page. Plan documents stay on that page. **Map** is coordinates. Both views share the session.
 
 | Purpose | Block actions | Human status |
 |---|---|---|

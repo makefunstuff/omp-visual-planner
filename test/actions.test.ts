@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { BeginInput, BeginOutcome, StageContext } from "../src/actions.ts";
-import { ActionRegistry, validateReplacement } from "../src/actions.ts";
+import { ActionRegistry, resumeBranchToken, validateReplacement } from "../src/actions.ts";
 import { type DiagramDocument, type Scope, createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
 
 const BRANCH = "session-1:leaf-a";
@@ -105,6 +105,18 @@ describe("request lifecycle", () => {
 		third.adoptBranch("another", journal);
 		expect(third.pending()).toBeUndefined();
 		expect(third.entryFor("req-1")!.state).toBe("stale");
+	});
+
+	test("reopening a session keeps the staged request instead of staling it on the new leaf", () => {
+		const registry = new ActionRegistry(BRANCH);
+		beginFor(registry);
+		const journal = registry.serialize();
+		const token = resumeBranchToken(journal, "session-1:resumed-leaf");
+		expect(token).toBe(BRANCH);
+		const resumed = new ActionRegistry("fresh");
+		resumed.adoptBranch(token, journal);
+		expect(resumed.pending()?.requestId).toBe("req-1");
+		expect(resumed.pending()?.state).toBe("pending");
 	});
 });
 

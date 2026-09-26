@@ -7,7 +7,7 @@
  */
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
 	type ArkTypeNamespace,
 	type Block,
@@ -42,6 +42,12 @@ export function slugify(input: string): string {
 
 export function defaultDocumentPath(cwd: string): string {
 	return join(cwd, PROJECT_DIR, DEFAULT_DOCUMENT_NAME);
+}
+
+/** A persisted path is relative to the session's project, not the process cwd. */
+export function resolveSessionPath(path: string | undefined, cwd: string): string {
+	const chosen = path && path.length > 0 ? path : defaultDocumentPath(cwd);
+	return isAbsolute(chosen) ? chosen : resolve(cwd, chosen);
 }
 
 /** Discovery drafts land beside the project file, one document per target directory. */

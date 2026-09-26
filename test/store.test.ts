@@ -11,6 +11,7 @@ import {
 	defaultDocumentPath,
 	digestOfText,
 	displayPath,
+	resolveSessionPath,
 	serializeDocument,
 	slugify,
 } from "../src/store.ts";
@@ -52,6 +53,16 @@ describe("paths and slugs", () => {
 		expect(defaultDocumentPath("/work/app")).toBe("/work/app/.omp-visual-planner/architecture.json");
 		expect(defaultDiscoveryPath("/work/app", ".")).toBe("/work/app/.omp-visual-planner/discovery/app.json");
 		expect(defaultDiscoveryPath("/work/app", "/srv/thing/")).toBe("/work/app/.omp-visual-planner/discovery/thing.json");
+	});
+
+	test("a saved relative path reopens against the session project, not another cwd", () => {
+		expect(resolveSessionPath(".omp-visual-planner/discovery/repo.json", "/work/repo")).toBe(
+			"/work/repo/.omp-visual-planner/discovery/repo.json",
+		);
+		expect(resolveSessionPath("/work/repo/.omp-visual-planner/architecture.json", "/elsewhere")).toBe(
+			"/work/repo/.omp-visual-planner/architecture.json",
+		);
+		expect(resolveSessionPath(undefined, "/work/repo")).toBe("/work/repo/.omp-visual-planner/architecture.json");
 	});
 
 	test("displayPath prefers a relative path inside the workspace", () => {

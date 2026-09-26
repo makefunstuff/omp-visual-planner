@@ -87,6 +87,17 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
   .block-page { padding: 18px 20px 80px; }
   .block-page .fields { grid-template-columns: 1fr; }
 }
+.workspace.walk { grid-template-columns: 1fr; }
+.workspace.walk .rail { display: none; }
+.walk { max-width: 720px; margin: 0 auto; }
+.walk h1 { margin-bottom: 6px; }
+.walk .note { color: var(--body); margin: 8px 0 18px; }
+.walk .cite { color: var(--accent); margin: 0 0 18px; }
+.walk.dim, .move.dim { color: var(--faint); }
+.walk .moves { margin-top: 18px; }
+.move { display: flex; gap: 10px; width: 100%; border: 0; background: transparent; padding: 4px 0; text-align: left; }
+.move .where { color: var(--faint); flex: none; width: 7ch; }
+.dump { margin-top: 28px; }
 
 .node { position: absolute; background: var(--bg); border: 1px solid var(--line-strong); user-select: none; }
 .node.selected { border-color: var(--accent); outline: 1px solid var(--accent); z-index: 3; }
@@ -284,7 +295,8 @@ body.busy, body.busy * { cursor: progress; }
 // terminal does not overlap here. A selected node grows over its neighbours.
 const SX = 11, SY = 26, CARD_ROWS = 4, GUTTER = 8;
 const PURPOSES = ["brainstorm", "plan", "explore"];
-const HINT = "choose a block to work on · edit its intent and outcome · replan or prune through review · Map opens coordinates";
+const HINT = "walk the focused block · dump a line onto it · grounded hides uncited blocks · Map opens coordinates";
+let grounded = false;
 function cardCols(title) { return Math.max(12, Math.min(32, [...title].length + 2)); }
 
 let state = null, message = "", messageIsError = false, opCount = 0;
@@ -412,17 +424,124 @@ function render() {
   renderViewer();
   renderStart();
   $("workspace").hidden = surface !== "page";
-  $("viewport").hidden = surface !== "map";
+  $("workspace").classList.toggle("walk", walking());
   $("mapToggle").textContent = surface === "map" ? "Block page" : "Map";
   $("zoom").hidden = surface !== "map";
   $("tidy").hidden = $("fit").hidden = surface !== "map";
   if (surface === "page") {
     const active = document.activeElement;
-    if (!($("workspace").contains(active) && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName))) renderWorkspace();
+    if (walking()) renderWalk();
+    else if (!($("workspace").contains(active) && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName))) renderWorkspace();
   } else if (!editing() && !gesture) renderCanvas();
   if (surface === "map") applyView();
 }
-
+/** Brainstorm is always a walk. Explore walks until a block is settled; plan stays a page. */
+function walking() {
+  const doc = state && state.document;
+  if (!doc || surface === "map") return false;
+  if (doc.purpose === "brainstorm") return true;
+  if (doc.purpose !== "explore") return false;
+  const block = selectedBlock();
+  return !block || block.status === "open";
+}
+function citationOf(block) {
+  const source = block.sources && block.sources[0];
+  if (!source) return "";
+  const end = source.endLine && source.endLine !== source.startLine ? "-" + source.endLine : "";
+  const range = source.startLine ? ":" + source.startLine + end : "";
+  return source.path + range + (block.sources.length > 1 ? " +" + (block.sources.length - 1) : "");
+}
+function shown(block) { return !grounded || block.evidence === "observed"; }
+function parentBlock(id) {
+  let parent = null;
+  const walk = (diagram, owner) => {
+    for (const block of diagram.blocks) {
+      if (block.id === id) parent = owner;
+      if (block.children) walk(block.children, block);
+    }
+  };
+  if (state.document) walk(state.document.root, null);
+  return parent;
+}
+function owningDiagram(id) {
+  let found = null;
+  const walk = diagram => {
+    for (const block of diagram.blocks) {
+      if (block.id === id) found = diagram;
+      else if (block.children) walk(block.children);
+    }
+  };
+  if (state.document) walk(state.document.root);
+  return found;
+}
+function walkMoves(block) {
+  const inside = (block ? block.children?.blocks ?? [] : state.document.root.blocks).filter(shown);
+  const next = [];
+  const diagram = block ? owningDiagram(block.id) : null;
+  if (block && diagram) {
+    for (const edge of diagram.edges) {
+      const otherId = edge.from === block.id ? edge.to : edge.to === block.id ? edge.from : null;
+      if (!otherId) continue;
+      const other = diagram.blocks.find(candidate => candidate.id === otherId);
+      if (other && shown(other)) next.push({ block: other, label: edge.label, inbound: edge.to === block.id });
+    }
+  }
+  return { inside, next };
+}
+function moveButton(block, where, label) {
+  const cite = citationOf(block);
+  return el("button", { class: "move" + (block.evidence === "observed" || state.document.purpose !== "explore" ? "" : " dim"), onclick: () => op({ op: "focus", id: block.id }) },
+    el("span", { class: "where", text: where }),
+    el("span", { text: block.title || "(untitled)" }),
+    label ? el("span", { class: "subtle", text: label }) : null,
+    cite ? el("span", { class: "cite", text: cite }) : null);
+}
+function renderWalk() {
+  const doc = state.document, page = $("blockPage");
+  const active = document.activeElement;
+  if (active && page.contains(active) && (active.tagName === "INPUT" || active.tagName === "TEXTAREA") && !(active.id === "dump" && active.value === "")) return;
+  $("rail").replaceChildren();
+  page.replaceChildren();
+  const block = selectedBlock();
+  const card = el("div", { class: "walk" + (block && doc.purpose === "explore" && block.evidence !== "observed" ? " dim" : "") });
+  const bar = el("div", { class: "actions" });
+  if (doc.purpose === "explore") bar.append(el("button", { class: grounded ? "primary" : "", text: grounded ? "grounded" : "all claims", title: "Hide blocks the model did not cite", onclick: () => { grounded = !grounded; renderWalk(); } }));
+  if (block && doc.purpose === "explore") bar.append(el("button", { text: "mark explored", onclick: () => op({ op: "setStatus", id: block.id, status: "settled" }) }));
+  card.append(el("div", { class: "label", text: doc.purpose + " / walk" }), bar);
+  if (!block) {
+    card.append(el("h1", { text: doc.title }), el("p", { class: "note", text: doc.goal || "Dump the first idea." }));
+  } else {
+    const patch = fields => op({ op: "patchBlock", id: block.id, fields });
+    card.append(el("h1", null, inlineText(block.title, "Name this idea", value => { if (value.trim()) patch({ title: value.trim() }); })));
+    const cite = citationOf(block);
+    if (cite) card.append(el("button", { class: "cite", text: cite, title: "Open the cited range", onclick: () => openFile(block.sources[0].path, block.sources[0].startLine) }));
+    else if (doc.purpose === "explore") card.append(el("p", { class: "subtle", text: block.evidence === "observed" ? "observed, no range" : block.evidence + " — not grounded in a citation" }));
+    card.append(el("div", { class: "note" }, inlineText(block.description, "One line about it", value => patch({ description: value }))));
+  }
+  const moves = walkMoves(block);
+  const list = el("div", { class: "moves" });
+  const parent = block ? parentBlock(block.id) : null;
+  if (parent) list.append(moveButton(parent, "up", ""));
+  for (const child of moves.inside) list.append(moveButton(child, "inside", ""));
+  for (const step of moves.next) list.append(moveButton(step.block, step.inbound ? "from" : "next", step.label));
+  if (!list.childElementCount) list.append(el("p", { class: "subtle", text: grounded ? "Nothing cited from here. Turn grounded off to see the guesses." : "Nothing connected yet." }));
+  card.append(list);
+  if (doc.purpose === "brainstorm") {
+    const input = el("input", { id: "dump", class: "dump", placeholder: block ? "Dump a line onto this idea" : "Dump the first idea", spellcheck: "false" });
+    input.addEventListener("keydown", event => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      const title = input.value.trim();
+      if (!title) return;
+      input.value = "";
+      op(block ? { op: "addBlock", parentId: block.id, title } : { op: "addBlock", title });
+    });
+    card.append(input);
+  } else if (block) {
+    card.append(el("div", { class: "actions" }, ...state.flow.verbs.map(verb => el("button", { text: verb.label + " →", onclick: () => openPreview(verb.id, block.id) }))));
+  }
+  page.append(card);
+}
 /** The document is authored as decisions and outcomes; the map only visualizes them. */
 function renderWorkspace() {
   const doc = state.document, rail = $("rail"), page = $("blockPage");
@@ -595,7 +714,7 @@ function citations() {
 function renderFiles() {
   const host = $("files");
   // Explore documents are about a codebase: the tree starts open there.
-  if (filesOpen === null && state.document) { filesOpen = state.document.purpose === "explore"; if (filesOpen) loadFiles(); }
+  if (filesOpen === null && state.document) { filesOpen = state.document.purpose === "explore" && !walking(); if (filesOpen) loadFiles(); }
   host.hidden = !filesOpen || !state.document;
   if (host.hidden || host.contains(document.activeElement)) return;
   host.replaceChildren();
@@ -750,7 +869,7 @@ function renderStart() {
   const doc = state.document;
   const diagram = currentDiagram();
   const emptyRoot = doc && doc.root.blocks.length === 0;
-  host.hidden = !!doc && !emptyRoot && (surface === "page" || !!diagram?.blocks.length);
+  host.hidden = walking() || (!!doc && !emptyRoot && (surface === "page" || !!diagram?.blocks.length));
   // Only a field being typed in is protected from a redraw; a clicked button is not.
   const typing = document.activeElement && document.activeElement.tagName === "INPUT" && host.contains(document.activeElement);
   if (host.hidden || typing) return;
@@ -1386,16 +1505,20 @@ document.addEventListener("keydown", event => {
     case " ": event.preventDefault(); if (block) stepStatus(block); return;
     case "n": if (state.flow.nextOpen) { centerOn = state.flow.nextOpen; op({ op: "focus", id: state.flow.nextOpen }); } return;
     case "j": case "k": {
-      const ids = [];
-      const walk = diagram => { for (const item of diagram.blocks) { ids.push(item.id); if (item.children) walk(item.children); } };
-      walk(state.document.root);
+      const moves = walking() ? (block ? [...walkMoves(block).inside, ...walkMoves(block).next.map(step => step.block)] : state.document.root.blocks.filter(shown)) : null;
+      const ids = moves ? moves.map(item => item.id) : [];
+      if (!moves) {
+        const walk = diagram => { for (const item of diagram.blocks) { ids.push(item.id); if (item.children) walk(item.children); } };
+        walk(state.document.root);
+      }
       if (ids.length) {
-        const index = ids.indexOf(state.selected);
-        op({ op: "focus", id: ids[index < 0 ? (event.key === "j" ? 0 : ids.length - 1) : (index + (event.key === "j" ? 1 : ids.length - 1)) % ids.length] });
+        const index = Math.max(0, ids.indexOf(state.selected));
+        op({ op: "focus", id: ids[(index + (event.key === "j" ? 1 : ids.length - 1)) % ids.length] });
       }
       return;
     }
-    case "o": op(block ? { op: "addBlock", afterId: block.id } : { op: "addBlock" }).then(r => { if (r.ok && surface === "map") { editTitleOf = state.selected; renderCanvas(); } }); return;
+    case "g": if (state.document.purpose === "explore") { grounded = !grounded; render(); } return;
+    case "o": if (walking() && state.document.purpose === "brainstorm") { const dump = document.querySelector("#dump"); if (dump) dump.focus(); return; } op(block ? { op: "addBlock", afterId: block.id } : { op: "addBlock" }).then(r => { if (r.ok && surface === "map") { editTitleOf = state.selected; renderCanvas(); } }); return;
     case "O": if (block) op({ op: "addBlock", parentId: block.id }).then(r => { if (r.ok && surface === "map") { editTitleOf = state.selected; renderCanvas(); } }); return;
     case "T": if (surface === "map") op({ op: "tidy" }).then(fit); return;
     case "F": case "f": if (surface === "map") fit(); return;

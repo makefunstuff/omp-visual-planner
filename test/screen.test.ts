@@ -323,6 +323,28 @@ describe("canvas rendering", () => {
 		).join("\n");
 		expect(canvasEmpty).toContain("No blocks in this subsystem yet.");
 	});
+
+	test("brainstorm and unexplored blocks walk; a settled explore block keeps the page", async () => {
+		const ideas = createDocument({ id: "ideas", title: "Ideas", purpose: "brainstorm" });
+		ideas.root.blocks.push(createBlock({ id: "spark", title: "Spark", description: "a loose idea" }));
+		const brainstorm = plain((await harness({ width: 120, rows: 24, document: ideas })).screen.render(120)).join("\n");
+		expect(brainstorm).toContain("brainstorm / walk");
+		expect(brainstorm).toContain("Spark");
+		expect(brainstorm).toContain("O dumps one");
+
+		const map = fixture();
+		map.purpose = "explore";
+		map.root.blocks[0]!.sources = [{ path: "src/flow.ts", startLine: 10, endLine: 12 }];
+		const walking = plain((await harness({ width: 120, rows: 24, document: map })).screen.render(120)).join("\n");
+		expect(walking).toContain("explore / walk");
+		expect(walking).toContain("src/flow.ts:10-12");
+		expect(walking).toContain("g grounded");
+
+		map.root.blocks[0]!.status = "settled";
+		const page = plain((await harness({ width: 120, rows: 24, document: map })).screen.render(120)).join("\n");
+		expect(page).not.toContain("explore / walk");
+		expect(page).toContain("notes");
+	});
 });
 
 describe("interaction", () => {
@@ -656,6 +678,7 @@ describe("inspector field editor", () => {
 		await writeFile(path, Array.from({ length: 520 }, (_, index) => `// line-${String(index + 1).padStart(3, "0")}`).join("\n"));
 		const document = fixture();
 		document.purpose = "explore";
+		document.root.blocks[0]!.status = "settled";
 		document.root.blocks[0]!.sources = [{ path, startLine: 200, endLine: 200 }];
 		const h = await harness({ width: 120, rows: 24, document });
 		h.screen.handleInput("\r"); // page

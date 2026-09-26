@@ -7,11 +7,11 @@
  */
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BeginInput, JournalEntry } from "./actions.ts";
-import { ActionRegistry } from "./actions.ts";
+import { ActionRegistry, resumeBranchToken } from "./actions.ts";
 import { resolveScope } from "./compose.ts";
 import type { Purpose, Scope } from "./model.ts";
 import { PURPOSES, toolSchemasFor } from "./model.ts";
-import { DocumentStore, SESSION_NAMESPACE, defaultDocumentPath, displayPath } from "./store.ts";
+import { DocumentStore, SESSION_NAMESPACE, defaultDocumentPath, displayPath, resolveSessionPath } from "./store.ts";
 import type { ScreenResult, ScreenStart } from "./ui.ts";
 import { DiagramScreen } from "./ui.ts";
 import { editInEditor, editorCommand } from "./editor.ts";
@@ -69,7 +69,7 @@ function branchTokenOf(ctx: ExtensionContext): string {
 async function ensureSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<PlannerSession> {
 	const session = sessionFor(pi, ctx);
 	if (session.store.document === undefined && session.registry.entries.length === 0) {
-		await adoptSession(pi, ctx);
+		await adoptSession(pi, ctx, "resume");
 	}
 	return session;
 }
@@ -176,17 +176,16 @@ function dropStaleNavigation(session: PlannerSession): void {
  * Reload branch metadata, then read the project file. A request owned by the
  * previous branch position is invalidated rather than inherited.
  */
-async function adoptSession(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+async function adoptSession(pi: ExtensionAPI, ctx: ExtensionContext, mode: "resume" | "move" = "move"): Promise<void> {
 	const session = sessionFor(pi, ctx);
 	const persisted = readPersisted(ctx);
-	// A real branch/tree/session move is the only thing that reassigns
-	// ownership, and adopting the new token marks the old position's requests
-	// stale instead of inheriting them.
-	session.branchToken = branchTokenOf(ctx);
+	const liveToken = branchTokenOf(ctx);
+	// Reopening the same session must not treat the new leaf as a branch move.
+	session.branchToken = mode === "resume" ? resumeBranchToken(persisted?.journal ?? [], liveToken) : liveToken;
 	session.registry.adoptBranch(session.branchToken, persisted?.journal);
 	session.stack = persisted?.stack ?? [];
 	session.selected = persisted?.selected;
-	const path = persisted?.path ?? defaultDocumentPath(ctx.cwd);
+	const path = resolveSessionPath(persisted?.path, ctx.cwd);
 	const result = await session.store.open(path);
 	if (result.ok) {
 		if (persisted?.digest !== undefined && session.store.diskDigest !== persisted.digest) {
@@ -545,16 +544,16 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		await adoptSession(pi, ctx);
+		await adoptSession(pi, ctx, "resume");
 	});
 	pi.on("session_branch", async (_event, ctx) => {
-		await adoptSession(pi, ctx);
+		await adoptSession(pi, ctx, "move");
 	});
 	pi.on("session_tree", async (_event, ctx) => {
-		await adoptSession(pi, ctx);
+		await adoptSession(pi, ctx, "move");
 	});
 	pi.on("session_switch", async (_event, ctx) => {
-		await adoptSession(pi, ctx);
+		await adoptSession(pi, ctx, "resume");
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		stopWeb(sessionKey(ctx));

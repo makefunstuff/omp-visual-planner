@@ -741,6 +741,7 @@ export class DiagramScreen implements Component {
 	#pane: "canvas" | "inspector" = "canvas";
 	#view: "outline" | "canvas" = "outline";
 	#collapsed = new Set<string>();
+	#grounded = false;
 	#outlineTop = 0;
 	#modal: Modal | undefined;
 	#modalTitle: string | undefined;
@@ -1038,6 +1039,11 @@ export class DiagramScreen implements Component {
 		switch (key) {
 			case "space":
 				this.#cycleStatus();
+				return true;
+			case "g":
+				if (this.#document.purpose !== "explore") return false;
+				this.#grounded = !this.#grounded;
+				this.#message = this.#grounded ? "showing only cited blocks" : "showing every claim";
 				return true;
 			case "n":
 				this.#goNextOpen();
@@ -2581,6 +2587,7 @@ export class DiagramScreen implements Component {
 		const document = this.#document;
 		const purpose = document.purpose;
 		const block = this.#block;
+		if (this.#walking(block)) return this.#walkLines(width, height);
 		const lines: string[] = [];
 		const wrap = (text: string, max: number): string[] => wrapTextWithAnsi(text, Math.max(1, width)).slice(0, max);
 		const muted = (text: string): string => theme.fg("muted", text);
@@ -2682,6 +2689,49 @@ export class DiagramScreen implements Component {
 		while (visible.length < room) visible.push("");
 		visible.push(muted(hint));
 		return visible.slice(0, height).map(line => truncateToWidth(line, width, Ellipsis.Unicode));
+	}
+
+	#walking(block: Block | undefined): boolean {
+		const purpose = this.#document.purpose;
+		if (purpose === "brainstorm") return true;
+		return purpose === "explore" && (block === undefined || block.status === "open");
+	}
+
+	#walkLines(width: number, height: number): string[] {
+		const theme = this.#options.theme;
+		const purpose = this.#document.purpose;
+		const block = this.#block;
+		const shown = (candidate: Block): boolean => !this.#grounded || candidate.evidence === "observed";
+		const cite = (candidate: Block): string => {
+			const source = candidate.sources[0];
+			if (!source) return purpose === "explore" && candidate.evidence !== "observed" ? candidate.evidence : "";
+			return formatSourceRef(source) + (candidate.sources.length > 1 ? ` +${candidate.sources.length - 1}` : "");
+		};
+		const lines = [theme.fg("muted", `${purpose} / walk${this.#grounded ? " · grounded" : ""}`)];
+		if (!block) {
+			lines.push(theme.bold(this.#document.title), "", theme.fg("muted", "O dumps an idea inside the focused block"));
+			return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode)).slice(0, height);
+		}
+		lines.push(theme.bold(block.title || "(untitled)"));
+		const citation = cite(block);
+		if (citation) lines.push(theme.fg(block.evidence === "observed" ? "accent" : "muted", citation));
+		if (block.description.trim()) lines.push(...wrapTextWithAnsi(block.description.trim(), Math.max(1, width)).slice(0, 3));
+		const inside = (block.children?.blocks ?? []).filter(shown);
+		if (inside.length === 0) lines.push(theme.fg("muted", this.#grounded ? "  nothing cited" : "  nothing yet — O dumps one"));
+		for (const child of inside) {
+			const title = child.title.length > 0 ? child.title : "(untitled)";
+			lines.push(truncateToWidth(`  ${title}  ${cite(child)}`, width, Ellipsis.Unicode));
+		}
+		const next = this.#diagram.edges.flatMap(edge => {
+			const otherId = edge.from === block.id ? edge.to : edge.to === block.id ? edge.from : undefined;
+			const other = otherId ? this.#diagram.blocks.find(candidate => candidate.id === otherId) : undefined;
+			return other && shown(other)
+				? [truncateToWidth(`  ${edge.to === block.id ? "from" : "next"} ${other.title}${edge.label ? ` · ${edge.label}` : ""}`, width, Ellipsis.Unicode)]
+				: [];
+		});
+		lines.push("", theme.fg("muted", "next"), ...(next.length > 0 ? next : [theme.fg("muted", "  no relationships")]));
+		if (purpose === "explore") lines.push("", theme.fg("muted", "g grounded   space marks explored"));
+		return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode)).slice(0, height);
 	}
 
 	#canvasLines(width: number, height: number): string[] {
