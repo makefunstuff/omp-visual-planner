@@ -531,10 +531,10 @@ mod app_flow {
         }
         app.on_key(KeyCode::Enter); // :export
 
-        let json = std::fs::read_to_string("/tmp/mindbox-test.json").expect("read json");
+        let json = std::fs::read_to_string("/tmp/diatui-test.json").expect("read json");
         assert!(json.contains("hello"));
         assert!(json.contains("world"));
-        let spec = std::fs::read_to_string("/tmp/mindbox-test.spec.md").expect("read spec");
+        let spec = std::fs::read_to_string("/tmp/diatui-test.spec.md").expect("read spec");
         assert!(spec.contains("hello"));
         assert!(spec.contains("world"));
     }

@@ -212,6 +212,6 @@ fn draw_help(area: Rect, buf: &mut Buffer) {
         Line::from(""),
     ]);
     Paragraph::new(text)
-        .block(Block::bordered().border_type(BorderType::Rounded).title(" mindbox "))
+        .block(Block::bordered().border_type(BorderType::Rounded).title(" diatui "))
         .render(r, buf);
 }
