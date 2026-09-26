@@ -345,6 +345,37 @@ describe("canvas rendering", () => {
 		expect(page).not.toContain("explore / walk");
 		expect(page).toContain("notes");
 	});
+
+	test("discovering from the terminal highlights the cited source", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-cite-"));
+		directories.push(directory);
+		const file = join(directory, "note.ts");
+		await writeFile(file, "export const token = 1;\n");
+		const map = createDocument({ id: "map", title: "Map", purpose: "explore" });
+		map.root.blocks.push(
+			createBlock({
+				id: "note",
+				title: "Note",
+				sources: [{ path: file, startLine: 1, endLine: 1 }],
+			}),
+		);
+		const opened = await harness({ width: 120, rows: 24, document: map });
+		opened.screen.render(120);
+		await new Promise(resolve => setTimeout(resolve, 80));
+		const raw = opened.screen.render(120).join("\n");
+		expect(raw).toMatch(/\u001b\[[0-9;]*mexport/);
+		opened.screen.handleInput("enter");
+		const source = opened.screen.render(120).join("\n");
+		expect(source).toMatch(/\u001b\[[0-9;]*mexport/);
+		expect(source).toContain("token");
+	});
+
+	test("a code fence on the page is syntax-highlighted", async () => {
+		const document = fixture();
+		document.root.blocks[0]!.description = "```ts\nexport const n = 1;\n```";
+		const raw = (await harness({ width: 120, rows: 30, document })).screen.render(120).join("\n");
+		expect(raw).toMatch(/\u001b\[[0-9;]*mexport/);
+	});
 });
 
 describe("interaction", () => {

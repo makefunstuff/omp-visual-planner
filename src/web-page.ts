@@ -424,6 +424,7 @@ function render() {
   renderViewer();
   renderStart();
   $("workspace").hidden = surface !== "page";
+  $("viewport").hidden = surface !== "map";
   $("workspace").classList.toggle("walk", walking());
   $("mapToggle").textContent = surface === "map" ? "Block page" : "Map";
   $("zoom").hidden = surface !== "map";

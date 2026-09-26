@@ -748,6 +748,7 @@ export class DiagramScreen implements Component {
 	#linkFrom: string | undefined;
 	#linkTarget: string | undefined;
 	#sourceView: SourceView | undefined;
+	#citationPreview: { key: string; lines: string[] } | undefined;
 	#preview: PreviewPending | undefined;
 	#viewport = { left: 0, top: 0 };
 	#fieldIndex = 0;
@@ -1143,6 +1144,10 @@ export class DiagramScreen implements Component {
 				return;
 			case "enter":
 			case "i":
+				if (key === "enter" && this.#walking(this.#block) && this.#block?.sources[0]) {
+					void this.#loadSource(this.#block.sources[0]);
+					return;
+				}
 				this.#pane = "inspector";
 				this.#fieldIndex = 0;
 				return;
@@ -1664,6 +1669,13 @@ export class DiagramScreen implements Component {
 	// ------------------------------------------------------------------
 
 	#handleInspectorKey(key: string): boolean {
+		if (key === "enter" && this.#walking(this.#block)) {
+			const source = this.#block?.sources[0];
+			if (source) {
+				void this.#loadSource(source);
+				return true;
+			}
+		}
 		const fields = this.#fields;
 		if (fields.length === 0) return false;
 		const index = Math.min(this.#fieldIndex, fields.length - 1);
@@ -1903,6 +1915,46 @@ export class DiagramScreen implements Component {
 		}
 		this.#options.tui.requestRender();
 	}
+	/** A few syntax-highlighted lines of the focused block's first citation, loaded once per range. */
+	#citationLines(block: Block, width: number): string[] {
+		const source = block.sources[0];
+		if (!source) return [];
+		const key = `${source.path}:${source.startLine ?? ""}:${source.endLine ?? ""}`;
+		if (this.#citationPreview?.key === key) return this.#citationPreview.lines;
+		this.#citationPreview = { key, lines: [this.#options.theme.fg("muted", "reading source…")] };
+		void this.#readCitation(block, key, width);
+		return this.#citationPreview.lines;
+	}
+
+	async #readCitation(block: Block, key: string, width: number): Promise<void> {
+		const source = block.sources[0];
+		if (!source || this.#citationPreview?.key !== key) return;
+		const absolute = isAbsolute(source.path) ? source.path : resolvePath(this.#options.cwd, source.path);
+		try {
+			const info = await stat(absolute);
+			if (info.size > MAX_VIEWER_FILE_BYTES) {
+				this.#citationPreview = { key, lines: [this.#options.theme.fg("error", "cited file is too large to highlight")] };
+			} else {
+				const text = await readFile(absolute, "utf8");
+				const all = text.split("\n");
+				const start = Math.max(1, source.startLine ?? 1);
+				const end = Math.min(all.length, Math.max(source.endLine ?? start, start));
+				const slice = all.slice(start - 1, Math.min(end, start + 7));
+				const highlighted = renderSourceLines(this.#options.theme, slice.join("\n"), source.path, start, Math.max(12, width));
+				const more = end > start + 7 ? [this.#options.theme.fg("muted", "enter opens the rest")] : [];
+				if (this.#citationPreview?.key !== key) return;
+				this.#citationPreview = { key, lines: [...highlighted, ...more] };
+			}
+		} catch (error) {
+			if (this.#citationPreview?.key !== key) return;
+			this.#citationPreview = {
+				key,
+				lines: [this.#options.theme.fg("error", `cannot read ${absolute}: ${error instanceof Error ? error.message : String(error)}`)],
+			};
+		}
+		this.#options.tui.requestRender();
+	}
+
 
 	// ------------------------------------------------------------------
 	// Actions, preview, review
@@ -2557,26 +2609,39 @@ export class DiagramScreen implements Component {
 		const theme = this.#options.theme;
 		const out: string[] = [];
 		let fence: string | undefined;
+		let fenceLang = "";
+		let fenced: string[] = [];
 		let prose: string[] = [];
 		const flush = () => {
 			if (prose.length > 0) out.push(...wrapTextWithAnsi(prose.join("\n"), Math.max(1, width)));
 			prose = [];
+		};
+		const flushFence = () => {
+			const highlighted = highlightCode(fenced.join("\n"), fenceLang || undefined, theme);
+			for (const line of highlighted) {
+				out.push(`${theme.fg("muted", "│")} ${truncateToWidth(line, Math.max(1, width - 2))}`);
+			}
+			fenced = [];
 		};
 		for (const line of text.split("\n")) {
 			const opener = /^\s*(```|~~~)\s*([\w+-]*)/.exec(line);
 			if (fence === undefined && opener) {
 				flush();
 				fence = opener[1];
-				out.push(theme.fg("muted", `┌ ${opener[2] || "code"}`));
+				fenceLang = opener[2] ?? "";
+				out.push(theme.fg("muted", `┌ ${fenceLang || "code"}`));
 			} else if (fence !== undefined && line.trim().startsWith(fence)) {
+				flushFence();
 				fence = undefined;
+				fenceLang = "";
 				out.push(theme.fg("muted", "└"));
 			} else if (fence !== undefined) {
-				out.push(`${theme.fg("muted", "│")} ${truncateToWidth(line.replaceAll("\t", "  "), Math.max(1, width - 2))}`);
+				fenced.push(line.replaceAll("\t", "  "));
 			} else {
 				prose.push(line);
 			}
 		}
+		if (fence !== undefined) flushFence();
 		flush();
 		if (out.length <= limit) return out;
 		return [...out.slice(0, limit - 1), theme.fg("muted", `… ${out.length - limit + 1} more lines — E opens it all`)];
@@ -2715,7 +2780,8 @@ export class DiagramScreen implements Component {
 		lines.push(theme.bold(block.title || "(untitled)"));
 		const citation = cite(block);
 		if (citation) lines.push(theme.fg(block.evidence === "observed" ? "accent" : "muted", citation));
-		if (block.description.trim()) lines.push(...wrapTextWithAnsi(block.description.trim(), Math.max(1, width)).slice(0, 3));
+		lines.push(...this.#citationLines(block, width));
+		if (block.description.trim()) lines.push(...this.#markdownLines(block.description.trim(), width, 6));
 		const inside = (block.children?.blocks ?? []).filter(shown);
 		if (inside.length === 0) lines.push(theme.fg("muted", this.#grounded ? "  nothing cited" : "  nothing yet — O dumps one"));
 		for (const child of inside) {
@@ -2730,7 +2796,7 @@ export class DiagramScreen implements Component {
 				: [];
 		});
 		lines.push("", theme.fg("muted", "next"), ...(next.length > 0 ? next : [theme.fg("muted", "  no relationships")]));
-		if (purpose === "explore") lines.push("", theme.fg("muted", "g grounded   space marks explored"));
+		if (purpose === "explore") lines.push("", theme.fg("muted", "enter opens the cited source   g grounded   space marks explored"));
 		return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode)).slice(0, height);
 	}
 
