@@ -1,1 +1,11 @@
-/target
+# build output and installed host packages
+node_modules/
+
+# scratch space for local experiments and throwaway workspaces
+/tmp/
+
+# OS noise
+.DS_Store
+
+# recorder scratch
+scripts/demo/__pycache__/

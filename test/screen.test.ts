@@ -1,0 +1,486 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent";
+import { visibleWidth } from "@oh-my-pi/pi-tui";
+import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
+import { type } from "@oh-my-pi/omptype";
+import { ActionRegistry, type BeginInput } from "../src/actions.ts";
+import { createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
+import { DocumentStore, serializeDocument } from "../src/store.ts";
+import { DiagramScreen, layoutFor } from "../src/ui.ts";
+
+const theme = loadThemeSync("dark");
+const directories: string[] = [];
+
+afterEach(async () => {
+	await Promise.all(directories.splice(0).map(dir => rm(dir, { recursive: true, force: true })));
+});
+
+/** Only `setEditorText` is observable; the screen owns every other interaction. */
+const uiStub = { setEditorText: () => {} } as unknown as ExtensionUIContext;
+
+interface Harness {
+	screen: DiagramScreen;
+	result(): unknown;
+}
+
+/**
+ * Opens the fixture through a real file so the store reports it clean, the way
+ * a document behaves outside a just-accepted proposal.
+ */
+async function harness(options: { width: number; rows: number; document?: ReturnType<typeof fixture> } = { width: 120, rows: 24 }): Promise<Harness> {
+	const document = options.document ?? fixture();
+	const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-screen-"));
+	directories.push(directory);
+	const path = join(directory, "architecture.json");
+	await writeFile(path, serializeDocument(document), "utf8");
+	const store = new DocumentStore(type);
+	const opened = await store.open(path);
+	if (!opened.ok) throw new Error(String(opened.errors));
+	const registry = new ActionRegistry("session:leaf");
+	let rows = options.rows;
+	let result: unknown;
+	const tui = {
+		terminal: {
+			get columns() {
+				return options.width;
+			},
+			get rows() {
+				return rows;
+			},
+		},
+		requestRender: () => {},
+	};
+	const screen = new DiagramScreen(
+		{
+			tui: tui as never,
+			theme,
+			ui: uiStub,
+			store,
+			registry,
+			arktype: type,
+			cwd: "/tmp/planner",
+			branchKey: "session:leaf",
+			documentPathHint: "/tmp/planner/.omp-visual-planner/architecture.json",
+			hasUI: true,
+			isIdle: () => true,
+			hasPendingMessages: () => false,
+		},
+		value => {
+			result = value;
+		},
+	);
+	return { screen, result: () => result };
+}
+
+/**
+ * root: api (left), db (right) -> "stores", worker below (unknown)
+ * api.children: auth
+ */
+function fixture() {
+	const document = createDocument({ id: "doc-1", title: "Service", goal: "Ship auth" });
+	const api = createBlock({ id: "api", title: "API", description: "HTTP surface", x: 2, y: 2 });
+	const db = createBlock({ id: "db", title: "Database", x: 30, y: 2 });
+	const worker = createBlock({ id: "worker", title: "Worker", x: 2, y: 20, evidence: "unknown" });
+	document.root.blocks.push(api, db, worker);
+	document.root.edges.push(createEdge({ id: "e1", from: "api", to: "db", label: "stores", fromPort: "east", toPort: "west" }));
+	api.children = createDiagram({ id: "api-inner", blocks: [createBlock({ id: "auth", title: "Auth", description: "tokens" })] });
+	return document;
+}
+
+function plain(lines: readonly string[]): string[] {
+	return lines.map(line => line.replaceAll(/\u001b\[[0-9;]*m/g, ""));
+}
+
+/** The rows inside the dialog whose title rule contains `marker`. */
+function dialogRows(lines: readonly string[], marker: string): string[] {
+	const start = lines.findIndex(line => line.includes(marker));
+	if (start === -1) return [];
+	const rows: string[] = [];
+	for (let index = start + 1; index < lines.length; index += 1) {
+		const line = lines[index]!;
+		if (line.includes("╰")) break;
+		rows.push(line);
+	}
+	return rows;
+}
+
+describe("overlay geometry", () => {
+	test("every rendered line is exactly the requested width", async () => {
+		for (const width of [40, 60, 80, 100, 120, 160]) {
+			for (const rows of [10, 24, 36, 60]) {
+				const lines = (await harness({ width, rows })).screen.render(width);
+				expect(lines.length).toBe(rows);
+				for (const line of lines) expect(visibleWidth(line)).toBe(width);
+			}
+		}
+	});
+
+	test("a tiny terminal shows the size warning and stays usable", async () => {
+		const lines = plain((await harness({ width: 30, rows: 24 })).screen.render(30));
+		expect(lines[0]).toContain("omp-visual-planner");
+		expect(lines.join("\n")).toContain("terminal is 30x24");
+		expect(lines.join("\n")).toContain("needs 40x10 to draw");
+		expect(lines.join("\n")).toContain("[Esc] close");
+		for (const line of lines) expect(visibleWidth(line)).toBe(30);
+	});
+
+	test("narrow terminals stack the panes instead of splitting them", async () => {
+		const h = await harness({ width: 80, rows: 24 });
+		const lines = plain(h.screen.render(80));
+		// One pane only: the inspector header must not be present until it has focus.
+		expect(lines.join("\n")).not.toContain("nothing selected");
+		expect(lines.join("\n")).toContain("API");
+	});
+
+	test("a wide terminal splits 34 columns of inspector off the canvas", async () => {
+		const layout = layoutFor(120, 36);
+		const lines = plain((await harness({ width: 120, rows: 36 })).screen.render(120));
+		expect(lines[0]).toContain("omp-visual-planner — Service");
+		expect(lines[1]).toContain("[i] inspector");
+		// The inspector's vertical edges sit exactly at the reserved columns.
+		const inspectorStart = layout.canvasWidth + 2;
+		expect(lines[3]![inspectorStart]).toBe("│");
+		expect(lines[3]![119]).toBe("│");
+	});
+});
+
+describe("canvas rendering", () => {
+	test("draws a bordered card per block with its title and description", async () => {
+		const lines = plain((await harness()).screen.render(120));
+		const joined = lines.join("\n");
+		expect(joined).toContain("┌──────────┐");
+		expect(joined).toContain("│ API");
+		expect(joined).toContain("HTTP surface");
+		expect(joined).toContain("Database");
+	});
+
+	test("keeps an off-screen block off the canvas", async () => {
+		const lines = plain((await harness()).screen.render(120));
+		// `worker` is unknown and sits below the fold at 24 rows, so pan to it.
+		const joined = lines.join("\n");
+		expect(joined).toContain("API");
+		expect(joined).not.toContain("Worker");
+	});
+
+	test("draws an orthogonal relationship with an arrowhead and its label", async () => {
+		const lines = plain((await harness()).screen.render(120));
+		const joined = lines.join("\n");
+		expect(joined).toContain("─");
+		expect(joined).toContain("stores");
+		const arrow = lines.find(line => line.includes(">"));
+		expect(arrow).toBeDefined();
+	});
+
+	test("the status strip reports the current diagram's unknown count", async () => {
+		const lines = plain((await harness()).screen.render(120));
+		const status = lines[lines.length - 2]!;
+		expect(status).toContain("canvas");
+		expect(status).toContain("blocks 3");
+		expect(status).toContain("unknown 1");
+		expect(status).toContain("rev 0");
+	});
+
+	test("a relationship label is drawn in free space and never over a card", async () => {
+		const apart = fixture();
+		apart.root.blocks[1]!.position = { x: 60, y: 2 };
+		const lines = plain((await harness({ width: 120, rows: 24, document: apart })).screen.render(120));
+		const joined = lines.join("\n");
+		expect(joined).toContain("stores");
+		// The card borders survive: the label only used free cells.
+		expect(joined).toContain("┌──────────┐");
+
+		// Two cells apart leaves no room, and the label is omitted rather than
+		// overwriting the neighbouring card.
+		const cramped = plain((await harness()).screen.render(120)).join("\n");
+		expect(cramped).toContain("Database");
+		expect(cramped.match(/┌──────────┐/g)?.length).toBe(2);
+	});
+
+	test("a dirty document must be saved before starting a new one", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("o");
+		h.screen.handleInput("a");
+		h.screen.render(120);
+		for (let step = 0; step < 5; step += 1) h.screen.handleInput("j");
+		h.screen.handleInput("\r");
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("save this document (s) before starting a new one");
+		expect(lines.join("\n")).toContain("blocks 4");
+	});
+
+	test("a cold start lets discovery proceed instead of demanding a save", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-cold-"));
+		directories.push(directory);
+		const store = new DocumentStore(type);
+		const screen = new DiagramScreen(
+			{
+				tui: { terminal: { columns: 120, rows: 24 }, requestRender: () => {} } as never,
+				theme,
+				ui: uiStub,
+				store,
+				registry: new ActionRegistry("session:leaf"),
+				arktype: type,
+				cwd: directory,
+				branchKey: "session:leaf",
+				documentPathHint: join(directory, ".omp-visual-planner", "architecture.json"),
+				hasUI: true,
+				isIdle: () => true,
+				hasPendingMessages: () => false,
+			},
+			() => {},
+			{ action: "discover", target: "fixture" },
+		);
+		const lines = plain(screen.render(120));
+		expect(lines.join("\n")).toContain("codebase path to map");
+		expect(lines.join("\n")).not.toContain("save this document");
+	});
+
+	test("a cold start with nothing on disk still renders the empty state", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-cold-"));
+		directories.push(directory);
+		const store = new DocumentStore(type);
+		const screen = new DiagramScreen(
+			{
+				tui: { terminal: { columns: 120, rows: 24 }, requestRender: () => {} } as never,
+				theme,
+				ui: uiStub,
+				store,
+				registry: new ActionRegistry("session:leaf"),
+				arktype: type,
+				cwd: directory,
+				branchKey: "session:leaf",
+				documentPathHint: join(directory, ".omp-visual-planner", "architecture.json"),
+				hasUI: true,
+				isIdle: () => true,
+				hasPendingMessages: () => false,
+			},
+			() => {},
+		);
+		const lines = plain(screen.render(120));
+		expect(lines.join("\n")).toContain("No blocks in this subsystem yet.");
+		expect(lines.join("\n")).toContain("[o] add a block");
+		for (const line of lines) expect(visibleWidth(line)).toBe(120);
+	});
+
+	test("the empty state offers both ways to start", async () => {
+		const empty = createDocument({ id: "doc-2", title: "Empty" });
+		const lines = plain((await harness({ width: 120, rows: 24, document: empty })).screen.render(120));
+		const joined = lines.join("\n");
+		expect(joined).toContain("No blocks in this subsystem yet.");
+		expect(joined).toContain("[o] add a block");
+		expect(joined).toContain("[a] draft from prompt");
+	});
+});
+
+describe("interaction", () => {
+	test("a block is added, selected, and the diagram re-renders", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("o");
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("added a block");
+		expect(lines[lines.length - 2]).toContain("blocks 4");
+		expect(lines.join("\n")).toContain("New block");
+	});
+
+	test("undo and redo walk the edit history", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("o");
+		h.screen.handleInput("u");
+		expect(plain(h.screen.render(120))[22]).toContain("undone");
+		h.screen.handleInput("\x12");
+		expect(plain(h.screen.render(120))[22]).toContain("redone");
+	});
+
+	test("descending into a block and ascending restores the breadcrumb", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		const inside = plain(h.screen.render(120));
+		expect(inside[1]).toContain("API");
+		expect(inside.join("\n")).toContain("Auth");
+		h.screen.handleInput("\x7f");
+		const back = plain(h.screen.render(120));
+		expect(back[1]).not.toContain("API");
+	});
+
+	test("moving a block changes its stored position", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		for (let step = 0; step < 3; step += 1) h.screen.handleInput("L");
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("moved API");
+		expect(lines[lines.length - 2]).toContain("rev 3");
+	});
+
+	test("a pending link commits with Enter even from the inspector pane", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("i");
+		h.screen.handleInput("e");
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("added a relationship");
+		expect(lines.join("\n")).toContain("relationship ");
+		expect(lines.join("\n")).toContain("label:");
+	});
+
+	test("escape cancels a pending link instead of closing the planner", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("e");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("linking from API");
+		h.screen.handleInput("\x1b");
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("link cancelled");
+		expect(h.result()).toBeUndefined();
+		// A second escape really does close.
+		h.screen.handleInput("\x1b");
+		expect(h.result()).toEqual({ kind: "closed" });
+	});
+
+	test("escape on a clean document closes the overlay", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("\x1b");
+		expect(h.result()).toEqual({ kind: "closed" });
+	});
+
+	test("escape on a dirty document asks before discarding", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("o");
+		h.screen.handleInput("\x1b");
+		expect(h.result()).toBeUndefined();
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("unsaved changes");
+		expect(lines.join("\n")).toContain("> Save");
+		// Cancel keeps the overlay and the edit.
+		h.screen.handleInput("j");
+		h.screen.handleInput("j");
+		h.screen.handleInput("\r");
+		expect(h.result()).toBeUndefined();
+		expect(plain(h.screen.render(120)).join("\n")).toContain("blocks 4");
+	});
+
+	test("a modal is drawn over the diagram, not instead of it", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("a");
+		const lines = plain(h.screen.render(120));
+		const joined = lines.join("\n");
+		// the dialog is present...
+		expect(joined).toContain("Enhance selected block");
+		// ...and so are the cards it is floating over
+		expect(joined).toContain("API");
+		expect(joined).toContain("Database");
+		expect(joined).toContain("HTTP surface");
+		for (const line of lines) expect(visibleWidth(line)).toBe(120);
+	});
+
+	test("help lists the bindings and closes again", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("?");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("omp-visual-planner keys");
+		h.screen.handleInput("\x1b");
+		expect(h.result()).toBeUndefined();
+	});
+
+	test("the preview shows the payload head, scrolls, and returns without a request", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("p");
+		const preview = plain(h.screen.render(120));
+		expect(preview.join("\n")).toContain("preview — block \"API\"");
+		expect(preview.join("\n")).toContain("# Visual planner request");
+		expect(preview.join("\n")).toContain("## Task");
+		for (let step = 0; step < 60; step += 1) h.screen.handleInput("j");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("visual_planner_propose");
+		// Escape returns to the diagram without a request.
+		h.screen.handleInput("\x1b");
+		expect(h.result()).toBeUndefined();
+		expect(plain(h.screen.render(120)).join("\n")).not.toContain("## Proposal token");
+	});
+
+	test("submitting a preview hands back the request token and never says completed", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("p");
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		const result = h.result() as { kind: string; request: BeginInput; prompt: string };
+		expect(result.kind).toBe("submit");
+		expect(result.request.kind).toBe("enhance");
+		expect(result.request.requestId).toBeString();
+		expect(result.prompt).toContain(result.request.requestId);
+		expect(result.prompt).toContain("stages a proposal for review");
+		expect(result.prompt).not.toContain("completed successfully");
+	});
+
+	test("a dirty document must be saved before a request starts", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("o");
+		h.screen.handleInput("p");
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		expect(h.result()).toBeUndefined();
+		expect(plain(h.screen.render(120)).join("\n")).toContain("Save the authored document before submitting?");
+	});
+});
+
+describe("inspector field editor", () => {
+	/** A distinctive title, so a prefill assertion cannot pass on a card's label. */
+	function named(value: string): ReturnType<typeof fixture> {
+		const document = fixture();
+		document.root.blocks[0]!.title = value;
+		return document;
+	}
+
+	test("the title field opens prefilled, replaces it, and commits on Enter", async () => {
+		const h = await harness({ width: 120, rows: 24, document: named("Zeta") });
+		h.screen.render(120);
+		h.screen.handleInput("i");
+		h.screen.handleInput("\r");
+		const editing = plain(h.screen.render(120));
+		expect(editing.join("\n")).toContain("title — Enter accepts, Esc cancels");
+		expect(editing.join("\n")).toContain("Zeta");
+
+		// Replace the prefill the way a user would: clear the line, then type.
+		h.screen.handleInput("\x15");
+		expect(dialogRows(plain(h.screen.render(120)), "Enter accepts").join("\n")).not.toContain("Zeta");
+		for (const key of ["G", "a", "t", "e", "w", "a", "y"]) h.screen.handleInput(key);
+		expect(dialogRows(plain(h.screen.render(120)), "Enter accepts").join("\n")).toContain("Gateway");
+
+		h.screen.handleInput("\r");
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("updated title");
+		expect(lines.join("\n")).toContain("Gateway");
+		expect(lines.join("\n")).not.toContain("title — Enter accepts");
+		expect(lines[lines.length - 2]).toContain("rev 1");
+	});
+
+	test("escape cancels a field edit and keeps the authored value", async () => {
+		const h = await harness({ width: 120, rows: 24, document: named("Zeta") });
+		h.screen.render(120);
+		h.screen.handleInput("i");
+		h.screen.handleInput("\r");
+		h.screen.render(120);
+		h.screen.handleInput("\x15");
+		h.screen.handleInput("zzz");
+		h.screen.handleInput("\x1b");
+		const lines = plain(h.screen.render(120));
+		expect(lines.join("\n")).toContain("edit cancelled");
+		expect(lines.join("\n")).toContain("title: Zeta");
+		expect(dialogRows(lines, "Enter accepts").join("\n")).not.toContain("zzz");
+	});
+});
