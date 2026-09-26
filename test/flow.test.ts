@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { nextOpenBlock, nextStatus, outlineRows, verbsFor } from "../src/flow.ts";
-import { createBlock, createDiagram, createDocument } from "../src/model.ts";
+import { nextOpenBlock, nextStatus, outlineRows, projectActions, verbsFor } from "../src/flow.ts";
+import { PURPOSES, createBlock, createDiagram, createDocument } from "../src/model.ts";
 
 /** root: a (settled, children: a1 open), b (open) */
 function fixture() {
@@ -44,8 +44,21 @@ describe("outline", () => {
 
 describe("purpose vocabulary", () => {
 	test("explore offers investigation verbs and no execution", () => {
-		expect(verbsFor("explore").map(verb => verb.label)).toEqual(["Investigate", "Map inside"]);
-		expect(verbsFor("plan").map(verb => verb.key)).toEqual(["r", "b", "X"]);
+		expect(verbsFor("explore").map(verb => verb.label)).toEqual(["Investigate", "Map inside", "Replan"]);
+		expect(verbsFor("plan").map(verb => verb.key)).toEqual(["r", "b", "t", "X"]);
+	});
+
+	test("every purpose replans a block, and only the project offers prune", () => {
+		for (const purpose of PURPOSES) {
+			expect(verbsFor(purpose).find(verb => verb.id === "replan")).toMatchObject({
+				label: "Replan",
+				key: "t",
+				intent: "replan",
+				kind: "replan",
+			});
+			expect(projectActions(purpose).slice(-2).map(action => action.kind)).toEqual(["replan", "prune"]);
+			expect(verbsFor(purpose).some(verb => verb.id === "prune")).toBe(false);
+		}
 	});
 
 	test("a status outside the purpose's cycle restarts it; brainstorm has none", () => {

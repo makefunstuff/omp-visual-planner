@@ -13,7 +13,6 @@ import {
 	placeNewBlock,
 	routeEdge,
 	tidyDiagram,
-	viewerWindow,
 } from "../src/ui.ts";
 
 function overlaps(blocks: ReturnType<typeof createBlock>[]): boolean {
@@ -66,7 +65,10 @@ describe("card geometry", () => {
 		const children = createDiagram({
 			blocks: titles.map((title, index) => createBlock({ id: `c${index}`, title, x: (index % 3) * 2, y: Math.floor(index / 3) * 2 })),
 		});
-		acceptReplacement(document, { ...tokens, position: { x: 0, y: 0 }, children }, "tokens");
+		acceptReplacement(document, { ...tokens, position: { x: 0, y: 0 }, children }, "tokens", {
+			intent: "plan",
+			scope: { kind: "block", id: "tokens" },
+		});
 		const placed = document.root.blocks[0]!;
 		expect(placed.position).toEqual({ x: 9, y: 9 });
 		expect(overlaps(placed.children!.blocks)).toBe(false);
@@ -82,12 +84,32 @@ describe("card geometry", () => {
 			createBlock({ id: "a", title: "src/math.ts", x: 0, y: 0, children: createDiagram({ blocks: [child] }) }),
 			createBlock({ id: "b", title: "No manifest", x: 380, y: 0 }),
 		);
-		acceptReplacement(document, replacement, undefined);
+		acceptReplacement(document, replacement, undefined, { intent: "discover", scope: { kind: "project" } });
 		expect(document.root.blocks.map(block => block.position)).toEqual([
 			{ x: 2, y: 2 },
 			{ x: 2 + cardWidth("src/math.ts") + 4, y: 2 },
 		]);
 		expect(document.root.blocks[0]!.children!.blocks[0]!.position).toEqual({ x: 2, y: 2 });
+	});
+
+	test("a prune that would drop settled work is refused before anything is applied", () => {
+		const document = createDocument({ id: "doc-1", title: "Service" });
+		document.root.blocks.push(
+			createBlock({ id: "api", title: "API", status: "settled" }),
+			createBlock({ id: "db", title: "Database" }),
+		);
+		const droppingApi = structuredClone(document);
+		droppingApi.root.blocks = droppingApi.root.blocks.filter(block => block.id !== "api");
+		const prune = { intent: "prune", scope: { kind: "project" } } as const;
+
+		expect(() => acceptReplacement(document, droppingApi, undefined, prune)).toThrow(/"API" \(api\)/);
+		expect(document.root.blocks.map(block => block.id)).toEqual(["api", "db"]);
+
+		// The same prune without the settled block lands, keeping what remains.
+		const droppingDb = structuredClone(document);
+		droppingDb.root.blocks = droppingDb.root.blocks.filter(block => block.id !== "db");
+		acceptReplacement(document, droppingDb, undefined, prune);
+		expect(document.root.blocks.map(block => block.id)).toEqual(["api"]);
 	});
 
 	test("tidy removes every overlap and keeps authored order", () => {
@@ -229,15 +251,5 @@ describe("source references", () => {
 		expect(parseSourceRef("src/app.ts:12-40 ")).toEqual({ path: "src/app.ts", startLine: 12, endLine: 40 });
 		expect(formatSourceRef({ path: "a.ts", startLine: 3, endLine: 9 })).toBe("a.ts:3-9");
 		expect(formatSourceRef({ path: "a.ts" })).toBe("a.ts");
-	});
-
-	test("the viewer reads at most 400 lines around the range", () => {
-		expect(viewerWindow({ path: "a" }, 5000)).toEqual({ first: 1, last: 400 });
-		const centered = viewerWindow({ path: "a", startLine: 2000, endLine: 2010 }, 5000);
-		expect(centered.last - centered.first + 1).toBe(400);
-		expect(centered.first).toBeLessThanOrEqual(2000);
-		expect(centered.last).toBeGreaterThanOrEqual(2010);
-		expect(viewerWindow({ path: "a", startLine: 1, endLine: 2 }, 10)).toEqual({ first: 1, last: 10 });
-		expect(viewerWindow({ path: "a", startLine: 900, endLine: 950 }, 20)).toEqual({ first: 1, last: 20 });
 	});
 });

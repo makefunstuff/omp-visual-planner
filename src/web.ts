@@ -14,7 +14,7 @@
  */
 import type { Server } from "bun";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import type { ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
+import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
 import {
 	type DocumentStart,
 	type PageField,
@@ -40,6 +40,8 @@ import {
 	type Diagram,
 	type DiagramDocument,
 	type Evidence,
+	type Intent,
+	type Scope,
 	EVIDENCE_VALUES,
 	PURPOSES,
 	type Purpose,
@@ -58,6 +60,7 @@ import { type DocumentStore, defaultDocumentPath, displayPath } from "./store.ts
 import { type DocumentDiff, acceptReplacement, diffDocuments, emptyDiff, placeNewBlock, tidyDiagram } from "./ui.ts";
 import { WEB_PAGE } from "./web-page.ts";
 import { highlightLines } from "./highlight.ts";
+import { inspectSource } from "./code-evidence.ts";
 import { listWorkspaceFiles, readWorkspaceFile, workspacePath } from "./workspace-files.ts";
 
 export const WEB_HOSTNAME = "127.0.0.1";
@@ -253,6 +256,12 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 		return json({ ...read, tokens: highlightLines(read.lines.join("\n"), read.path) ?? null });
 	}
 
+	if (url.pathname === "/api/insight" && request.method === "GET") {
+		const line = Number(url.searchParams.get("line"));
+		const insight = await inspectSource(entry.binding.cwd, url.searchParams.get("path") ?? "", line);
+		return insight.ok ? json(insight) : json({ error: insight.error }, insight.status);
+	}
+
 	if (url.pathname === "/api/op" && request.method === "POST") {
 		if (request.headers.get("origin") !== origin) return json({ error: "cross-origin write refused" }, 403);
 		let body: unknown;
@@ -349,7 +358,7 @@ function project(document: DiagramDocument, entry: JournalEntry): { ok: true; do
 	if (!proposal) return { ok: false, error: "that request has no staged proposal" };
 	const clone = structuredClone(document);
 	try {
-		acceptReplacement(clone, proposal.replacement, entry.scope.id);
+		acceptReplacement(clone, proposal.replacement, entry.scope.id, entry);
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -539,12 +548,12 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 				return { ok: true, changed: true, message: "" };
 			}
 			case "preview": {
-				const { verb, id } = verbRequest(document, op);
+				const { verb, scope } = requestScope(document, op);
 				const composed = composeRequest({
 					document,
 					kind: verb.kind,
 					intent: verb.intent,
-					scope: { kind: "block", id },
+					scope,
 					branchKey: session.branchToken,
 					baseDigest: store.diskDigest,
 					codeRoot: codeRootFor(binding.cwd, undefined),
@@ -557,14 +566,14 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 				};
 			}
 			case "submit": {
-				const { verb, id } = verbRequest(document, op);
+				const { verb, scope } = requestScope(document, op);
 				const saved = await saveBeforeSubmit(store, op);
 				if (saved) return saved;
 				const composed = composeRequest({
 					document: store.require(),
 					kind: verb.kind,
 					intent: verb.intent,
-					scope: { kind: "block", id },
+					scope,
 					branchKey: session.branchToken,
 					baseDigest: store.diskDigest,
 					codeRoot: codeRootFor(binding.cwd, undefined),
@@ -803,7 +812,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					return { ok: false, error: `${applicable.errors.join("; ")} — run the action again` };
 				}
 				const proposal = entry.proposal;
-				store.transact(draft => acceptReplacement(draft, proposal.replacement, entry.scope.id));
+				store.transact(draft => acceptReplacement(draft, proposal.replacement, entry.scope.id, entry));
 				session.registry.resolve(requestId, "accepted");
 				return { ok: true, changed: true, message: "proposal accepted; save to write it" };
 			}
@@ -839,6 +848,19 @@ function verbRequest(document: DiagramDocument, op: Record<string, unknown>) {
 	const id = str(op.id, "id");
 	if (!findBlockLocation(document.root, id)) throw new OpError(`no block ${id}`);
 	return { verb, id };
+}
+
+/** Project-level changes use the same staged-proposal protocol as a block replan. */
+function requestScope(document: DiagramDocument, op: Record<string, unknown>): { verb: { kind: ActionKind; intent: Intent }; scope: Scope } {
+	if (op.verb === "prune") {
+		if (op.id !== undefined) throw new OpError("prune applies to the whole document");
+		return { verb: { kind: "prune", intent: "prune" }, scope: { kind: "project" } };
+	}
+	if (op.verb === "replan" && op.id === undefined) {
+		return { verb: { kind: "replan", intent: "replan" }, scope: { kind: "project" } };
+	}
+	const { verb, id } = verbRequest(document, op);
+	return { verb, scope: { kind: "block", id } };
 }
 
 /**

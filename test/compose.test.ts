@@ -171,6 +171,73 @@ describe("composed payloads", () => {
 		expect(refine).not.toContain("## Where to look");
 	});
 
+	test("replan keeps the settled work and reuses only the ids that survive", () => {
+		const briefs = {
+			brainstorm: "Replan this idea and the sub-ideas under it",
+			plan: "Replan this block and the blocks inside it",
+			explore: "Replan this part of the map",
+		} as const;
+		for (const purpose of ["brainstorm", "plan", "explore"] as const) {
+			const document = fixture();
+			document.purpose = purpose;
+			const prompt = composePrompt(document, { kind: "block", id: "api" }, "replan", {
+				request: { requestId: "req-1", baseRevision: 0 },
+			});
+			expect(prompt.text).toContain(briefs[purpose]);
+			expect(prompt.text).toContain("any block whose status is not `open`");
+			expect(prompt.text).toContain("same id");
+			expect(prompt.text).toContain("the target `Block` (same `id`) for a block-scope request");
+		}
+	});
+
+	test("a document replan asks for the whole document back", () => {
+		for (const purpose of ["brainstorm", "plan", "explore"] as const) {
+			const document = fixture();
+			document.purpose = purpose;
+			const prompt = composePrompt(document, { kind: "project" }, "replan", {
+				request: { requestId: "req-1", baseRevision: 0 },
+			});
+			expect(prompt.label).toBe('project "Service"');
+			expect(prompt.text).toContain("Return the whole document");
+			expect(prompt.text).toContain("Reuse the id of every");
+			expect(prompt.text).toContain("a whole `DiagramDocument` for a project-scope request");
+		}
+		const plan = composePrompt(fixture(), { kind: "project" }, "replan").text;
+		expect(plan).toContain("Replan this document against the goal above");
+		expect(plan).not.toContain("Replan this block");
+
+		const subsystem = composePrompt(fixture(), { kind: "diagram", id: "api-inner" }, "replan", {
+			request: { requestId: "req-1", baseRevision: 0 },
+		}).text;
+		expect(subsystem).toContain("the target `Diagram` for a diagram-scope request");
+		expect(subsystem).toContain("same diagram id");
+		expect(subsystem).not.toContain("Return the whole document");
+	});
+
+	test("prune names every removal, keeps settled work, and reads no code for a plan", () => {
+		const briefs = {
+			brainstorm: "Prune this mind map",
+			plan: "Prune this plan",
+			explore: "Prune this map",
+		} as const;
+		for (const purpose of ["brainstorm", "plan", "explore"] as const) {
+			const document = fixture();
+			document.purpose = purpose;
+			const prompt = composePrompt(document, { kind: "project" }, "prune", {
+				request: { requestId: "req-1", baseRevision: 0 },
+			});
+			expect(prompt.text).toContain(briefs[purpose]);
+			expect(prompt.text).toContain("stay, under their ids");
+			expect(prompt.text).toContain("name each removal with its reason in `summary`");
+			expect(prompt.text).toContain("## Proposal token");
+			expect(prompt.text).toContain("`visual_planner_propose`");
+			expect(prompt.text.includes("## Evidence rules")).toBe(purpose === "explore");
+		}
+		const plan = composePrompt(fixture(), { kind: "project" }, "prune", { codeRoot: "/work/app" }).text;
+		expect(plan).toContain("Change no code in the repository.");
+		expect(plan).not.toContain("## Where to look");
+	});
+
 	test("status appears with the purpose's words, and never in a brainstorm", () => {
 		const document = fixture();
 		document.root.blocks[0]!.status = "settled";

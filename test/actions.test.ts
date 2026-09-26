@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { BeginInput, BeginOutcome, StageContext } from "../src/actions.ts";
 import { ActionRegistry, validateReplacement } from "../src/actions.ts";
-import { createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
+import { type DiagramDocument, type Scope, createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
 
 const BRANCH = "session-1:leaf-a";
 
@@ -308,5 +308,109 @@ describe("proposal staging", () => {
 		expect(entry.state).toBe("accepted");
 		expect(entry.proposal?.summary).toBe("refine auth");
 		expect(restored.pending()).toBeUndefined();
+	});
+});
+
+describe("settled work survives a replan or a prune", () => {
+	/** `api` with its child `auth` settled by the human. */
+	function worktree(): DiagramDocument {
+		const document = sampleDocument();
+		document.root.blocks[0]!.children!.blocks[0]!.status = "settled";
+		return document;
+	}
+
+	function begin(
+		registry: ActionRegistry,
+		document: DiagramDocument,
+		kind: "replan" | "prune" | "enhance",
+		scope: Scope,
+	): void {
+		const began = registry.begin({
+			requestId: "req-1",
+			kind,
+			intent: kind,
+			scope,
+			label: "request",
+			branchKey: BRANCH,
+			documentId: document.id,
+			baseRevision: 3,
+			baseDigest: "digest-a",
+			prompt: "payload",
+		});
+		expect(began.ok).toBe(true);
+	}
+
+	test("a prune that drops the settled block is refused, one that drops open work is not", () => {
+		const registry = new ActionRegistry(BRANCH);
+		const document = worktree();
+		begin(registry, document, "prune", { kind: "project" });
+		const context = contextFor({ document });
+
+		const droppingAuth = structuredClone(document);
+		droppingAuth.root.blocks[0]!.children = null;
+		const refused = registry.stage("req-1", "pruned", droppingAuth, context);
+		expect(refused.ok).toBe(false);
+		if (refused.ok) throw new Error("unreachable");
+		expect(refused.errors[0]).toContain('"Auth" (auth)');
+		expect(refused.errors[0]).toContain("settled work");
+		expect(registry.entryFor("req-1")!.state).toBe("pending");
+
+		// `db` is open, so a prune may remove it — with the relationship that pointed at it.
+		const droppingDb = structuredClone(document);
+		droppingDb.root.blocks = droppingDb.root.blocks.filter(block => block.id !== "db");
+		droppingDb.root.edges = [];
+		expect(registry.stage("req-1", "pruned", droppingDb, context).ok).toBe(true);
+	});
+
+	test("a block replan may not drop the settled blocks inside it", () => {
+		const registry = new ActionRegistry(BRANCH);
+		const document = worktree();
+		begin(registry, document, "replan", { kind: "block", id: "api" });
+		const context = contextFor({ document });
+
+		const replaced = createBlock({
+			id: "api",
+			title: "API",
+			children: createDiagram({ id: "api-inner", blocks: [createBlock({ id: "rate-limit", title: "Rate limit" })] }),
+		});
+		const refused = registry.stage("req-1", "replanned", replaced, context);
+		expect(refused.ok).toBe(false);
+		if (refused.ok) throw new Error("unreachable");
+		expect(refused.errors[0]).toContain("auth");
+
+		// The id is what matters: a settled block that moves inside the replanned
+		// subtree is still kept.
+		const rehomed = createBlock({
+			id: "api",
+			title: "API",
+			children: createDiagram({
+				id: "api-inner",
+				blocks: [
+					createBlock({
+						id: "gateway",
+						title: "Gateway",
+						children: createDiagram({ blocks: [createBlock({ id: "auth", title: "Auth", status: "open" })] }),
+					}),
+				],
+			}),
+		});
+		expect(registry.stage("req-1", "replanned", rehomed, context).ok).toBe(true);
+	});
+
+	test("a proposal that cannot see the document keeps the old rules", () => {
+		const registry = new ActionRegistry(BRANCH);
+		const document = worktree();
+		begin(registry, document, "prune", { kind: "project" });
+		const droppingAuth = structuredClone(document);
+		droppingAuth.root.blocks[0]!.children = null;
+		expect(registry.stage("req-1", "pruned", droppingAuth, contextFor({ documentId: document.id })).ok).toBe(true);
+	});
+
+	test("the other kinds still restructure a settled block freely", () => {
+		const registry = new ActionRegistry(BRANCH);
+		const document = worktree();
+		begin(registry, document, "enhance", { kind: "block", id: "auth" });
+		const rewritten = createBlock({ id: "auth", title: "Auth v2", status: "open" });
+		expect(registry.stage("req-1", "refined", rewritten, contextFor({ document })).ok).toBe(true);
 	});
 });

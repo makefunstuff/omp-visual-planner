@@ -1,12 +1,9 @@
 /**
- * The web-mode page: one infinite node canvas, nothing else. Blocks are nodes
- * edited in place — the title inline, the rest as widgets inside the selected
- * node — relationships are wired port to port, and nesting is entered like a
- * subgraph. A static string: no session data is interpolated here; everything
- * arrives through `/api/state` and is rendered with `textContent`. Labels,
- * verbs and statuses come from `state.flow` (the same `flow.ts` the terminal
- * overlay uses); the page never hardcodes them. Styling follows the OpenCode
- * DESIGN.md tokens.
+ * The web-mode page: a focused building-block workspace with an optional
+ * coordinate map. A static string: no session data is interpolated here;
+ * everything arrives through `/api/state` and is rendered with textContent.
+ * Labels, verbs and statuses come from `state.flow` (the same `flow.ts` the
+ * terminal overlay uses). Styling follows the OpenCode DESIGN.md tokens.
  */
 export const WEB_PAGE = String.raw`<!doctype html>
 <html lang="en">
@@ -58,6 +55,38 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
 .edge-label { fill: var(--muted); font: 12px var(--mono); pointer-events: none; }
 .edge-label-bg { fill: var(--bg); }
 .wire { stroke: var(--accent); stroke-width: 1.5; fill: none; stroke-dasharray: 4 3; }
+
+/* Work at the level of a building block; the coordinate map is optional. */
+.workspace { position: fixed; inset: 56px 0 0; display: grid; grid-template-columns: minmax(210px, 25%) 1fr; background: var(--bg); }
+.workspace .rail { border-right: 1px solid var(--line); overflow: auto; padding: 18px 10px 56px; }
+.rail .label, .block-page .label { color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.rail .row { display: flex; align-items: center; width: 100%; gap: 8px; text-align: left; border: 0; border-radius: 0; padding: 5px 8px; background: transparent; }
+.rail .row.current { color: var(--accent); background: var(--accent-soft); }
+.rail .row .name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; }
+.rail .actions { display: flex; gap: 6px; margin: 18px 8px; flex-wrap: wrap; }
+.block-page { overflow: auto; padding: 30px clamp(22px, 5vw, 88px) 90px; }
+.block-page h1 .text { font-size: 24px; font-weight: 700; line-height: 1.3; background: transparent; border: 0; padding: 0; }
+.block-page .content { max-width: 850px; margin: 0 auto; }
+.block-page h1 { font-size: 24px; line-height: 1.3; margin: 8px 0 4px; }
+.block-page h2 { font-size: 13px; margin: 0 0 6px; }
+.block-page section { margin-top: 24px; border-top: 1px solid var(--line); padding-top: 14px; }
+.block-page .subtle { color: var(--muted); }
+.block-page .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.block-page .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 24px; }
+.block-page .fields .wide { grid-column: 1 / -1; }
+.block-page .fields .text { font-size: 13px; }
+.block-page .fields .md { font-size: 13px; }
+.block-page .relation { display: flex; gap: 8px; align-items: baseline; margin: 5px 0; }
+.block-page .relation button { border: 0; background: transparent; padding: 0; text-align: left; }
+.block-page .status { display: flex; gap: 4px; margin-top: 12px; }
+.block-page .status button.active { color: var(--on-ink); background: var(--ink); }
+.block-page .sources button { display: block; border: 0; padding: 2px 0; background: transparent; color: var(--accent); text-align: left; }
+@media (max-width: 680px) {
+  .workspace { inset: 92px 0 0; grid-template-columns: 1fr; }
+  .workspace .rail { max-height: 24vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  .block-page { padding: 18px 20px 80px; }
+  .block-page .fields { grid-template-columns: 1fr; }
+}
 
 .node { position: absolute; background: var(--bg); border: 1px solid var(--line-strong); user-select: none; }
 .node.selected { border-color: var(--accent); outline: 1px solid var(--accent); z-index: 3; }
@@ -127,6 +156,15 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
 .hud .crumbs a.here { color: var(--text); text-decoration: none; cursor: default; }
 .hud .chip { font-size: 11px; color: var(--on-ink); background: var(--ink); border-radius: 4px; padding: 0 6px; white-space: nowrap; }
 .hud .zoom { color: var(--muted); min-width: 5ch; text-align: right; }
+@media (max-width: 680px) {
+  .hud.tl { left: 8px; right: 8px; top: 8px; max-width: none; }
+  .hud.tr { left: 8px; right: 8px; top: 44px; overflow-x: auto; white-space: nowrap; }
+  .hud.tr button { flex: none; }
+  .hud .doc { width: min(45vw, 22ch); }
+  .hud.tl .muted { display: none; }
+  .hud.tr .chip { display: none; }
+  .hud.bl.hint { display: none; }
+}
 /* Progress: a click waiting on the server, and the agent working on a request. */
 .spin { display: inline-block; width: 1ch; color: var(--accent); }
 .activity { display: flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; max-width: 46ch; overflow: hidden; }
@@ -209,7 +247,8 @@ body.busy, body.busy * { cursor: progress; }
 </style>
 </head>
 <body>
-<div class="viewport" id="viewport">
+<div class="workspace" id="workspace"><nav class="rail" id="rail" aria-label="Building blocks"></nav><main class="block-page" id="blockPage"></main></div>
+<div class="viewport" id="viewport" hidden>
   <div class="world" id="world"><svg class="edges" id="edges"></svg></div>
 </div>
 <header class="hud tl">
@@ -223,8 +262,9 @@ body.busy, body.busy * { cursor: progress; }
   <button class="ghost" id="undo" title="Undo (⌘Z)">Undo</button>
   <button class="ghost" id="redo" title="Redo (⇧⌘Z)">Redo</button>
   <button class="ghost" id="filesToggle" title="Files in this workspace (/)">Files</button>
-  <button class="ghost" id="tidy" title="Lay this level out on the grid (T)">Tidy</button>
-  <button class="ghost" id="fit" title="Fit to screen (F)">Fit</button>
+  <button class="ghost" id="mapToggle" title="Toggle between block page and map">Map</button>
+  <button class="ghost" id="tidy" title="Lay this level out on the grid (T)" hidden>Tidy</button>
+  <button class="ghost" id="fit" title="Fit to screen (F)" hidden>Fit</button>
   <span class="activity" id="activity" hidden></span>
   <span class="zoom" id="zoom"></span>
   <button class="primary" id="save" title="Save (⌘S)">Save</button>
@@ -244,12 +284,14 @@ body.busy, body.busy * { cursor: progress; }
 // terminal does not overlap here. A selected node grows over its neighbours.
 const SX = 11, SY = 26, CARD_ROWS = 4, GUTTER = 8;
 const PURPOSES = ["brainstorm", "plan", "explore"];
-const HINT = "double-click canvas: new block · drag a port: link · enter: open inside · esc: up · space: status · n: next open · T: tidy · F: fit";
+const HINT = "choose a block to work on · edit its intent and outcome · replan or prune through review · Map opens coordinates";
 function cardCols(title) { return Math.max(12, Math.min(32, [...title].length + 2)); }
 
 let state = null, message = "", messageIsError = false, opCount = 0;
 let selectedEdge = null, preview = null, gesture = null, editTitleOf = null, editBodyOf = null, centerOn = null;
-const views = new Map(); // diagram id -> { x, y, k }: pan and zoom are the viewer's, not the document's
+let surface = "page";
+const views = new Map(); // diagram id -> map pan and zoom, not document content
+const insights = new Map(); // only inspected anchors; never index the whole workspace
 const $ = id => document.getElementById(id);
 function el(tag, props, ...children) {
   const node = document.createElement(tag);
@@ -369,9 +411,125 @@ function render() {
   renderFiles();
   renderViewer();
   renderStart();
-  // Never rebuild a node under the cursor, or mid-gesture; the next render catches up.
-  if (!editing() && !gesture) renderCanvas();
-  applyView();
+  $("workspace").hidden = surface !== "page";
+  $("viewport").hidden = surface !== "map";
+  $("mapToggle").textContent = surface === "map" ? "Block page" : "Map";
+  $("zoom").hidden = surface !== "map";
+  $("tidy").hidden = $("fit").hidden = surface !== "map";
+  if (surface === "page") {
+    const active = document.activeElement;
+    if (!($("workspace").contains(active) && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName))) renderWorkspace();
+  } else if (!editing() && !gesture) renderCanvas();
+  if (surface === "map") applyView();
+}
+
+/** The document is authored as decisions and outcomes; the map only visualizes them. */
+function renderWorkspace() {
+  const doc = state.document, rail = $("rail"), page = $("blockPage");
+  const railScroll = rail.scrollTop, pageScroll = page.scrollTop;
+  rail.replaceChildren();
+  page.replaceChildren();
+  if (!doc) return;
+  rail.append(el("div", { class: "label", style: "padding:0 8px 12px", text: "Building blocks · " + state.flow.progress }));
+  const walk = (diagram, depth) => {
+    for (const block of diagram.blocks) {
+      const status = state.flow.status ? state.flow.status.glyphs[block.status] + " " : "";
+      rail.append(el("button", {
+        class: "row" + (block.id === state.selected ? " current" : ""),
+        style: "padding-left:" + (8 + depth * 18) + "px",
+        onclick: () => op({ op: "focus", id: block.id }),
+      }, el("span", { text: status }), el("span", { class: "name", text: block.title || "(untitled)" }),
+      block.children?.blocks.length ? el("span", { class: "subtle", text: String(block.children.blocks.length) }) : null));
+      if (block.children) walk(block.children, depth + 1);
+    }
+  };
+  walk(doc.root, 0);
+  rail.append(el("div", { class: "actions" },
+    el("button", { text: "+ block", onclick: () => op(state.selected ? { op: "addBlock", afterId: state.selected } : { op: "addBlock" }) }),
+    state.flow.nextOpen ? el("button", { text: "next open", onclick: () => op({ op: "focus", id: state.flow.nextOpen }) }) : null,
+    el("button", { text: "project", onclick: () => op({ op: "focus", id: null }) })));
+  const content = el("div", { class: "content" });
+  page.append(content);
+  const block = selectedBlock();
+  if (!block) {
+    content.append(el("div", { class: "label", text: doc.purpose + " / project" }),
+      el("h1", { text: doc.title }), el("p", { class: "subtle", text: doc.goal || "Select a building block or add one." }),
+      el("div", { class: "actions" },
+        el("button", { text: "Replan project…", onclick: () => openPreview("replan") }),
+        el("button", { text: "Prune excess…", onclick: () => openPreview("prune") }),
+        el("button", { text: "+ block", onclick: () => op({ op: "addBlock" }) })));
+    rail.scrollTop = railScroll; page.scrollTop = pageScroll;
+    return;
+  }
+  const patch = fields => op({ op: "patchBlock", id: block.id, fields });
+  content.append(el("div", { class: "label", text: state.breadcrumb.map(c => c.title).join(" › ") }),
+    el("h1", null, inlineText(block.title, "Block title", value => { if (value.trim()) patch({ title: value.trim() }); })),
+    state.flow.status ? el("div", { class: "status" }, ...state.flow.status.cycle.map(status =>
+      el("button", { class: block.status === status ? "active" : "", text: state.flow.status.labels[status],
+        onclick: () => op({ op: "setStatus", id: block.id, status }) }))) : null);
+  const fields = el("div", { class: "fields" });
+  for (const { field, label } of state.flow.fields) {
+    if (field === "title" || field === "sources" || field === "enhance" || field === "execute") continue;
+    const cell = el("div", { class: field === "description" ? "wide" : "" }, el("div", { class: "label", text: label }));
+    if (field === "description") {
+      if (block.description.trim() && editBodyOf !== block.id) {
+        const view = markdown(block.description);
+        view.addEventListener("click", () => { editBodyOf = block.id; renderWorkspace(); });
+        cell.append(view);
+      } else {
+        const input = inlineText(block.description, "What is this building block for?", value => patch({ description: value }), () => { editBodyOf = null; });
+        cell.append(input);
+        if (editBodyOf === block.id) requestAnimationFrame(() => input.focus());
+      }
+    } else if (field === "criteria") cell.append(checklist(block.acceptanceCriteria, "Acceptance criterion", value => patch({ acceptanceCriteria: value })));
+    else if (field === "evidence") {
+      const select = el("select", { onchange: () => patch({ evidence: select.value }) },
+        ...["unknown", "inferred", "observed"].map(value => el("option", { value, text: value, selected: value === block.evidence })));
+      cell.append(select);
+    } else if (field === "expectedOutput") cell.append(inlineText(block.expectedOutput, "What does it produce?", value => patch({ expectedOutput: value })));
+    fields.append(cell);
+  }
+  content.append(el("section", null, fields));
+  const actions = el("div", { class: "actions" },
+    ...state.flow.verbs.map(verb => el("button", { class: verb.id === "replan" ? "primary" : "", text: verb.label + " →", onclick: () => openPreview(verb.id, block.id) })),
+    el("button", { text: "+ inside", onclick: () => op({ op: "addBlock", parentId: block.id }) }),
+    el("button", { class: "danger", text: "Delete block", onclick: () => removeBlock(block) }));
+  content.append(actions);
+  const diagram = currentDiagram();
+  const relations = diagram.edges.filter(edge => edge.from === block.id || edge.to === block.id);
+  const section = el("section", null, el("h2", { text: "Relationships" }));
+  for (const edge of relations) {
+    const outbound = edge.from === block.id, other = diagram.blocks.find(candidate => candidate.id === (outbound ? edge.to : edge.from));
+    section.append(el("div", { class: "relation" }, el("span", { class: "subtle", text: outbound ? "output →" : "input ←" }),
+      el("button", { text: (other?.title || "?") + (edge.label ? " · " + edge.label : ""), onclick: () => other && op({ op: "focus", id: other.id }) })));
+  }
+  if (!relations.length) section.append(el("p", { class: "subtle", text: "No relationships yet. Connect blocks in Map when a dependency matters." }));
+  content.append(section);
+  if (block.children?.blocks.length) content.append(el("section", null, el("h2", { text: "Inside" }),
+    ...block.children.blocks.map(child => el("div", { class: "relation" },
+      el("button", { text: child.title || "(untitled)", onclick: () => op({ op: "focus", id: child.id }) })))));
+  if (block.sources.length) {
+    const sources = el("section", { class: "sources" }, el("h2", { text: "Code evidence" }));
+    for (const source of block.sources) {
+      const line = source.startLine || 1, key = source.path + ":" + line, insight = insights.get(key);
+      sources.append(el("div", { class: "relation" },
+        el("button", { text: source.path + (source.startLine ? ":" + source.startLine + (source.endLine ? "-" + source.endLine : "") : ""),
+          onclick: () => openFile(source.path, source.startLine), title: "Open source in the file viewer" }),
+        el("button", { text: "inspect syntax", onclick: () => inspectAnchor(source.path, line) })));
+      if (insight) sources.append(el("div", { class: "subtle", text: insight.error || (
+        (insight.range ? "syntax block " + insight.range.startLine + "–" + insight.range.endLine + " · " : "") +
+        (insight.symbols?.map(node => node.kind).join(" › ") || "no enclosing syntax nodes") + " · " + insight.limitation) }));
+    }
+    content.append(sources);
+  }
+  rail.scrollTop = railScroll; page.scrollTop = pageScroll;
+}
+
+async function inspectAnchor(path, line) {
+  const response = await fetch("/api/insight?path=" + encodeURIComponent(path) + "&line=" + line).catch(() => null);
+  const result = response ? await response.json().catch(() => ({ error: "could not read source insight" })) : { error: "offline" };
+  insights.set(path + ":" + line, result);
+  renderWorkspace();
 }
 
 // ---------------------------------------------------------------- progress
@@ -571,6 +729,7 @@ function renderHud() {
   $("dirty").classList.toggle("on", state.dirty);
   $("session").textContent = "web · " + state.sessionId.slice(0, 8);
   $("message").textContent = message || HINT;
+  $("message").parentElement.classList.toggle("hint", !message);
   $("message").classList.toggle("error", messageIsError);
   $("undo").disabled = !state.canUndo;
   $("redo").disabled = !state.canRedo;
@@ -591,7 +750,7 @@ function renderStart() {
   const doc = state.document;
   const diagram = currentDiagram();
   const emptyRoot = doc && doc.root.blocks.length === 0;
-  host.hidden = !!doc && !emptyRoot && diagram && diagram.blocks.length > 0;
+  host.hidden = !!doc && !emptyRoot && (surface === "page" || !!diagram?.blocks.length);
   // Only a field being typed in is protected from a redraw; a clicked button is not.
   const typing = document.activeElement && document.activeElement.tagName === "INPUT" && host.contains(document.activeElement);
   if (host.hidden || typing) return;
@@ -620,11 +779,12 @@ function renderStart() {
   if (emptyRoot) {
     const input = el("input", { type: "text", placeholder: "what is this about? (or a path to map)" });
     const actions = state.flow.projectActions.map(action => el("button", { class: action.kind === "draft" ? "primary" : "", text: action.label, onclick: () => startProject(action.kind, input.value) }));
-    host.append(el("h1", { text: doc.title }), input, el("div", { class: "row" }, ...actions),
-      el("div", { class: "hint", text: "…or double-click anywhere to place the first block yourself." }));
+    host.append(el("h1", { text: doc.title }), input, el("div", { class: "row" }, ...actions,
+      el("button", { text: "+ first block", onclick: () => op({ op: "addBlock" }) })),
+      el("div", { class: "hint", text: "Start with the outcome you want, then work on one block at a time." }));
     return;
   }
-  host.append(el("div", { class: "hint", style: "pointer-events:none", text: "Nothing inside yet — double-click to add a block." }));
+  host.append(el("div", { class: "hint", style: "pointer-events:none", text: "Nothing inside yet — add a child block or return to the project." }));
 }
 
 /** Borderless, self-sizing text that commits when it loses focus; onDone runs first, before any redraw. */
@@ -968,6 +1128,7 @@ async function submitVerb(verb, id) {
   if (result.ok) closeModal();
 }
 function startProject(kind, text) {
+  if (kind === "prune" || kind === "replan") { openPreview(kind); return; }
   if (kind === "draft") {
     if (!text.trim()) { flash("a draft needs a goal: type what this is about", true); render(); return; }
     op({ op: "submit", start: { kind: "draft", goal: text, purpose: state.document.purpose === "brainstorm" ? "brainstorm" : "plan" } });
@@ -1128,6 +1289,7 @@ $("redo").addEventListener("click", () => op({ op: "redo" }));
 $("save").addEventListener("click", () => op({ op: "save" }));
 $("tidy").addEventListener("click", async () => { await op({ op: "tidy" }); fit(); });
 $("fit").addEventListener("click", fit);
+$("mapToggle").addEventListener("click", () => { surface = surface === "map" ? "page" : "map"; render(); if (surface === "map") fit(); });
 $("filesToggle").addEventListener("click", () => { filesOpen = !filesOpen; if (filesOpen) loadFiles(); render(); });
 for (const value of PURPOSES) $("purpose").append(el("option", { value, text: value }));
 $("purpose").addEventListener("change", () => op({ op: "setPurpose", purpose: $("purpose").value }));
@@ -1150,17 +1312,28 @@ document.addEventListener("keydown", event => {
   if (verb) { event.preventDefault(); if (block) openPreview(verb.id, block.id); return; }
   switch (event.key) {
     case "Escape":
+      if (surface === "map") { surface = "page"; render(); return; }
       if (selectedEdge) { selectedEdge = null; render(); return; }
       if (block) { op({ op: "focus", id: null }); return; }
       if (state.stack.length > 1) op({ op: "navigate", diagramId: state.stack[state.stack.length - 2] });
       return;
-    case "Enter": if (block) op({ op: "enter", id: block.id }); return;
+    case "Enter": if (surface === "map" && block) op({ op: "enter", id: block.id }); return;
     case " ": event.preventDefault(); if (block) stepStatus(block); return;
     case "n": if (state.flow.nextOpen) { centerOn = state.flow.nextOpen; op({ op: "focus", id: state.flow.nextOpen }); } return;
-    case "o": op(block ? { op: "addBlock", afterId: block.id } : { op: "addBlock" }).then(r => { if (r.ok) { editTitleOf = state.selected; renderCanvas(); } }); return;
-    case "O": if (block) op({ op: "addBlock", parentId: block.id }).then(r => { if (r.ok) { editTitleOf = state.selected; renderCanvas(); } }); return;
-    case "T": op({ op: "tidy" }).then(fit); return;
-    case "F": case "f": fit(); return;
+    case "j": case "k": {
+      const ids = [];
+      const walk = diagram => { for (const item of diagram.blocks) { ids.push(item.id); if (item.children) walk(item.children); } };
+      walk(state.document.root);
+      if (ids.length) {
+        const index = ids.indexOf(state.selected);
+        op({ op: "focus", id: ids[index < 0 ? (event.key === "j" ? 0 : ids.length - 1) : (index + (event.key === "j" ? 1 : ids.length - 1)) % ids.length] });
+      }
+      return;
+    }
+    case "o": op(block ? { op: "addBlock", afterId: block.id } : { op: "addBlock" }).then(r => { if (r.ok && surface === "map") { editTitleOf = state.selected; renderCanvas(); } }); return;
+    case "O": if (block) op({ op: "addBlock", parentId: block.id }).then(r => { if (r.ok && surface === "map") { editTitleOf = state.selected; renderCanvas(); } }); return;
+    case "T": if (surface === "map") op({ op: "tidy" }).then(fit); return;
+    case "F": case "f": if (surface === "map") fit(); return;
     case "F2": if (block) { editTitleOf = block.id; renderCanvas(); } return;
     case "Delete": case "Backspace":
       if (selectedEdge) { const id = selectedEdge; selectedEdge = null; op({ op: "removeEdge", id }); return; }

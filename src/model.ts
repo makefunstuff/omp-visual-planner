@@ -82,7 +82,7 @@ export interface Scope {
 	id?: string;
 }
 
-export type Intent = "plan" | "discover" | "enhance" | "decompose" | "investigate" | "execute";
+export type Intent = "plan" | "discover" | "enhance" | "decompose" | "investigate" | "execute" | "replan" | "prune";
 
 export type Direction = "h" | "j" | "k" | "l";
 

@@ -31,7 +31,6 @@ export const SESSION_NAMESPACE = "makefunstuff.omp-visual-planner.state";
 
 /** Files above this size are never read blindly into a viewer. */
 export const MAX_VIEWER_FILE_BYTES = 2 * 1024 * 1024;
-export const MAX_VIEWER_LINES = 400;
 
 export function slugify(input: string): string {
 	const slug = input

@@ -249,8 +249,8 @@ describe("canvas rendering", () => {
 		h.screen.handleInput("o");
 		h.screen.handleInput("a");
 		h.screen.render(120);
-		// Refine, Break down, Execute, Draft…, then Discover…
-		for (let step = 0; step < 4; step += 1) h.screen.handleInput("j");
+		// Refine, Break down, Replan, Execute, Draft…, then Discover…
+		for (let step = 0; step < 5; step += 1) h.screen.handleInput("j");
 		h.screen.handleInput("\r");
 		h.screen.render(120);
 		h.screen.handleInput("\r");
@@ -477,8 +477,67 @@ describe("interaction", () => {
 		for (const line of after) expect(visibleWidth(line)).toBe(120);
 	});
 
+	test("a staged prune that drops settled work is shown as an error and never applied", async () => {
+		const document = fixture();
+		document.root.blocks[0]!.status = "settled";
+		const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-prune-"));
+		directories.push(directory);
+		const path = join(directory, "architecture.json");
+		await writeFile(path, serializeDocument(document), "utf8");
+		const store = new DocumentStore(type);
+		await store.open(path);
+		const registry = new ActionRegistry("session:leaf");
+		registry.begin({
+			requestId: "req-2",
+			kind: "prune",
+			intent: "prune",
+			scope: { kind: "project" },
+			label: 'project "Service"',
+			branchKey: "session:leaf",
+			documentId: document.id,
+			baseRevision: 0,
+			baseDigest: undefined,
+			prompt: "payload",
+		});
+		const replacement = structuredClone(document);
+		replacement.root.blocks = replacement.root.blocks.filter(block => block.id !== "api");
+		replacement.root.edges = [];
+		// A client that did not hand the document to staging still gets the guard here.
+		const staged = registry.stage("req-2", "pruned the plan", replacement, {
+			branchKey: "session:leaf",
+			documentId: document.id,
+			diskDigest: undefined,
+			arktype: type,
+		});
+		expect(staged.ok).toBe(true);
+
+		const screen = new DiagramScreen(
+			{
+				tui: { terminal: { columns: 120, rows: 24 }, requestRender: () => {} } as never,
+				theme,
+				ui: uiStub,
+				store,
+				registry,
+				arktype: type,
+				cwd: directory,
+				branchKey: "session:leaf",
+				documentPathHint: path,
+				hasUI: true,
+				isIdle: () => true,
+				hasPendingMessages: () => false,
+			},
+			() => {},
+		);
+		expect(plain(screen.render(120)).join("\n")).toContain("settled work");
+		screen.handleInput("\r");
+		expect(plain(screen.render(120)).join("\n")).toContain("settled work");
+		expect(store.require().root.blocks.map(block => block.id)).toEqual(["api", "db", "worker"]);
+		expect(registry.pending()?.state).toBe("staged");
+	});
+
 	test("a modal is drawn over the diagram, not instead of it", async () => {
-		const h = await harness(canvas);
+		// Tall enough that the action menu cannot cover every card.
+		const h = await harness({ ...canvas, rows: 34 });
 		h.screen.render(120);
 		h.screen.handleInput("a");
 		const lines = plain(h.screen.render(120));
@@ -589,6 +648,40 @@ describe("inspector field editor", () => {
 		expect(lines.join("\n")).toContain("title: Zeta");
 		expect(dialogRows(lines, "Enter accepts").join("\n")).not.toContain("zzz");
 	});
+
+	test("source pane scrolls through the entire file without closing on navigation", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "omp-planner-source-"));
+		directories.push(directory);
+		const path = join(directory, "example.ts");
+		await writeFile(path, Array.from({ length: 520 }, (_, index) => `// line-${String(index + 1).padStart(3, "0")}`).join("\n"));
+		const document = fixture();
+		document.purpose = "explore";
+		document.root.blocks[0]!.sources = [{ path, startLine: 200, endLine: 200 }];
+		const h = await harness({ width: 120, rows: 24, document });
+		h.screen.handleInput("\r"); // page
+		for (let index = 0; index < 3; index += 1) h.screen.handleInput("j");
+		h.screen.handleInput("\r"); // source reference
+		for (let attempt = 0; attempt < 100 && !plain(h.screen.render(120)).join("\n").includes("source:"); attempt += 1)
+			await Bun.sleep(5);
+		const rows = () => dialogRows(plain(h.screen.render(120)), "source:");
+		expect(rows().join("\n")).toContain("line-200");
+		const first = rows()[0];
+		h.screen.handleInput("j");
+		expect(rows()[0]).not.toBe(first);
+		const second = rows()[0];
+		h.screen.handleInput("\x1b[6~");
+		expect(rows()[0]).not.toBe(second);
+		h.screen.handleInput("\x1b[5~");
+		expect(rows()[0]).toBe(second);
+		h.screen.handleInput("\x1b[B");
+		expect(rows()[0]).not.toBe(second);
+		h.screen.handleInput("G");
+		expect(rows().join("\n")).toContain("line-520");
+		h.screen.handleInput("g");
+		expect(rows().join("\n")).toContain("line-001");
+		h.screen.handleInput("\x1b");
+		expect(plain(h.screen.render(120)).join("\n")).not.toContain("source:");
+	});
 });
 
 describe("outline", () => {
@@ -653,6 +746,45 @@ describe("outline", () => {
 		const joined = plain(h.screen.render(120)).join("\n");
 		expect(joined).toContain('preview — block "API"');
 		expect(joined).toContain("Refine this block's authored text");
+	});
+
+	test("t offers a replan of the focused block and submits it without touching the document", async () => {
+		const h = await harness();
+		const before = serializeDocument(h.store.require());
+		expect(plain(h.screen.render(120)).join("\n")).toContain("t replan");
+		h.screen.handleInput("t");
+		const preview = plain(h.screen.render(120)).join("\n");
+		expect(preview).toContain('preview — block "API"');
+		expect(preview).toContain("Replan this block and the blocks inside it");
+		h.screen.handleInput("\r");
+		const result = h.result() as { kind: string; request: BeginInput; prompt: string };
+		expect(result.kind).toBe("submit");
+		expect(result.request).toMatchObject({ kind: "replan", intent: "replan", scope: { kind: "block", id: "api" } });
+		expect(result.prompt).toContain(`requestId: ${result.request.requestId}`);
+		expect(serializeDocument(h.store.require())).toBe(before);
+	});
+
+	test("the action menu offers project replan and prune against the whole document", async () => {
+		for (const [steps, label, kind] of [
+			[6, "Replan the document…", "replan"],
+			[7, "Prune unnecessary blocks…", "prune"],
+		] as const) {
+			const h = await harness();
+			const before = serializeDocument(h.store.require());
+			h.screen.render(120);
+			h.screen.handleInput("a");
+			expect(plain(h.screen.render(120)).join("\n")).toContain(label);
+			for (let step = 0; step < steps; step += 1) h.screen.handleInput("j");
+			h.screen.handleInput("\r");
+			const preview = plain(h.screen.render(120)).join("\n");
+			expect(preview).toContain('preview — project "Service"');
+			expect(preview).toContain(kind === "prune" ? "Prune this plan" : "Replan this document against the goal above");
+			h.screen.handleInput("\r");
+			const result = h.result() as { kind: string; request: BeginInput };
+			expect(result.kind).toBe("submit");
+			expect(result.request).toMatchObject({ kind, intent: kind, scope: { kind: "project" } });
+			expect(serializeDocument(h.store.require())).toBe(before);
+		}
 	});
 
 	test("a verb the purpose does not offer says so", async () => {

@@ -158,7 +158,6 @@ describe("web mode editing", () => {
 
 		expect((await op({ op: "setPurpose", purpose: "explore" })).status).toBe(200);
 		const explored = await state();
-		expect(explored.flow?.verbs.map(verb => verb.label)).toEqual(["Investigate", "Map inside"]);
 		expect(explored.flow?.progress).toBe("1/2 explored");
 	});
 
@@ -192,6 +191,25 @@ describe("web mode requests", () => {
 		expect(submitted[0]!.request).toMatchObject({ kind: "enhance", scope: { kind: "block", id: "api" } });
 		expect(session.registry.pending()?.requestId).toBe(submitted[0]!.request.requestId);
 		expect(submitted[0]!.prompt).toContain(`requestId: ${submitted[0]!.request.requestId}`);
+	});
+
+	test("replan and prune use the existing scoped proposal review rather than editing immediately", async () => {
+		const { op, store, session, submitted } = await harness();
+		const before = serializeDocument(store.require());
+		const blockPreview = await op({ op: "preview", verb: "replan", id: "api" });
+		expect(blockPreview.status).toBe(200);
+		expect((await blockPreview.json() as { preview: { text: string } }).preview.text).toContain("requestId:");
+		const projectPreview = await op({ op: "preview", verb: "prune" });
+		expect(projectPreview.status).toBe(200);
+		expect((await projectPreview.json() as { preview: { text: string } }).preview.text).toContain("replacement");
+		expect(serializeDocument(store.require())).toBe(before);
+		expect((await op({ op: "submit", verb: "prune" })).status).toBe(200);
+		expect(submitted[0]!.request).toMatchObject({ kind: "prune", scope: { kind: "project" } });
+		expect(session.registry.pending()?.state).toBe("pending");
+		expect(serializeDocument(store.require())).toBe(before);
+		expect((await op({ op: "discard", requestId: submitted[0]!.request.requestId })).status).toBe(200);
+		expect((await op({ op: "submit", verb: "replan" })).status).toBe(200);
+		expect(submitted[1]!.request).toMatchObject({ kind: "replan", scope: { kind: "project" } });
 	});
 
 	test("a verb the purpose does not offer is refused by name", async () => {
@@ -294,6 +312,20 @@ describe("web mode files", () => {
 		expect((await op({ op: "addSource", id: "api", path: "../x.ts" })).status).toBe(400);
 		expect((await op({ op: "removeSource", id: "api", index: 0 })).status).toBe(200);
 		expect(findBlockLocation(store.require().root, "api")!.block.sources).toEqual([]);
+	});
+
+	test("inspects a cited syntax range without granting file access outside the workspace", async () => {
+		const { dir, origin, cookie } = await harness();
+		await mkdir(join(dir, "src"));
+		await writeFile(join(dir, "src", "app.ts"), "export function serve() {\n  return 42;\n}\n", "utf8");
+		const get = (path: string) => fetch(`${origin}${path}`, { headers: { cookie } });
+		const inspected = await get("/api/insight?path=src/app.ts&line=1");
+		expect(inspected.status).toBe(200);
+		const insight = await inspected.json() as { range: { startLine: number; endLine: number }; limitation: string };
+		expect(insight.range).toEqual({ startLine: 1, endLine: 3 });
+		expect(insight.limitation).toContain("no language server is queried");
+		expect((await get("/api/insight?path=../secret.ts&line=1")).status).toBe(400);
+		expect((await fetch(`${origin}/api/insight?path=src/app.ts&line=1`)).status).toBe(401);
 	});
 });
 

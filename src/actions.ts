@@ -13,12 +13,22 @@ import {
 	type DiagramDocument,
 	type Intent,
 	type Scope,
+	findBlockLocation,
+	findDiagram,
 	validateBlock,
 	validateDiagram,
 	validateDocument,
 } from "./model.ts";
 
-export type ActionKind = "draft" | "discover" | "enhance" | "decompose" | "investigate" | "execute";
+export type ActionKind =
+	| "draft"
+	| "discover"
+	| "enhance"
+	| "decompose"
+	| "investigate"
+	| "execute"
+	| "replan"
+	| "prune";
 
 export type JournalState =
 	| "pending"
@@ -71,6 +81,12 @@ export interface StageContext {
 	documentId: string;
 	/** Digest of the project file as it is on disk right now. */
 	diskDigest: string | undefined;
+	/**
+	 * The document the request was written against. With it, staging refuses a
+	 * replan or prune that would drop settled work; without it, `stage` loses
+	 * that check (acceptance keeps it either way).
+	 */
+	document?: DiagramDocument;
 	arktype: ArkTypeNamespace;
 }
 
@@ -164,6 +180,57 @@ export function validateReplacement(
 		};
 	}
 	return { ok: true, replacement: validated.block };
+}
+
+/** Every block in these trees, depth-first: parents before their children. */
+function* walkBlocks(blocks: readonly Block[]): Generator<Block> {
+	for (const block of blocks) {
+		yield block;
+		if (block.children) yield* walkBlocks(block.children.blocks);
+	}
+}
+
+/** The blocks a replacement introduces, whatever shape the scope asks for. */
+function replacementRoots(replacement: DiagramDocument | Block | Diagram): readonly Block[] {
+	if (isDocumentReplacement(replacement)) return replacement.root.blocks;
+	if (isDiagramReplacement(replacement)) return replacement.blocks;
+	return [replacement];
+}
+
+/** The blocks a scope covers in the document it was written against. */
+function scopedBlocks(document: DiagramDocument, scope: Scope): Block[] | undefined {
+	if (scope.kind === "project") return [...walkBlocks(document.root.blocks)];
+	if (scope.id === undefined) return undefined;
+	if (scope.kind === "block") {
+		const location = findBlockLocation(document.root, scope.id);
+		return location ? [...walkBlocks([location.block])] : undefined;
+	}
+	const diagram = scope.id === document.root.id ? document.root : findDiagram(document.root, scope.id);
+	return diagram ? [...walkBlocks(diagram.blocks)] : undefined;
+}
+
+/**
+ * Blocks a proposal may not drop. Status belongs to the human: a replan or a
+ * prune may restructure everything unsettled, but a block the human already
+ * settled (planned, explored or done) must survive inside its scope under the
+ * same id. Every other request kind is untouched by this rule.
+ */
+export function retentionErrors(
+	request: Pick<JournalEntry, "intent" | "scope">,
+	document: DiagramDocument,
+	replacement: DiagramDocument | Block | Diagram,
+): string[] {
+	if (request.intent !== "replan" && request.intent !== "prune") return [];
+	const scoped = scopedBlocks(document, request.scope);
+	if (!scoped) return [];
+	const survivors = new Set([...walkBlocks(replacementRoots(replacement))].map(block => block.id));
+	const dropped = scoped.filter(block => block.status !== "open" && !survivors.has(block.id));
+	if (dropped.length === 0) return [];
+	const names = dropped.slice(0, 5).map(block => `"${block.title || block.id}" (${block.id})`).join(", ");
+	const more = dropped.length > 5 ? ` and ${dropped.length - 5} more` : "";
+	return [
+		`this ${request.intent} would drop settled work: ${names}${more} — a ${request.intent} keeps every block the human settled, under its id`,
+	];
 }
 
 /**
@@ -269,6 +336,10 @@ export class ActionRegistry {
 		}
 		const validated = validateReplacement(entry, replacement, context.arktype);
 		if (!validated.ok) return validated;
+		if (context.document) {
+			const retained = retentionErrors(entry, context.document, validated.replacement);
+			if (retained.length > 0) return { ok: false, errors: retained };
+		}
 		const proposal: StagedProposal = {
 			summary: summary.trim(),
 			replacement: validated.replacement,

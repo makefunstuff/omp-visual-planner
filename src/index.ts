@@ -507,6 +507,7 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 			const outcome = session.registry.stage(params.requestId, params.summary, params.replacement, {
 				branchKey: session.branchToken,
 				documentId: document.id,
+				document,
 				diskDigest,
 				arktype: pi.arktype,
 			});

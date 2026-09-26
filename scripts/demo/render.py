@@ -19,7 +19,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 CSI_RE = re.compile(r"^([?<>!]?)([0-9;:]*)([a-zA-Z@`~])$")
 
-FONT_PATH = "/System/Library/Fonts/Menlo.ttc"
+FONT_PATHS = ["/System/Library/Fonts/Menlo.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"]
 FALLBACK_FONT = "/System/Library/Fonts/Apple Symbols.ttf"
 # Glyphs the terminal may show through a Nerd Font that no installed font has.
 SUBSTITUTES = {
@@ -449,13 +449,23 @@ def main() -> None:
     cast_path = sys.argv[1]
     out_dir = sys.argv[2]
     os.makedirs(out_dir, exist_ok=True)
-    font = ImageFont.truetype(FONT_PATH, FONT_SIZE)
+    font_path = next((path for path in FONT_PATHS if os.path.exists(path)), None)
+    font = ImageFont.truetype(font_path, FONT_SIZE) if font_path else ImageFont.load_default(size=FONT_SIZE)
     fallback = ImageFont.truetype(FALLBACK_FONT, FONT_SIZE) if os.path.exists(FALLBACK_FONT) else font
     globals()["FALLBACK"] = fallback
     recorder = Recorder(cast_path)
     sample = float(os.environ.get("SAMPLE", "0.1"))
     max_gap = float(os.environ.get("MAX_GAP", "1.2"))
     shots = recorder.snapshots(sample=sample, max_gap=max_gap)
+    first_planner = next(
+        (index for index, (_, screen) in enumerate(shots)
+         if any("omp-visual-planner" in "".join(cell.ch for cell in row) for row in screen.grid)),
+        None,
+    )
+    if first_planner is None:
+        raise RuntimeError("recording never showed the planner overlay")
+    opening = shots[first_planner:]
+    shots = [shot for shot in opening if shot[0] >= opening[0][0] + 0.25] or opening[-1:]
     frames: list[Image.Image] = []
     durations: list[float] = []
     for index, (stamp, screen) in enumerate(shots):

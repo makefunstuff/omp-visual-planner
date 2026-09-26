@@ -23,13 +23,20 @@ import {
 	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
-import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
+import {
+	type ActionKind,
+	type ActionRegistry,
+	type BeginInput,
+	type JournalEntry,
+	retentionErrors,
+} from "./actions.ts";
 import { blockToMarkdown, markdownToBlock } from "./block-markdown.ts";
 import { ScopeError } from "./compose.ts";
 import {
 	type ComposedRequest,
 	type DocumentStart,
 	type PageField,
+	type ProjectAction,
 	codeRootFor,
 	composeRequest,
 	fieldLabel,
@@ -81,7 +88,7 @@ import {
 	removeBlock,
 } from "./model.ts";
 import type { DocumentStore } from "./store.ts";
-import { MAX_VIEWER_FILE_BYTES, MAX_VIEWER_LINES, PROJECT_DIR, applyReplacement, displayPath } from "./store.ts";
+import { MAX_VIEWER_FILE_BYTES, PROJECT_DIR, applyReplacement, displayPath } from "./store.ts";
 
 export const INSPECTOR_WIDTH = 34;
 export const MIN_WIDTH = 40;
@@ -212,12 +219,20 @@ export function layoutNewBlocks(root: Diagram, newIds: readonly string[]): void 
 	}
 }
 
-/** Apply a reviewed proposal the way every surface does: structure from the model, layout from the planner. */
+/**
+ * Apply a reviewed proposal the way every surface does: structure from the model,
+ * layout from the planner. A replan or prune that would drop settled work is
+ * refused before anything is touched — status belongs to the human, and this is
+ * the one place every surface applies a proposal.
+ */
 export function acceptReplacement(
 	document: DiagramDocument,
 	replacement: DiagramDocument | Block | Diagram,
 	targetId: string | undefined,
+	request: Pick<JournalEntry, "intent" | "scope">,
 ): void {
+	const refused = retentionErrors(request, document, replacement);
+	if (refused.length > 0) throw new Error(refused.join("; "));
 	// Replace first: a document-scope proposal swaps `document.root` itself, so the
 	// root to lay out must be read after the replacement, not before it.
 	const added = applyReplacement(document, replacement, targetId);
@@ -438,18 +453,6 @@ export function diffIsEmpty(diff: DocumentDiff): boolean {
 		diff.titleChanged === undefined &&
 		diff.goalChanged === undefined
 	);
-}
-
-/** The 400-line window the source pane reads, centered on the referenced range. */
-export function viewerWindow(source: SourceRef, totalLines: number): { first: number; last: number } {
-	const limit = Math.min(MAX_VIEWER_LINES, Math.max(1, totalLines));
-	if (source.startLine === undefined) return { first: 1, last: limit };
-	const start = Math.max(1, Math.min(source.startLine, totalLines));
-	const end = Math.min(totalLines, Math.max(source.endLine ?? start, start));
-	const span = end - start + 1;
-	const before = Math.max(0, Math.floor((limit - Math.min(span, limit)) / 2));
-	const first = Math.max(1, Math.min(start - before, Math.max(1, totalLines - limit + 1)));
-	return { first, last: Math.min(totalLines, first + limit - 1) };
 }
 
 // ---------------------------------------------------------------------------
@@ -717,10 +720,9 @@ interface Override {
 interface SourceView {
 	title: string;
 	source: SourceRef;
-	/** Rendered lazily at the current width; empty for an error view. */
+	/** Raw file lines; only visible lines are highlighted on render. */
 	lines: string[];
-	code?: string;
-	firstLine?: number;
+	offset: number;
 	path?: string;
 	error?: string;
 }
@@ -967,8 +969,26 @@ export class DiagramScreen implements Component {
 			return;
 		}
 		if (this.#sourceView) {
-			this.#sourceView = undefined;
-			this.#message = "closed the source view";
+			const view = this.#sourceView;
+			if (key === "escape" || key === "ctrl+c") {
+				this.#sourceView = undefined;
+				this.#message = "closed the source view";
+			} else if (!view.error) {
+				const visible = Math.max(1, Math.min(layoutFor(this.#lastWidth, this.#options.tui.terminal.rows).bodyHeight, 100) - 2);
+				const last = Math.max(0, view.lines.length - visible);
+				switch (key) {
+					case "j":
+					case "down": view.offset = Math.min(last, view.offset + 1); break;
+					case "k":
+					case "up": view.offset = Math.max(0, view.offset - 1); break;
+					case "pageDown": view.offset = Math.min(last, view.offset + visible); break;
+					case "pageUp": view.offset = Math.max(0, view.offset - visible); break;
+					case "g":
+					case "home": view.offset = 0; break;
+					case "G":
+					case "end": view.offset = last; break;
+				}
+			}
 			this.#options.tui.requestRender();
 			return;
 		}
@@ -1024,6 +1044,7 @@ export class DiagramScreen implements Component {
 				return true;
 			case "r":
 			case "b":
+			case "t":
 			case "X":
 				this.#runVerb(key);
 				return true;
@@ -1854,21 +1875,23 @@ export class DiagramScreen implements Component {
 					title,
 					source,
 					lines: [],
+					offset: 0,
 					error: `${absolute} is ${info.size} bytes; the source pane refuses files over ${MAX_VIEWER_FILE_BYTES}`,
 				};
 				this.#options.tui.requestRender();
 				return;
 			}
 			const text = await readFile(absolute, "utf8");
-			const all = text.split("\n");
-			const window = viewerWindow(source, all.length);
-			const code = all.slice(window.first - 1, window.last).join("\n");
-			this.#sourceView = { title, source, lines: [], code, firstLine: window.first, path: absolute };
+			const lines = text.split("\n");
+			const visible = Math.max(1, Math.min(layoutFor(this.#lastWidth, this.#options.tui.terminal.rows).bodyHeight, 100) - 2);
+			const offset = Math.min(Math.max(0, (source.startLine ?? 1) - 4), Math.max(0, lines.length - visible));
+			this.#sourceView = { title, source, lines, offset, path: absolute };
 		} catch (error) {
 			this.#sourceView = {
 				title,
 				source,
 				lines: [],
+				offset: 0,
 				error: `cannot read ${absolute}: ${error instanceof Error ? error.message : String(error)}`,
 			};
 		}
@@ -1893,13 +1916,7 @@ export class DiagramScreen implements Component {
 			}
 		}
 		for (const action of projectActions(purpose)) {
-			choices.push({
-				label: `${action.label}…`,
-				run: () =>
-					action.kind === "draft"
-						? this.#beginDraft(purpose === "brainstorm" ? "brainstorm" : "plan")
-						: this.#beginDiscover("."),
-			});
+			choices.push({ label: `${action.label}…`, run: () => this.#runProjectAction(action) });
 		}
 		choices.push({ label: "Change purpose   P", run: () => this.#openPurposeMenu() });
 		if (pending) {
@@ -1922,6 +1939,19 @@ export class DiagramScreen implements Component {
 				choices[index]?.run();
 			},
 		};
+	}
+
+	/** One whole-document action: start a new document, or preview a project-scope request. */
+	#runProjectAction(action: ProjectAction): void {
+		if (action.kind === "draft") {
+			this.#beginDraft(this.#document.purpose === "brainstorm" ? "brainstorm" : "plan");
+			return;
+		}
+		if (action.kind === "discover") {
+			this.#beginDiscover(".");
+			return;
+		}
+		this.#openPreview(action.kind, { kind: action.kind, scope: { kind: "project" } });
 	}
 
 	#beginDraft(purpose: "brainstorm" | "plan"): void {
@@ -2079,7 +2109,7 @@ export class DiagramScreen implements Component {
 		if (!proposal) return { ok: false, errors: ["that request has no staged proposal"] };
 		const clone = structuredClone(this.#document);
 		try {
-			acceptReplacement(clone, proposal.replacement, entry.scope.id);
+			acceptReplacement(clone, proposal.replacement, entry.scope.id, entry);
 		} catch (error) {
 			return { ok: false, errors: [error instanceof Error ? error.message : String(error)] };
 		}
@@ -2110,7 +2140,7 @@ export class DiagramScreen implements Component {
 		}
 		const proposal = entry.proposal;
 		const before = this.#document.revision;
-		this.#transact(document => acceptReplacement(document, proposal.replacement, entry.scope.id), "proposal accepted");
+		this.#transact(document => acceptReplacement(document, proposal.replacement, entry.scope.id, entry), "proposal accepted");
 		this.#options.registry.resolve(requestId, "accepted");
 		this.#modal = undefined;
 		if (this.#document.revision !== before) this.#message = this.#acceptedMessage(entry);
@@ -2151,7 +2181,7 @@ export class DiagramScreen implements Component {
 		const shared = [
 			"space              step the block's status",
 			"n                  go to the next open block",
-			"r / b / X          the block verbs (refine, break down, execute)",
+			"r / b / t / X      the block verbs: refine, break down, replan, execute",
 			"P                  change what the document is for",
 			"a                  action menu",
 			"R                  review a staged proposal",
@@ -2161,6 +2191,7 @@ export class DiagramScreen implements Component {
 			"u / Ctrl+R         undo / redo",
 			"d                  delete the selected block and subtree",
 			"x                  list this block's relationships",
+			"source: j/k scroll, PgUp/PgDn page, g/G ends, Esc back",
 			"Escape / Ctrl+C    back out of the page, then close the planner",
 		];
 		const outline = [
@@ -2562,7 +2593,8 @@ export class DiagramScreen implements Component {
 			lines.push("");
 			lines.push(progressLabel(document));
 			lines.push("");
-			lines.push(muted(`a  ${projectActions(purpose).map(action => action.label.toLowerCase()).join(" · ")}`));
+			const starts = projectActions(purpose).filter(action => action.kind === "draft" || action.kind === "discover");
+			lines.push(muted(`a  ${starts.map(action => action.label.toLowerCase()).join(" · ")}`));
 			return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode));
 		}
 		const fields = this.#fields;
@@ -2843,13 +2875,16 @@ export class DiagramScreen implements Component {
 
 		if (this.#sourceView && !modal) {
 			const view = this.#sourceView;
-			this.#modalTitle = view.error ? `source: ${view.title}` : `source: ${view.title} — Esc returns`;
 			if (view.error) {
+				this.#modalTitle = `source: ${view.title} — Esc returns`;
 				content.push(...wrapTextWithAnsi(view.error, Math.max(10, width - 6)).map(line => theme.fg("error", line)));
-			} else if (view.code !== undefined) {
-				content.push(...renderSourceLines(theme, view.code, view.path ?? view.source.path, view.firstLine ?? 1, Math.max(10, Math.min(width, 120) - 4)));
 			} else {
-				content.push(...view.lines);
+				const visible = Math.max(1, Math.min(height, 100) - 2);
+				view.offset = Math.min(view.offset, Math.max(0, view.lines.length - visible));
+				const last = Math.min(view.lines.length, view.offset + visible);
+				this.#modalTitle = `source: ${view.title} · ${view.offset + 1}-${last}/${view.lines.length} — j/k PgUp/PgDn g/G Esc`;
+				const code = view.lines.slice(view.offset, last).join("\n");
+				content.push(...renderSourceLines(theme, code, view.path ?? view.source.path, view.offset + 1, Math.max(10, Math.min(width, 120) - 4)));
 			}
 		} else if (modal?.kind === "edit") {
 			this.#modalTitle = modal.title;

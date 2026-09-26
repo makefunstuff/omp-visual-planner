@@ -17,7 +17,7 @@ import {
 } from "./model.ts";
 import { type DocumentStore, type SaveResult, defaultDiscoveryPath, defaultDocumentPath } from "./store.ts";
 
-export type VerbId = "refine" | "breakdown" | "execute";
+export type VerbId = "refine" | "breakdown" | "execute" | "replan" | "prune";
 
 export interface Verb {
 	id: VerbId;
@@ -28,19 +28,26 @@ export interface Verb {
 }
 
 const REFINE: Verb = { id: "refine", label: "Refine", key: "r", intent: "enhance", kind: "enhance" };
+const REPLAN: Verb = { id: "replan", label: "Replan", key: "t", intent: "replan", kind: "replan" };
 const EXECUTE: Verb = { id: "execute", label: "Execute", key: "X", intent: "execute", kind: "execute" };
 
 /** The block verbs a document offers, in display order. */
 export function verbsFor(purpose: Purpose): Verb[] {
 	switch (purpose) {
 		case "brainstorm":
-			return [REFINE, { id: "breakdown", label: "Expand", key: "b", intent: "decompose", kind: "decompose" }];
+			return [REFINE, { id: "breakdown", label: "Expand", key: "b", intent: "decompose", kind: "decompose" }, REPLAN];
 		case "plan":
-			return [REFINE, { id: "breakdown", label: "Break down", key: "b", intent: "decompose", kind: "decompose" }, EXECUTE];
+			return [
+				REFINE,
+				{ id: "breakdown", label: "Break down", key: "b", intent: "decompose", kind: "decompose" },
+				REPLAN,
+				EXECUTE,
+			];
 		case "explore":
 			return [
 				{ id: "refine", label: "Investigate", key: "r", intent: "investigate", kind: "investigate" },
 				{ id: "breakdown", label: "Map inside", key: "b", intent: "decompose", kind: "decompose" },
+				REPLAN,
 			];
 	}
 }
@@ -163,17 +170,27 @@ export function fieldLabel(purpose: Purpose, field: PageField): string {
 }
 
 export interface ProjectAction {
-	kind: "draft" | "discover";
+	/** The request this action submits, or the start flow it opens. */
+	kind: "draft" | "discover" | "replan" | "prune";
 	label: string;
 }
 
-/** Whole-document requests offered when no block is focused. */
+const PROJECT_REPLAN: ProjectAction = { kind: "replan", label: "Replan the document" };
+const PROJECT_PRUNE: ProjectAction = { kind: "prune", label: "Prune unnecessary blocks" };
+
+/**
+ * Whole-document actions offered when no block is focused. `draft` and
+ * `discover` start a new document; `replan` and `prune` submit a project-scope
+ * request against the one that is open.
+ */
 export function projectActions(purpose: Purpose): ProjectAction[] {
-	if (purpose === "brainstorm") return [{ kind: "draft", label: "Seed from a prompt" }];
-	if (purpose === "explore") return [{ kind: "discover", label: "Map a codebase" }];
+	if (purpose === "brainstorm") return [{ kind: "draft", label: "Seed from a prompt" }, PROJECT_REPLAN, PROJECT_PRUNE];
+	if (purpose === "explore") return [{ kind: "discover", label: "Map a codebase" }, PROJECT_REPLAN, PROJECT_PRUNE];
 	return [
 		{ kind: "draft", label: "Draft from a brief" },
 		{ kind: "discover", label: "Discover a codebase" },
+		PROJECT_REPLAN,
+		PROJECT_PRUNE,
 	];
 }
 
