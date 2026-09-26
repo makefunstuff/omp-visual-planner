@@ -2,7 +2,7 @@
 
 An OMP extension for planning systems and mapping codebases as nested blocks. It is built for OMP, not as a plugin for other harnesses. Work on one block at a time in a terminal or browser; use the map when relationships or layout matter. A model can stage a proposal, but only a person can accept it.
 
-The same decomposition, without the map, is one skill: [`skills/decompose`](skills/decompose/SKILL.md). One markdown file, nested bullets, the way Logseq nests blocks. OMP loads it with this plugin. For pi, link the directory:
+The same decomposition, without the map, is one skill: [`skills/decompose`](skills/decompose/SKILL.md). The use case is the agent plus `/tree`, which OMP and pi already have. The agent edits one markdown file of nested bullets, the way Logseq nests blocks. `/tree` is how you go back to an earlier decomposition. No second integration. OMP loads the skill with this plugin. For pi, link the directory:
 
 ```sh
 ln -s /path/to/omp-visual-planner/skills/decompose ~/.pi/agent/skills/decompose

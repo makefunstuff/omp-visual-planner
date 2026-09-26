@@ -3,14 +3,20 @@ name: decompose
 description: >
   Break a problem into a nested bullet tree in one markdown file, the way Logseq
   nests blocks. Use when the user wants to brainstorm, refine, expand, replan,
-  prune, or execute a plan and no omp-visual-planner document is open. Iterative:
-  one node per turn. Do not use this if visual_planner tools are available and a
+  prune, or execute a plan and no omp-visual-planner document is open. The
+  iteration history is the harness /tree, which OMP and pi already have. One
+  node per turn. Do not use this if visual_planner tools are available and a
   planner document is already open.
 ---
 
 # Decompose
 
-One file. Nested bullets are the tree. This is the workaround for a harness that does not have omp-visual-planner. If `visual_planner_read` is available and a planner document is open, use that. Do not keep a second plan.
+The use case is the agent plus `/tree`. OMP and pi already have both. This skill does not add a planner, a tool, or a plugin.
+
+`/tree` is the history. Each expand, refine, or replan is one turn. If that turn was wrong, the human goes back with `/tree` and continues from the earlier leaf. Do not keep alternate decompositions as extra files.
+
+`PLAN.md` is only the current tree, nested bullets, the way Logseq nests blocks. If `visual_planner_read` is available and a planner document is open, use that. Do not keep a second plan.
+
 
 ## File
 
