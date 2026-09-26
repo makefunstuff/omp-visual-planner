@@ -9,7 +9,7 @@ import { type } from "@oh-my-pi/omptype";
 import { ActionRegistry, type BeginInput } from "../src/actions.ts";
 import { createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
 import { DocumentStore, serializeDocument } from "../src/store.ts";
-import { DiagramScreen, layoutFor } from "../src/ui.ts";
+import { DiagramScreen, type ScreenLink, type SharedFocus, layoutFor } from "../src/ui.ts";
 
 const theme = loadThemeSync("dark");
 const directories: string[] = [];
@@ -24,6 +24,13 @@ const uiStub = { setEditorText: () => {} } as unknown as ExtensionUIContext;
 interface Harness {
 	screen: DiagramScreen;
 	store: DocumentStore;
+	/** What the other surface reads. */
+	shared: SharedFocus;
+	/** Another surface moved focus (or changed the session) — `undefined` clears focus. */
+	external(selected: string | undefined): void;
+	listeners: Set<unknown>;
+	tui: { stopped: number };
+	registry: ActionRegistry;
 	result(): unknown;
 }
 
@@ -32,7 +39,13 @@ interface Harness {
  * a document behaves outside a just-accepted proposal.
  */
 async function harness(
-	options: { width: number; rows: number; document?: ReturnType<typeof fixture>; view?: "outline" | "canvas" } = {
+	options: {
+		width: number;
+		rows: number;
+		document?: ReturnType<typeof fixture>;
+		view?: "outline" | "canvas";
+		editor?: (text: string, name: string) => Promise<string | null>;
+	} = {
 		width: 120,
 		rows: 24,
 	},
@@ -58,6 +71,26 @@ async function harness(
 			},
 		},
 		requestRender: () => {},
+		// The overlay hands the terminal to an external editor between these two.
+		stopped: 0,
+		stop() {
+			this.stopped += 1;
+		},
+		start: () => {},
+	};
+	// Stands in for the session the extension shares between the overlay and web mode.
+	const shared: SharedFocus = { selected: undefined, stack: [] };
+	const listeners = new Set<(focus: SharedFocus) => void>();
+	const link: ScreenLink = {
+		publish: (selected, stack) => Object.assign(shared, { selected, stack }),
+		subscribe: listener => {
+			listeners.add(listener);
+			return () => listeners.delete(listener);
+		},
+	};
+	const external = (selected: string | undefined) => {
+		shared.selected = selected;
+		for (const listener of listeners) listener({ ...shared });
 	};
 	const screen = new DiagramScreen(
 		{
@@ -73,6 +106,8 @@ async function harness(
 			hasUI: true,
 			isIdle: () => true,
 			hasPendingMessages: () => false,
+			link,
+			externalEditor: options.editor,
 		},
 		value => {
 			result = value;
@@ -80,7 +115,7 @@ async function harness(
 	);
 	// The outline is the default surface; canvas tests switch to the map once.
 	if (options.view === "canvas") screen.handleInput("v");
-	return { screen, store, result: () => result };
+	return { screen, store, registry, shared, external, listeners, tui, result: () => result };
 }
 
 /**
@@ -636,5 +671,128 @@ describe("outline", () => {
 			h.screen.handleInput("\r");
 			for (const line of h.screen.render(width)) expect(visibleWidth(line)).toBe(width);
 		}
+	});
+});
+
+describe("shared focus with web mode", () => {
+	function focusedRow(lines: string[]): string | undefined {
+		return lines.find(line => /│ › /.test(line));
+	}
+
+	test("moving in the outline publishes focus with the path that holds it", async () => {
+		const h = await harness();
+		expect(h.shared.selected).toBe("api");
+		h.screen.handleInput("j");
+		expect(h.shared.selected).toBe("auth");
+		expect(h.shared.stack).toHaveLength(2);
+		expect(h.shared.stack.at(-1)).toBe("api-inner");
+	});
+
+	test("focus moved elsewhere is followed, and a clear clears it", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.external("worker");
+		expect(focusedRow(plain(h.screen.render(120)))).toContain("Worker");
+		h.external(undefined);
+		expect(focusedRow(plain(h.screen.render(120)))).toBeUndefined();
+	});
+
+	test("an open dialog keeps its block: outside focus does not move under it", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		h.screen.handleInput("\r");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("title — Enter accepts");
+		h.external("worker");
+		h.screen.handleInput("\x15");
+		for (const key of "Gateway") h.screen.handleInput(key);
+		h.screen.handleInput("\r");
+		expect(h.store.require().root.blocks.map(block => block.title)).toEqual(["Gateway", "Database", "Worker"]);
+	});
+
+	test("closing the planner stops listening", async () => {
+		const h = await harness();
+		expect(h.listeners.size).toBe(1);
+		h.screen.handleInput("\x1b");
+		expect(h.listeners.size).toBe(0);
+	});
+});
+
+describe("editing a block in the user's editor", () => {
+	/**
+	 * An editor stub whose result the test can await. The screen awaits the same
+	 * promise first and finishes synchronously after it, so once the test's own
+	 * await resumes, the edit has been applied.
+	 */
+	function stubEditor(change: (text: string) => string | null) {
+		const calls: { text: string; done: Promise<string | null> }[] = [];
+		const editor = (text: string) => {
+			const done = Promise.resolve(change(text));
+			calls.push({ text, done });
+			return done;
+		};
+		return { editor, calls };
+	}
+
+	test("E hands the block over as markdown and applies the saved file as one edit", async () => {
+		const stub = stubEditor(text =>
+			text.replace("# API", "# Gateway").replace("HTTP surface", "HTTP surface\n\n```ts\napp.get('/health')\n```"),
+		);
+		const h = await harness({ width: 120, rows: 24, editor: stub.editor });
+		h.screen.render(120);
+		const revision = h.store.require().revision;
+		h.screen.handleInput("E");
+		await stub.calls[0]!.done;
+		expect(stub.calls[0]!.text).toContain("# API");
+		expect(h.tui.stopped).toBe(1);
+		const api = h.store.require().root.blocks[0]!;
+		expect(api.title).toBe("Gateway");
+		expect(api.description).toContain("```ts\napp.get('/health')\n```");
+		expect(h.store.require().revision).toBe(revision + 1);
+		expect(plain(h.screen.render(120)).at(-2)).toContain('updated "Gateway" from your editor');
+	});
+
+	test("quitting the editor without saving changes nothing", async () => {
+		const stub = stubEditor(() => null);
+		const h = await harness({ width: 120, rows: 24, editor: stub.editor });
+		h.screen.render(120);
+		h.screen.handleInput("E");
+		await stub.calls[0]!.done;
+		expect(h.store.require().revision).toBe(0);
+		expect(plain(h.screen.render(120)).at(-2)).toContain("editor exited without saving");
+	});
+
+	test("with no $VISUAL or $EDITOR it says how to set one", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("E");
+		expect(h.tui.stopped).toBe(0);
+		expect(plain(h.screen.render(120)).at(-2)).toContain("set $VISUAL or $EDITOR");
+	});
+});
+
+describe("progress while the agent works", () => {
+	test("the status strip and the block's outline row show the running request", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		expect(plain(h.screen.render(120)).at(-2)).not.toContain("agent working");
+		h.registry.begin({
+			requestId: "req-9",
+			kind: "enhance",
+			intent: "enhance",
+			scope: { kind: "block", id: "api" },
+			label: 'block "API"',
+			branchKey: "session:leaf",
+			documentId: "doc-1",
+			baseRevision: 0,
+			baseDigest: undefined,
+			prompt: "",
+		});
+		const lines = plain(h.screen.render(120));
+		expect(lines.at(-2)).toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏] agent working 0:0\d/);
+		expect(lines.find(line => /│ › ▾ ○ API/.test(line))).toMatch(/API [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+		h.registry.resolve("req-9", "discarded");
+		expect(plain(h.screen.render(120)).at(-2)).not.toContain("agent working");
+		h.screen.dispose();
 	});
 });

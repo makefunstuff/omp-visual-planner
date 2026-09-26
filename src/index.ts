@@ -14,6 +14,7 @@ import { PURPOSES, toolSchemasFor } from "./model.ts";
 import { DocumentStore, SESSION_NAMESPACE, defaultDocumentPath, displayPath } from "./store.ts";
 import type { ScreenResult, ScreenStart } from "./ui.ts";
 import { DiagramScreen } from "./ui.ts";
+import { editInEditor, editorCommand } from "./editor.ts";
 import { type WebBinding, openBrowser, runningWeb, startWeb, stopWeb } from "./web.ts";
 
 const STATUS_KEY = "visual-planner-web";
@@ -39,6 +40,12 @@ interface PlannerSession {
 	 * session start/branch/tree move refreshes it.
 	 */
 	branchToken: string;
+	/** Open overlays, told when something outside them (web mode, a staged proposal) changed the session. */
+	listeners: Set<() => void>;
+}
+
+function notifyListeners(session: PlannerSession): void {
+	for (const listener of session.listeners) listener();
 }
 
 const SESSIONS = new Map<string, PlannerSession>();
@@ -77,6 +84,7 @@ function sessionFor(pi: ExtensionAPI, ctx: ExtensionContext): PlannerSession {
 		stack: [],
 		selected: undefined,
 		branchToken: branchTokenOf(ctx),
+		listeners: new Set(),
 	};
 	SESSIONS.set(key, created);
 	// After a plugin reload the listener is still up but serves the previous
@@ -93,7 +101,9 @@ function webBinding(pi: ExtensionAPI, ctx: ExtensionContext): WebBinding {
 		getSession: () => SESSIONS.get(key),
 		onChange: () => {
 			const session = SESSIONS.get(key);
-			if (session) persist(pi, session);
+			if (!session) return;
+			persist(pi, session);
+			notifyListeners(session);
 		},
 		submit: (request, prompt) => {
 			const session = SESSIONS.get(key);
@@ -232,6 +242,22 @@ async function runScreen(
 					isIdle: () => ctx.isIdle(),
 					hasPendingMessages: () => ctx.hasPendingMessages(),
 					initialSelection: session.selected,
+					link: {
+						// Focus is shared: web mode reads it on its next poll.
+						publish: (selected, stack) => {
+							session.selected = selected;
+							session.stack = stack;
+						},
+						subscribe: listener => {
+							const notify = () => listener({ selected: session.selected, stack: session.stack });
+							session.listeners.add(notify);
+							return () => session.listeners.delete(notify);
+						},
+					},
+					externalEditor: (() => {
+						const command = editorCommand();
+						return command === undefined ? undefined : (text: string, name: string) => editInEditor(command, text, name);
+					})(),
 				},
 				done,
 				start,
@@ -492,6 +518,7 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 				};
 			}
 			persist(pi, session);
+			notifyListeners(session);
 			// The overlay closes when a request is submitted, so the human is
 			// usually back in the transcript when this arrives: say so here
 			// instead of waiting to be discovered in the planner.

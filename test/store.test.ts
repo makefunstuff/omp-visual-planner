@@ -298,13 +298,18 @@ describe("proposal application", () => {
 		expect(store.dirty).toBe(true);
 	});
 
-	test("a block replacement keeps the block id", () => {
+	test("a block replacement keeps the block id and the human's layout", () => {
 		const store = new DocumentStore(type);
 		store.adopt(sample(), "/tmp/architecture.json");
 		const replacement = createBlock({ id: "api", title: "Gateway v2", x: 7, y: 7 });
-		store.transact(current => applyReplacement(current, replacement, "api"));
+		let added: string[] = [];
+		store.transact(current => {
+			added = applyReplacement(current, replacement, "api");
+		});
 		expect(store.require().root.blocks[0]!.title).toBe("Gateway v2");
-		expect(store.require().root.blocks[0]!.position).toEqual({ x: 7, y: 7 });
+		expect(store.require().root.blocks[0]!.position).toEqual({ x: 4, y: 4 });
+		// `auth` was dropped by the replacement; nothing new came in.
+		expect(added).toEqual([]);
 		expect(validateDocument(store.require(), type).ok).toBe(true);
 	});
 

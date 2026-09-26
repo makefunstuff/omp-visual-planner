@@ -220,15 +220,17 @@ export function composeRequest(input: {
 	scope: Scope;
 	branchKey: string;
 	baseDigest: string | undefined;
+	/** Absolute directory the request may read: the discovery target, else the workspace. */
+	codeRoot: string;
 	requestId?: string;
 }): ComposedRequest {
-	const { document, kind, intent, scope } = input;
+	const { document, kind, intent, scope, codeRoot } = input;
 	const requestId = input.requestId ?? crypto.randomUUID();
 	const composed = composePrompt(
 		document,
 		scope,
 		intent,
-		kind === "execute" ? {} : { request: { requestId, baseRevision: document.revision } },
+		kind === "execute" ? { codeRoot } : { request: { requestId, baseRevision: document.revision }, codeRoot },
 	);
 	return {
 		request: {
@@ -247,4 +249,9 @@ export function composeRequest(input: {
 		label: composed.label,
 		size: composed.size,
 	};
+}
+
+/** The directory a request may read: a discovery reads its target, everything else the workspace. */
+export function codeRootFor(cwd: string, start: DocumentStart | undefined): string {
+	return start?.kind === "discover" ? resolve(cwd, start.target) : resolve(cwd);
 }

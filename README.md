@@ -82,9 +82,44 @@ The plugin manifest is the `omp` key in `package.json`:
 | `/diagram web` / `/diagram web stop` | serve this session's planner on `127.0.0.1` for a browser; stop it |
 
 The overlay is a full-screen terminal mode. The host owns the alternate screen
-and restores the transcript, editor, and cursor focus when you leave. Web mode
-renders the same flow in a browser; its labels, verbs and statuses come from
-the same `src/flow.ts`.
+and restores the transcript, editor, and cursor focus when you leave.
+
+Web mode is a single node canvas — no side panels, no forms. Blocks are nodes:
+double-click the canvas to create one, double-click a title to rename it, and
+select a node to edit its content in place as plain text (the body, a `→`
+expected-output line, `[ ]` acceptance items). The body is markdown: code
+fences render as code panels, lists and headings as idea chunks, and a click
+switches to the raw text. The status glyph and the
+evidence mark step when clicked; the verbs float in a toolbar above the
+selected node, and each verb's standing note for the agent is edited in its
+preview. Drag from a node's right port onto another node to relate them and
+type the label on the wire. `[n]` or `Enter` opens a block's inside like a
+subgraph, `Esc` goes back up; the canvas pans (drag, scroll) and zooms (pinch or
+ctrl-scroll), `F` fits, `T` tidies. Labels, verbs and statuses come from the
+same `src/flow.ts` as the overlay, and the two are live peers on one session:
+an edit or a focus change in either shows up in the other (the page polls every
+500 ms; the overlay redraws when the page writes). The page follows the OpenCode
+DESIGN.md tokens — one monospace face, cream canvas (dark under
+`prefers-color-scheme`), hairlines, no shadows — while the overlay keeps the
+host's terminal theme.
+
+For a codebase, **Files** (or `/`) opens the workspace tree over the canvas —
+`git ls-files` when it is a repository, so `.gitignore` applies — with a filter
+and a count of the blocks anchored to each file. Opening a file shows it whole,
+read-only and syntax-highlighted by the same native highlighter as the terminal
+(`⤢` widens it over the canvas), with every anchored range marked and the
+blocks that cite it one click away. A block's `[>] path:10-40` anchors open the
+viewer at that range; with a block focused, click a line number (shift-click
+extends) and anchor it. The server serves only paths inside the workspace,
+after resolving symlinks. Explore documents open with the tree showing.
+
+While a request runs, the page says so: the clicked button shows it is busy,
+the top bar shows `agent working: <scope> · m:ss` with a discard, the start
+panel shows a draft or discovery in progress, and the block being worked on
+gets a spinner. The terminal status strip shows the same clock. Code-reading
+requests (discover, investigate, explore) name one directory to read and tell
+the agent to skip dependencies and build output and to read only what a block
+needs as evidence.
 
 ## One block at a time
 
@@ -124,6 +159,8 @@ Outline:
 | `v` | switch to the map view (and back) |
 | `a` | action menu: the block verbs, draft/discover, change purpose, discard a pending request |
 | `R` | review a staged proposal |
+| `T` | tidy: lay the focused block's diagram out on the grid (web: Tidy in the map) |
+| `E` | open the block in `$VISUAL` / `$EDITOR` (e.g. Neovim) as a markdown file; saving applies it as one undoable edit, `:cq` discards |
 | `x` | list and edit the block's relationships |
 | `d` | delete the block and its subtree |
 | `u` / `Ctrl+R` | undo / redo |
@@ -139,6 +176,18 @@ and `v`.
 Page and inspector: `j`/`k` move between fields, `Enter` opens or edits the
 field, `o` adds a source reference, `m` edits one, `d` removes one. `Enter` on a
 source reference opens a read-only, line-numbered source pane inside the overlay.
+
+### A block as a markdown file
+
+`E` writes the focused block to a temporary `.md` file and hands the terminal
+to your editor. The file is `# Title`, then the body — free markdown, so code
+fences, lists and `###` headings stay part of it — then one `## <field>` section
+per field the purpose uses (`## Expected output`, `## Acceptance` as `- [ ]`
+items, `## Sources` as `- path:10-40`, and the agent notes). Only a `##` line
+naming a known field ends the body, and nothing inside a code fence is ever read
+as structure. A section you delete clears that field; a missing `# Title` keeps
+the current one. The body is also what the agent receives as the block's text,
+code included.
 
 ## Requests
 

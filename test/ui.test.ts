@@ -1,20 +1,27 @@
 import { describe, expect, test } from "bun:test";
-import { createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
+import { createBlock, createDiagram, createDocument, createEdge, formatSourceRef, parseSourceRef } from "../src/model.ts";
 import {
 	CARD_HEIGHT,
+	acceptReplacement,
 	cardRect,
 	cardWidth,
 	cornerName,
 	diffDocuments,
 	diffIsEmpty,
 	emptyDiff,
-	formatSourceRef,
 	layoutFor,
-	parseSourceRef,
 	placeNewBlock,
 	routeEdge,
+	tidyDiagram,
 	viewerWindow,
 } from "../src/ui.ts";
+
+function overlaps(blocks: ReturnType<typeof createBlock>[]): boolean {
+	const rects = blocks.map(cardRect);
+	return rects.some((a, i) =>
+		rects.some((b, j) => i < j && a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h),
+	);
+}
 
 function rect(x: number, y: number, w = 16, h = CARD_HEIGHT) {
 	return { x, y, w, h };
@@ -48,6 +55,47 @@ describe("card geometry", () => {
 		const second = placeNewBlock(diagram, "a");
 		expect(second.x).toBe(16);
 		expect(second.y).toBeGreaterThan(2);
+	});
+
+	test("blocks a proposal adds are placed by the planner, never at the model's coordinates", () => {
+		// The shape a model actually sent: a 3x2 grid two cells apart, every card on top of the next.
+		const document = createDocument();
+		const tokens = createBlock({ id: "tokens", title: "Tokens", x: 9, y: 9 });
+		document.root.blocks.push(tokens);
+		const titles = ["Token model & signing", "Issuance", "Verification", "Session & refresh store", "Refresh & rotation", "Revocation & logout"];
+		const children = createDiagram({
+			blocks: titles.map((title, index) => createBlock({ id: `c${index}`, title, x: (index % 3) * 2, y: Math.floor(index / 3) * 2 })),
+		});
+		acceptReplacement(document, { ...tokens, position: { x: 0, y: 0 }, children }, "tokens");
+		const placed = document.root.blocks[0]!;
+		expect(placed.position).toEqual({ x: 9, y: 9 });
+		expect(overlaps(placed.children!.blocks)).toBe(false);
+		expect(placed.children!.blocks.map(block => block.title)).toEqual(titles);
+	});
+
+	test("a whole-document proposal is laid out too, nested levels included", () => {
+		// What a discovery sent: one block at x=0 and one at x=380, a child on top of its parent's origin.
+		const document = createDocument();
+		const child = createBlock({ id: "c", title: "add()", x: 0, y: 0 });
+		const replacement = createDocument({ id: document.id, title: "Discovery" });
+		replacement.root.blocks.push(
+			createBlock({ id: "a", title: "src/math.ts", x: 0, y: 0, children: createDiagram({ blocks: [child] }) }),
+			createBlock({ id: "b", title: "No manifest", x: 380, y: 0 }),
+		);
+		acceptReplacement(document, replacement, undefined);
+		expect(document.root.blocks.map(block => block.position)).toEqual([
+			{ x: 2, y: 2 },
+			{ x: 2 + cardWidth("src/math.ts") + 4, y: 2 },
+		]);
+		expect(document.root.blocks[0]!.children!.blocks[0]!.position).toEqual({ x: 2, y: 2 });
+	});
+
+	test("tidy removes every overlap and keeps authored order", () => {
+		const diagram = createDiagram({ blocks: ["a", "b", "c", "d"].map(id => createBlock({ id, title: id, x: 0, y: 0 })) });
+		expect(overlaps(diagram.blocks)).toBe(true);
+		tidyDiagram(diagram);
+		expect(overlaps(diagram.blocks)).toBe(false);
+		expect(diagram.blocks[0]!.position).toEqual({ x: 2, y: 2 });
 	});
 });
 

@@ -162,6 +162,15 @@ describe("composed payloads", () => {
 		}
 	});
 
+	test("code-reading requests name the one directory to read, and planning requests do not", () => {
+		const discover = composePrompt(fixture(), { kind: "project" }, "discover", { codeRoot: "/work/app" }).text;
+		expect(discover).toContain("## Where to look");
+		expect(discover).toContain("The codebase is /work/app. Read, list and search only inside it");
+		expect(discover).toContain("node_modules");
+		const refine = composePrompt(fixture(), { kind: "block", id: "api" }, "enhance", { codeRoot: "/work/app" }).text;
+		expect(refine).not.toContain("## Where to look");
+	});
+
 	test("status appears with the purpose's words, and never in a brainstorm", () => {
 		const document = fixture();
 		document.root.blocks[0]!.status = "settled";

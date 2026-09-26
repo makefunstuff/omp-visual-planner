@@ -24,11 +24,13 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
+import { blockToMarkdown, markdownToBlock } from "./block-markdown.ts";
 import { ScopeError } from "./compose.ts";
 import {
 	type ComposedRequest,
 	type DocumentStart,
 	type PageField,
+	codeRootFor,
 	composeRequest,
 	fieldLabel,
 	nextOpenBlock,
@@ -68,11 +70,14 @@ import {
 	createEdge,
 	cycleBlock,
 	descendantIds,
+	eachDiagram,
 	findBlockLocation,
 	findDiagramPath,
 	findOwnedDiagram,
 	moveBlockInOrder,
+	formatSourceRef,
 	nearestBlock,
+	parseSourceRef,
 	removeBlock,
 } from "./model.ts";
 import type { DocumentStore } from "./store.ts";
@@ -99,6 +104,25 @@ export interface ScreenOptions {
 	hasPendingMessages(): boolean;
 	/** Block to focus when the screen opens, if it still exists. */
 	initialSelection?: string;
+	/** Shared focus with other surfaces (web mode) on the same session. */
+	link?: ScreenLink;
+	/**
+	 * The user's own editor ($VISUAL / $EDITOR) for one text file; undefined
+	 * when none is configured. Resolves to the saved text, or null to discard.
+	 */
+	externalEditor?: (text: string, name: string) => Promise<string | null>;
+}
+
+export interface SharedFocus {
+	selected: string | undefined;
+	stack: string[];
+}
+
+export interface ScreenLink {
+	/** Record this screen's focus where the other surfaces read it. */
+	publish(selected: string | undefined, stack: string[]): void;
+	/** Called when another surface changed the session; returns the unsubscribe. */
+	subscribe(listener: (focus: SharedFocus) => void): () => void;
 }
 
 export type ScreenResult =
@@ -151,6 +175,53 @@ export function placeNewBlock(diagram: Diagram, selectedId?: string): BlockPosit
 		candidate = { ...candidate, y: candidate.y + 1 };
 	}
 	return { x: candidate.x, y: candidate.y };
+}
+
+const GRID_COLUMNS = 3;
+const GRID_GAP_X = 4;
+const GRID_GAP_Y = 2;
+
+/** Rows of three in authored order, starting at `top`. Cards in a row never touch; rows never share cells. */
+function gridPlace(blocks: Block[], top: number): void {
+	let y = top;
+	for (let start = 0; start < blocks.length; start += GRID_COLUMNS) {
+		let x = 2;
+		for (const block of blocks.slice(start, start + GRID_COLUMNS)) {
+			block.position = { x, y };
+			x += cardWidth(block.title) + GRID_GAP_X;
+		}
+		y += CARD_HEIGHT + GRID_GAP_Y;
+	}
+}
+
+/** Re-lay a whole diagram on the grid, keeping authored order. */
+export function tidyDiagram(diagram: Diagram): void {
+	gridPlace(diagram.blocks, 2);
+}
+
+/** Place blocks a proposal introduced below what each diagram already holds. */
+export function layoutNewBlocks(root: Diagram, newIds: readonly string[]): void {
+	if (newIds.length === 0) return;
+	const fresh = new Set(newIds);
+	for (const diagram of eachDiagram(root)) {
+		const added = diagram.blocks.filter(block => fresh.has(block.id));
+		if (added.length === 0) continue;
+		const kept = diagram.blocks.filter(block => !fresh.has(block.id));
+		const top = kept.length === 0 ? 2 : Math.max(...kept.map(block => block.position.y + CARD_HEIGHT)) + GRID_GAP_Y;
+		gridPlace(added, top);
+	}
+}
+
+/** Apply a reviewed proposal the way every surface does: structure from the model, layout from the planner. */
+export function acceptReplacement(
+	document: DiagramDocument,
+	replacement: DiagramDocument | Block | Diagram,
+	targetId: string | undefined,
+): void {
+	// Replace first: a document-scope proposal swaps `document.root` itself, so the
+	// root to lay out must be read after the replacement, not before it.
+	const added = applyReplacement(document, replacement, targetId);
+	layoutNewBlocks(document.root, added);
 }
 
 export interface Layout {
@@ -367,20 +438,6 @@ export function diffIsEmpty(diff: DocumentDiff): boolean {
 		diff.titleChanged === undefined &&
 		diff.goalChanged === undefined
 	);
-}
-
-/** Parse `path:10-40`, `path:12`, or a bare path. */
-export function parseSourceRef(text: string): SourceRef {
-	const trimmed = text.trim();
-	const match = /^(.*?):(\d+)(?:-(\d+))?$/.exec(trimmed);
-	if (!match || match[1] === undefined || match[1] === "") return { path: trimmed };
-	const start = Number(match[2]);
-	return { path: match[1], startLine: start, endLine: match[3] === undefined ? start : Number(match[3]) };
-}
-
-export function formatSourceRef(source: SourceRef): string {
-	if (source.startLine === undefined) return source.path;
-	return `${source.path}:${source.startLine}-${source.endLine ?? source.startLine}`;
 }
 
 /** The 400-line window the source pane reads, centered on the referenced range. */
@@ -645,6 +702,8 @@ interface PreviewPending {
 	scope: Scope;
 	/** The token embedded in the previewed prompt; the submitted request must reuse it. */
 	requestId: string;
+	/** The directory the request may read, fixed when it was previewed. */
+	codeRoot: string;
 	save?: Promise<unknown>;
 }
 
@@ -691,10 +750,19 @@ export class DiagramScreen implements Component {
 	#fieldIndex = 0;
 	#message: string;
 	#lastWidth = 120;
+	#unsubscribe: (() => void) | undefined;
+	#published = "";
+	/** Redraws once a second while the agent works, so the elapsed clock and spinner move. */
+	#ticker: ReturnType<typeof setInterval> | undefined;
 
 	constructor(options: ScreenOptions, done: (result: ScreenResult) => void, start?: ScreenStart) {
 		this.#options = options;
-		this.#done = done;
+		this.#done = result => {
+			this.#stopTicker();
+			this.#unsubscribe?.();
+			this.#unsubscribe = undefined;
+			done(result);
+		};
 		// A cold start may have nothing on disk: the empty state is still a usable
 		// surface, so the store gets an in-memory document to render and save.
 		const document = options.store.document ?? options.store.newDocument({ title: "New architecture" });
@@ -719,6 +787,38 @@ export class DiagramScreen implements Component {
 			// so show it rather than making them find the R binding.
 			this.#openReview();
 		}
+		this.#unsubscribe = options.link?.subscribe(focus => this.#followExternal(focus));
+		this.#publish();
+	}
+
+	/** Tell the other surfaces where focus is, when it moved. */
+	#publish(): void {
+		const key = `${this.#selected ?? ""}|${this.#stack.join("/")}`;
+		if (key === this.#published) return;
+		this.#published = key;
+		this.#options.link?.publish(this.#selected, [...this.#stack]);
+	}
+
+	/**
+	 * Another surface changed the session: redraw, and follow its focus unless
+	 * a dialog here is bound to the block it opened on.
+	 */
+	#followExternal(focus: SharedFocus): void {
+		const busy = this.#modal !== undefined || this.#sourceView !== undefined || this.#linkFrom !== undefined;
+		if (!busy && focus.selected !== this.#selected) {
+			const root = this.#document.root;
+			if (focus.selected !== undefined && findBlockLocation(root, focus.selected)) {
+				this.#focus(focus.selected);
+				if (this.#view === "canvas") this.#ensureVisible();
+			} else if (focus.selected === undefined) {
+				const path = findDiagramPath(root, focus.stack.at(-1) ?? root.id);
+				this.#stack = (path ?? [root]).map(diagram => diagram.id);
+				this.#selected = undefined;
+				this.#selectedEdge = undefined;
+			}
+			this.#published = `${this.#selected ?? ""}|${this.#stack.join("/")}`;
+		}
+		this.#options.tui.requestRender();
 	}
 
 	/**
@@ -743,7 +843,28 @@ export class DiagramScreen implements Component {
 		return this.#selected;
 	}
 
+	#stopTicker(): void {
+		clearInterval(this.#ticker);
+		this.#ticker = undefined;
+	}
+
+	/** The agent's request on this branch while it is still running, and the ticker that animates it. */
+	#working(): JournalEntry | undefined {
+		const pending = this.#options.registry.pending();
+		const working = pending?.state === "pending" ? pending : undefined;
+		if (working && this.#ticker === undefined) {
+			this.#ticker = setInterval(() => this.#options.tui.requestRender(), 1000);
+			this.#ticker.unref?.();
+		} else if (!working) {
+			this.#stopTicker();
+		}
+		return working;
+	}
+
 	dispose(): void {
+		this.#stopTicker();
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
 		this.#dropModal();
 	}
 
@@ -835,6 +956,11 @@ export class DiagramScreen implements Component {
 	// ------------------------------------------------------------------
 
 	handleInput(data: string): void {
+		this.#route(data);
+		this.#publish();
+	}
+
+	#route(data: string): void {
 		const key = parseKey(data);
 		if (this.#modal) {
 			this.#handleModalInput(data, key);
@@ -932,6 +1058,12 @@ export class DiagramScreen implements Component {
 				return true;
 			case "R":
 				this.#openReview();
+				return true;
+			case "T":
+				this.#tidy();
+				return true;
+			case "E":
+				void this.#editExternally();
 				return true;
 			case "?":
 				this.#openHelp();
@@ -1112,6 +1244,71 @@ export class DiagramScreen implements Component {
 				}, `purpose: ${choice}`);
 			},
 		};
+	}
+
+	/**
+	 * Open the focused block as a markdown file in the user's editor. The TUI
+	 * steps aside while it runs; the saved file comes back as one undoable edit.
+	 */
+	async #editExternally(): Promise<void> {
+		const block = this.#block;
+		if (!block) {
+			this.#message = "select a block first";
+			return;
+		}
+		const edit = this.#options.externalEditor;
+		if (!edit) {
+			this.#message = "set $VISUAL or $EDITOR to edit blocks in your editor";
+			return;
+		}
+		const blockId = block.id;
+		const before = blockToMarkdown(block, this.#document.purpose);
+		const tui = this.#options.tui;
+		let after: string | null = null;
+		let failure: string | undefined;
+		tui.stop();
+		try {
+			after = await edit(before, block.title);
+		} catch (error) {
+			failure = `could not run the editor: ${error instanceof Error ? error.message : String(error)}`;
+		} finally {
+			tui.start();
+			tui.requestRender(true);
+		}
+		if (failure !== undefined) {
+			this.#message = failure;
+		} else if (after === null) {
+			this.#message = "editor exited without saving; the block is unchanged";
+		} else if (after === before) {
+			this.#message = "no changes";
+		} else {
+			const current = findBlockLocation(this.#document.root, blockId)?.block;
+			if (!current) {
+				this.#message = "that block was deleted while you were editing it";
+			} else {
+				const next = markdownToBlock(after, current);
+				this.#transact(document => {
+					const target = findBlockLocation(document.root, blockId)?.block;
+					if (!target) throw new Error("that block was deleted while you were editing it");
+					target.title = next.title;
+					target.description = next.description;
+					target.expectedOutput = next.expectedOutput;
+					target.acceptanceCriteria = next.acceptanceCriteria;
+					target.sources = next.sources;
+					target.actions = { enhance: next.enhance, execute: next.execute };
+				}, `updated "${next.title}" from your editor`);
+			}
+		}
+		this.#publish();
+		this.#options.tui.requestRender();
+	}
+
+	/** Re-lay the diagram that holds the focus (the one on screen in the map) on the grid. */
+	#tidy(): void {
+		const diagramId = this.#diagram.id;
+		this.#transact(document => tidyDiagram(this.#diagramOf(document, diagramId)), "tidied the diagram");
+		this.#viewport = { left: 0, top: 0 };
+		this.#ensureVisible();
 	}
 
 	#toggleView(): void {
@@ -1772,6 +1969,7 @@ export class DiagramScreen implements Component {
 				return result;
 			});
 		}
+		const codeRoot = codeRootFor(this.#options.cwd, override.start);
 		let composed: ComposedRequest;
 		try {
 			composed = composeRequest({
@@ -1781,12 +1979,13 @@ export class DiagramScreen implements Component {
 				scope,
 				branchKey: this.#options.branchKey,
 				baseDigest: this.#options.store.diskDigest,
+				codeRoot,
 			});
 		} catch (error) {
 			this.#message = error instanceof ScopeError ? error.message : String(error);
 			return;
 		}
-		this.#preview = { composed, kind, intent, scope, requestId: composed.request.requestId, save };
+		this.#preview = { composed, kind, intent, scope, requestId: composed.request.requestId, codeRoot, save };
 		this.#modal = { kind: "text", title: `preview — ${composed.label} (${composed.size} chars)`, lines: composed.prompt.split("\n"), offset: 0 };
 		this.#message = "Enter submit   c copy to prompt editor   w export markdown   Esc back";
 	}
@@ -1837,6 +2036,7 @@ export class DiagramScreen implements Component {
 				scope: preview.scope,
 				branchKey: this.#options.branchKey,
 				baseDigest: this.#options.store.diskDigest,
+				codeRoot: preview.codeRoot,
 				requestId: preview.requestId,
 			});
 		} catch (error) {
@@ -1879,7 +2079,7 @@ export class DiagramScreen implements Component {
 		if (!proposal) return { ok: false, errors: ["that request has no staged proposal"] };
 		const clone = structuredClone(this.#document);
 		try {
-			applyReplacement(clone, proposal.replacement, entry.scope.id);
+			acceptReplacement(clone, proposal.replacement, entry.scope.id);
 		} catch (error) {
 			return { ok: false, errors: [error instanceof Error ? error.message : String(error)] };
 		}
@@ -1910,10 +2110,11 @@ export class DiagramScreen implements Component {
 		}
 		const proposal = entry.proposal;
 		const before = this.#document.revision;
-		this.#transact(document => applyReplacement(document, proposal.replacement, entry.scope.id), "proposal accepted");
+		this.#transact(document => acceptReplacement(document, proposal.replacement, entry.scope.id), "proposal accepted");
 		this.#options.registry.resolve(requestId, "accepted");
 		this.#modal = undefined;
 		if (this.#document.revision !== before) this.#message = this.#acceptedMessage(entry);
+		this.#publish();
 		this.#options.tui.requestRender();
 	}
 
@@ -1954,6 +2155,8 @@ export class DiagramScreen implements Component {
 			"P                  change what the document is for",
 			"a                  action menu",
 			"R                  review a staged proposal",
+			"T                  tidy: lay the focused block's diagram out on the grid",
+			"E                  edit the block as markdown in $VISUAL / $EDITOR",
 			"s                  save the project document",
 			"u / Ctrl+R         undo / redo",
 			"d                  delete the selected block and subtree",
@@ -2295,13 +2498,51 @@ export class DiagramScreen implements Component {
 			const badge =
 				purpose === "brainstorm" ? "" : block.evidence === "observed" ? " *" : block.evidence === "unknown" ? " ?" : "";
 			const marker =
-				pending && pendingBlock === block.id ? (pending.state === "staged" ? theme.fg("accent", " ◆") : theme.fg("muted", " ⋯")) : "";
+				pending && pendingBlock === block.id
+					? pending.state === "staged"
+						? theme.fg("accent", " ◆")
+						: theme.fg("accent", ` ${spinnerFrame()}`)
+					: "";
 			const title = block.title.length > 0 ? block.title : "(untitled)";
 			const prefix = focused ? theme.fg("accent", "›") : " ";
 			const text = `${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${focused ? theme.bold(title) : title}${badge}${marker}`;
 			lines.push(truncateToWidth(text, width, Ellipsis.Unicode));
 		}
 		return lines;
+	}
+
+	/**
+	 * A block body for the page: prose wraps, fenced code keeps its lines
+	 * (truncated, never wrapped) behind a muted gutter with the language on the
+	 * fence. At most `limit` lines; the rest is a muted "… E opens it all".
+	 */
+	#markdownLines(text: string, width: number, limit: number): string[] {
+		const theme = this.#options.theme;
+		const out: string[] = [];
+		let fence: string | undefined;
+		let prose: string[] = [];
+		const flush = () => {
+			if (prose.length > 0) out.push(...wrapTextWithAnsi(prose.join("\n"), Math.max(1, width)));
+			prose = [];
+		};
+		for (const line of text.split("\n")) {
+			const opener = /^\s*(```|~~~)\s*([\w+-]*)/.exec(line);
+			if (fence === undefined && opener) {
+				flush();
+				fence = opener[1];
+				out.push(theme.fg("muted", `┌ ${opener[2] || "code"}`));
+			} else if (fence !== undefined && line.trim().startsWith(fence)) {
+				fence = undefined;
+				out.push(theme.fg("muted", "└"));
+			} else if (fence !== undefined) {
+				out.push(`${theme.fg("muted", "│")} ${truncateToWidth(line.replaceAll("\t", "  "), Math.max(1, width - 2))}`);
+			} else {
+				prose.push(line);
+			}
+		}
+		flush();
+		if (out.length <= limit) return out;
+		return [...out.slice(0, limit - 1), theme.fg("muted", `… ${out.length - limit + 1} more lines — E opens it all`)];
 	}
 
 	#pageLines(width: number, height: number): string[] {
@@ -2371,7 +2612,9 @@ export class DiagramScreen implements Component {
 				for (const criterion of block.acceptanceCriteria) lines.push(value(`• ${criterion}`));
 			} else if (text.trim().length === 0) {
 				lines.push(empty);
-			} else if (field === "description" || field === "expectedOutput") {
+			} else if (field === "description") {
+				lines.push(...this.#markdownLines(text.trim(), width - 2, 16).map(value));
+			} else if (field === "expectedOutput") {
 				lines.push(...wrapTextWithAnsi(text.trim(), Math.max(1, width - 2)).slice(0, 6).map(value));
 			} else {
 				lines.push(value(firstLine(text.trim())));
@@ -2582,7 +2825,8 @@ export class DiagramScreen implements Component {
 						`unknown ${this.#diagram.blocks.filter(block => block.evidence === "unknown").length}`,
 					];
 		if (this.#stagedEntry()) segments.push("proposal staged [R]");
-		if (this.#options.registry.pending()) segments.push("request pending");
+		const working = this.#working();
+		if (working) segments.push(`${spinnerFrame()} agent working ${elapsedClock(working.createdAt)}`);
 		const message = this.#message.length > 0 ? `   ${this.#message}` : "";
 		return truncateToWidth(` ${segments.join("  ")}${message}`, width, Ellipsis.Unicode, true);
 	}
@@ -2694,6 +2938,19 @@ export class DiagramScreen implements Component {
 export function savedMessage(result: { path: string; replaced?: boolean }, cwd: string): string {
 	const target = displayPath(result.path, cwd);
 	return result.replaced === true ? `saved ${target} (replaced the existing file)` : `saved ${target}`;
+}
+
+const SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
+
+/** A spinner frame from the wall clock, so every redraw advances it without state. */
+function spinnerFrame(now = Date.now()): string {
+	return SPINNER[Math.floor(now / 1000) % SPINNER.length]!;
+}
+
+/** `m:ss` since an ISO timestamp. */
+function elapsedClock(since: string, now = Date.now()): string {
+	const seconds = Math.max(0, Math.floor((now - Date.parse(since)) / 1000));
+	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
 function firstLine(text: string): string {

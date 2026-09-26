@@ -460,6 +460,20 @@ export function cycleBlock(diagram: Diagram, currentId: string | undefined, step
 	return diagram.blocks[(((base + step) % count) + count) % count]!.id;
 }
 
+/** Parse `path:10-40`, `path:12`, or a bare path. */
+export function parseSourceRef(text: string): SourceRef {
+	const trimmed = text.trim();
+	const match = /^(.*?):(\d+)(?:-(\d+))?$/.exec(trimmed);
+	if (!match || match[1] === undefined || match[1] === "") return { path: trimmed };
+	const start = Number(match[2]);
+	return { path: match[1], startLine: start, endLine: match[3] === undefined ? start : Number(match[3]) };
+}
+
+export function formatSourceRef(source: SourceRef): string {
+	if (source.startLine === undefined) return source.path;
+	return `${source.path}:${source.startLine}-${source.endLine ?? source.startLine}`;
+}
+
 // ---------------------------------------------------------------------------
 // Validation
 // ---------------------------------------------------------------------------

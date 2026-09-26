@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type } from "@oh-my-pi/omptype";
@@ -262,6 +262,38 @@ describe("web mode review", () => {
 		expect((await op({ op: "reject", requestId: "req-1" })).status).toBe(200);
 		expect(session.registry.entryFor("req-1")!.state).toBe("rejected");
 		expect(store.require().revision).toBe(revision);
+	});
+});
+
+describe("web mode files", () => {
+	test("lists the workspace, serves a file inside it, and refuses paths that leave it", async () => {
+		const { dir, origin, cookie, op, store } = await harness();
+		await mkdir(join(dir, "src"));
+		await writeFile(join(dir, "src", "app.ts"), "line one\nline two\n", "utf8");
+		await mkdir(join(dir, "node_modules", "dep"), { recursive: true });
+		await writeFile(join(dir, "node_modules", "dep", "index.js"), "x", "utf8");
+		const outside = await mkdtemp(join(tmpdir(), "omp-visual-planner-outside-"));
+		cleanup.push(() => rm(outside, { recursive: true, force: true }));
+		await writeFile(join(outside, "secret.txt"), "no", "utf8");
+		await symlink(outside, join(dir, "escape"));
+		const get = (path: string) => fetch(`${origin}${path}`, { headers: { cookie } });
+
+		const listed = (await (await get("/api/files")).json()) as { files: string[] };
+		expect(listed.files).toContain("src/app.ts");
+		expect(listed.files.some(file => file.startsWith("node_modules/"))).toBe(false);
+
+		const file = (await (await get("/api/file?path=src/app.ts")).json()) as { lines: string[] };
+		expect(file.lines.slice(0, 2)).toEqual(["line one", "line two"]);
+		expect((await get("/api/file?path=../etc/passwd")).status).toBe(400);
+		expect((await get(`/api/file?path=${encodeURIComponent(join(dir, "src", "app.ts"))}`)).status).toBe(400);
+		expect((await get("/api/file?path=escape/secret.txt")).status).toBe(403);
+		expect((await fetch(`${origin}/api/files`)).status).toBe(401);
+
+		expect((await op({ op: "addSource", id: "api", path: "src/app.ts", startLine: 2, endLine: 2 })).status).toBe(200);
+		expect(findBlockLocation(store.require().root, "api")!.block.sources).toEqual([{ path: "src/app.ts", startLine: 2, endLine: 2 }]);
+		expect((await op({ op: "addSource", id: "api", path: "../x.ts" })).status).toBe(400);
+		expect((await op({ op: "removeSource", id: "api", index: 0 })).status).toBe(200);
+		expect(findBlockLocation(store.require().root, "api")!.block.sources).toEqual([]);
 	});
 });
 

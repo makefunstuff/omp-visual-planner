@@ -26,6 +26,8 @@ import { statusLabel } from "./flow.ts";
 export interface ComposeOptions {
 	/** Present when the submission must come back through `visual_planner_propose`. */
 	request?: { requestId: string; baseRevision: number };
+	/** Absolute directory a code-reading request may read; the model is told to stay inside it. */
+	codeRoot?: string;
 }
 
 export interface BoundaryRelationship {
@@ -263,6 +265,23 @@ const EVIDENCE_RULES = [
 	"Never invent a path. A path you did not read must not appear in `sources`.",
 ].join("\n");
 
+/**
+ * Reading is where a discovery spends its tokens. Name the one directory it may
+ * read and the places it must not wander into, and ask for evidence-sized reads.
+ */
+function whereToLook(root: string): string {
+	return [
+		"## Where to look",
+		`- The codebase is ${root}. Read, list and search only inside it — never the home directory, other`,
+		"  repositories, global package caches, the OMP installation or system paths.",
+		"- Skip dependencies and generated output: node_modules, vendor, .git, dist, build, out, target, coverage,",
+		"  .venv, __pycache__, lock files and minified bundles.",
+		"- Start from a listing of the root and its manifests, entry points and README; open a file only when a block",
+		"  needs it as evidence, and read the relevant range rather than the whole file when it is large.",
+		"- Do not read a file twice. Stop reading once every block you propose is justified.",
+	].join("\n");
+}
+
 const PURPOSE_LINE: Record<Purpose, string> = {
 	brainstorm:
 		"purpose: brainstorm — a mind map of ideas. Do not read or change code, and do not propose implementation steps unless the authored text asks for them.",
@@ -326,7 +345,11 @@ export function composePrompt(
 		].join("\n"),
 	);
 	sections.push(`## Task\nintent: ${intent}\n${briefFor(intent, document.purpose)}\n${PURPOSE_LINE[document.purpose]}`);
-	if (intent === "discover" || intent === "investigate" || document.purpose === "explore") sections.push(EVIDENCE_RULES);
+	const readsCode = intent === "discover" || intent === "investigate" || document.purpose === "explore";
+	if (readsCode) {
+		sections.push(EVIDENCE_RULES);
+		if (options.codeRoot) sections.push(whereToLook(options.codeRoot));
+	}
 	sections.push(`## Scope\n\n<planner-data>\n${renderScope(resolution, document)}\n</planner-data>`);
 	sections.push(
 		[

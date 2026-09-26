@@ -20,6 +20,7 @@ import {
 	type PageField,
 	type ProjectAction,
 	type VerbId,
+	codeRootFor,
 	composeRequest,
 	fieldLabel,
 	nextOpenBlock,
@@ -49,12 +50,15 @@ import {
 	findBlockLocation,
 	findDiagram,
 	findDiagramPath,
+	formatSourceRef,
 	moveBlockInOrder,
 	removeBlock,
 } from "./model.ts";
-import { type DocumentStore, applyReplacement, defaultDocumentPath, displayPath } from "./store.ts";
-import { type DocumentDiff, diffDocuments, emptyDiff, placeNewBlock } from "./ui.ts";
+import { type DocumentStore, defaultDocumentPath, displayPath } from "./store.ts";
+import { type DocumentDiff, acceptReplacement, diffDocuments, emptyDiff, placeNewBlock, tidyDiagram } from "./ui.ts";
 import { WEB_PAGE } from "./web-page.ts";
+import { highlightLines } from "./highlight.ts";
+import { listWorkspaceFiles, readWorkspaceFile, workspacePath } from "./workspace-files.ts";
 
 export const WEB_HOSTNAME = "127.0.0.1";
 const COOKIE = "ovp_token";
@@ -238,6 +242,17 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 		return json(state);
 	}
 
+	if (url.pathname === "/api/files" && request.method === "GET") {
+		return json(await listWorkspaceFiles(entry.binding.cwd));
+	}
+
+	if (url.pathname === "/api/file" && request.method === "GET") {
+		const read = await readWorkspaceFile(entry.binding.cwd, url.searchParams.get("path") ?? "");
+		if (!read.ok) return json({ error: read.error }, read.status);
+		// Spans, not HTML: the page styles token classes; file text never becomes markup.
+		return json({ ...read, tokens: highlightLines(read.lines.join("\n"), read.path) ?? null });
+	}
+
 	if (url.pathname === "/api/op" && request.method === "POST") {
 		if (request.headers.get("origin") !== origin) return json({ error: "cross-origin write refused" }, 403);
 		let body: unknown;
@@ -297,7 +312,10 @@ export interface WebState {
 	breadcrumb: { diagramId: string; title: string }[];
 	selected: string | undefined;
 	review: WebReview | undefined;
-	pending: { requestId: string; label: string; state: string; blockId: string | undefined } | undefined;
+	/** The request this branch waits on: what it is, where, and since when (ISO time) — for progress UI. */
+	pending:
+		| { requestId: string; label: string; state: string; kind: string; since: string; blockId: string | undefined }
+		| undefined;
 }
 
 /** Every label the page shows comes from the shared flow, never from the page itself. */
@@ -331,7 +349,7 @@ function project(document: DiagramDocument, entry: JournalEntry): { ok: true; do
 	if (!proposal) return { ok: false, error: "that request has no staged proposal" };
 	const clone = structuredClone(document);
 	try {
-		applyReplacement(clone, proposal.replacement, entry.scope.id);
+		acceptReplacement(clone, proposal.replacement, entry.scope.id);
 	} catch (error) {
 		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
@@ -412,6 +430,8 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 					requestId: pendingEntry.requestId,
 					label: pendingEntry.label,
 					state: pendingEntry.state,
+					kind: pendingEntry.kind,
+					since: pendingEntry.createdAt,
 					blockId: pendingEntry.scope.kind === "block" ? pendingEntry.scope.id : undefined,
 				}
 			: undefined,
@@ -527,6 +547,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					scope: { kind: "block", id },
 					branchKey: session.branchToken,
 					baseDigest: store.diskDigest,
+					codeRoot: codeRootFor(binding.cwd, undefined),
 				});
 				return {
 					ok: true,
@@ -546,6 +567,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					scope: { kind: "block", id },
 					branchKey: session.branchToken,
 					baseDigest: store.diskDigest,
+					codeRoot: codeRootFor(binding.cwd, undefined),
 				});
 				const outcome = binding.submit(composed.request, composed.prompt);
 				if (!outcome.ok) return { ok: false, error: outcome.error };
@@ -682,6 +704,33 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 				focusBlock(session, store.require(), block.id);
 				return { ok: true, changed: true, message: "added a block" };
 			}
+			case "addSource": {
+				const id = str(op.id, "id");
+				const path = workspacePath(str(op.path, "path").trim());
+				if (path === undefined) throw new OpError("path must be relative to the workspace");
+				const startLine = op.startLine === undefined ? undefined : num(op.startLine, "startLine");
+				const endLine = op.endLine === undefined ? startLine : num(op.endLine, "endLine");
+				if (startLine !== undefined && (startLine < 1 || endLine === undefined || endLine < startLine)) {
+					throw new OpError("lines must be a range starting at 1");
+				}
+				const source = startLine === undefined ? { path } : { path, startLine, endLine };
+				store.transact(draft => {
+					const target = findBlockLocation(draft.root, id);
+					if (!target) throw new OpError(`no block ${id}`);
+					target.block.sources.push(source);
+				});
+				return { ok: true, changed: true, message: `anchored to ${formatSourceRef(source)}` };
+			}
+			case "removeSource": {
+				const id = str(op.id, "id");
+				const index = num(op.index, "index");
+				store.transact(draft => {
+					const target = findBlockLocation(draft.root, id);
+					if (!target?.block.sources[index]) throw new OpError(`no source ${index} on block ${id}`);
+					target.block.sources.splice(index, 1);
+				});
+				return { ok: true, changed: true, message: "anchor removed" };
+			}
 			case "removeBlock": {
 				const id = str(op.id, "id");
 				const location = findBlockLocation(document.root, id);
@@ -754,9 +803,17 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					return { ok: false, error: `${applicable.errors.join("; ")} — run the action again` };
 				}
 				const proposal = entry.proposal;
-				store.transact(draft => applyReplacement(draft, proposal.replacement, entry.scope.id));
+				store.transact(draft => acceptReplacement(draft, proposal.replacement, entry.scope.id));
 				session.registry.resolve(requestId, "accepted");
 				return { ok: true, changed: true, message: "proposal accepted; save to write it" };
+			}
+			case "tidy": {
+				store.transact(draft => {
+					const diagram = findDiagram(draft.root, diagramId);
+					if (!diagram) throw new OpError("the current diagram is gone");
+					tidyDiagram(diagram);
+				});
+				return { ok: true, changed: true, message: "tidied the diagram" };
 			}
 			case "reject": {
 				const requestId = str(op.requestId, "requestId");
@@ -815,6 +872,7 @@ async function submitStart(session: WebSession, binding: WebBinding, op: Record<
 		scope: { kind: "project" },
 		branchKey: session.branchToken,
 		baseDigest: store.diskDigest,
+		codeRoot: codeRootFor(binding.cwd, start),
 	});
 	const outcome = binding.submit(composed.request, composed.prompt);
 	if (!outcome.ok) return { ok: false, error: outcome.error };

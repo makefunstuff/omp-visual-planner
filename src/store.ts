@@ -363,12 +363,27 @@ export function applyReplacement(
 	document: DiagramDocument,
 	replacement: DiagramDocument | Block | Diagram,
 	targetId: string | undefined,
-): void {
-	// Status is the human's call: a proposal never changes it, and blocks it introduces start open.
-	const statuses = new Map<string, BlockStatus>();
-	for (const { block } of eachBlock(document.root)) statuses.set(block.id, block.status);
+): string[] {
+	// Status and position are the human's: a proposal never changes them. Blocks
+	// it introduces start open, and their ids are returned so the caller can
+	// place them — a model's coordinates are never trusted for layout.
+	const kept = new Map<string, { status: BlockStatus; x: number; y: number }>();
+	for (const { block } of eachBlock(document.root)) {
+		kept.set(block.id, { status: block.status, x: block.position.x, y: block.position.y });
+	}
 	replaceStructure(document, replacement, targetId);
-	for (const { block } of eachBlock(document.root)) block.status = statuses.get(block.id) ?? "open";
+	const added: string[] = [];
+	for (const { block } of eachBlock(document.root)) {
+		const prior = kept.get(block.id);
+		if (prior) {
+			block.status = prior.status;
+			block.position = { x: prior.x, y: prior.y };
+		} else {
+			block.status = "open";
+			added.push(block.id);
+		}
+	}
+	return added;
 }
 
 function replaceStructure(
