@@ -11,10 +11,13 @@ import { dirname, join, relative, resolve } from "node:path";
 import {
 	type ArkTypeNamespace,
 	type Block,
+	type BlockStatus,
 	type Diagram,
 	type DiagramDocument,
+	type Purpose,
 	SCHEMA_VERSION,
 	createDocument,
+	eachBlock,
 	findBlockLocation,
 	findOwnedDiagram,
 	importLegacyBoard,
@@ -75,6 +78,7 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 				return entry;
 			}),
 			evidence: block.evidence,
+			status: block.status,
 			actions: { enhance: block.actions.enhance, execute: block.actions.execute },
 			children: block.children ? normalizeDiagram(block.children) : null,
 		})),
@@ -94,6 +98,7 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 		id: document.id,
 		title: document.title,
 		goal: document.goal,
+		purpose: document.purpose,
 		revision: document.revision,
 		root: normalizeDiagram(document.root),
 	};
@@ -178,7 +183,7 @@ export class DocumentStore {
 		return { document: this.require(), path: this.#path, dirty: this.#dirty };
 	}
 
-	newDocument(init: { title?: string; goal?: string } = {}, path?: string): DiagramDocument {
+	newDocument(init: { title?: string; goal?: string; purpose?: Purpose } = {}, path?: string): DiagramDocument {
 		this.#document = createDocument(init);
 		this.#path = path;
 		this.#diskDigest = undefined;
@@ -355,6 +360,18 @@ export class DocumentStore {
  * the block or diagram it replaces.
  */
 export function applyReplacement(
+	document: DiagramDocument,
+	replacement: DiagramDocument | Block | Diagram,
+	targetId: string | undefined,
+): void {
+	// Status is the human's call: a proposal never changes it, and blocks it introduces start open.
+	const statuses = new Map<string, BlockStatus>();
+	for (const { block } of eachBlock(document.root)) statuses.set(block.id, block.status);
+	replaceStructure(document, replacement, targetId);
+	for (const { block } of eachBlock(document.root)) block.status = statuses.get(block.id) ?? "open";
+}
+
+function replaceStructure(
 	document: DiagramDocument,
 	replacement: DiagramDocument | Block | Diagram,
 	targetId: string | undefined,

@@ -8,7 +8,7 @@
  * native `Editor` widget mounted in this component.
  */
 import { readFile, stat } from "node:fs/promises";
-import { basename, isAbsolute, resolve as resolvePath } from "node:path";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent";
 import type { Component, Theme, ThemeColor, TUI } from "@oh-my-pi/pi-tui";
 import {
@@ -24,8 +24,24 @@ import {
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
-import type { ComposedPrompt } from "./compose.ts";
-import { ScopeError, composePrompt } from "./compose.ts";
+import { ScopeError } from "./compose.ts";
+import {
+	type ComposedRequest,
+	type DocumentStart,
+	type PageField,
+	composeRequest,
+	fieldLabel,
+	nextOpenBlock,
+	nextStatus,
+	outlineRows,
+	pageFields,
+	progressLabel,
+	projectActions,
+	startDocument,
+	statusGlyph,
+	statusLabel,
+	verbsFor,
+} from "./flow.ts";
 import type {
 	ArkTypeNamespace,
 	Block,
@@ -45,6 +61,7 @@ import {
 	EDGE_PORTS,
 	EDGE_ROUTINGS,
 	EVIDENCE_VALUES,
+	PURPOSES,
 	addBlock,
 	addEdge,
 	createBlock,
@@ -54,20 +71,12 @@ import {
 	findBlockLocation,
 	findDiagramPath,
 	findOwnedDiagram,
+	moveBlockInOrder,
 	nearestBlock,
-	nextUnknownBlock,
 	removeBlock,
 } from "./model.ts";
 import type { DocumentStore } from "./store.ts";
-import {
-	MAX_VIEWER_FILE_BYTES,
-	MAX_VIEWER_LINES,
-	PROJECT_DIR,
-	applyReplacement,
-	defaultDiscoveryPath,
-	defaultDocumentPath,
-	displayPath,
-} from "./store.ts";
+import { MAX_VIEWER_FILE_BYTES, MAX_VIEWER_LINES, PROJECT_DIR, applyReplacement, displayPath } from "./store.ts";
 
 export const INSPECTOR_WIDTH = 34;
 export const MIN_WIDTH = 40;
@@ -88,6 +97,8 @@ export interface ScreenOptions {
 	hasUI: boolean;
 	isIdle(): boolean;
 	hasPendingMessages(): boolean;
+	/** Block to focus when the screen opens, if it still exists. */
+	initialSelection?: string;
 }
 
 export type ScreenResult =
@@ -99,6 +110,7 @@ export type ScreenResult =
 export interface ScreenStart {
 	action?: "draft" | "discover";
 	target?: string;
+	purpose?: "brainstorm" | "plan";
 }
 
 // ---------------------------------------------------------------------------
@@ -627,10 +639,11 @@ interface CloseModal {
 type Modal = EditModal | ListModal | TextModal | ReviewModal | ConfirmModal | CloseModal;
 
 interface PreviewPending {
-	composed: ComposedPrompt;
+	composed: ComposedRequest;
 	kind: ActionKind;
+	intent: Intent;
 	scope: Scope;
-	/** The token embedded in `composed.text`; the submitted request must reuse it. */
+	/** The token embedded in the previewed prompt; the submitted request must reuse it. */
 	requestId: string;
 	save?: Promise<unknown>;
 }
@@ -638,9 +651,8 @@ interface PreviewPending {
 interface Override {
 	kind: ActionKind;
 	scope: Scope;
-	instruction?: string;
-	title?: string;
-	target?: string;
+	/** A new document to create and save before the request is composed. */
+	start?: DocumentStart;
 }
 
 interface SourceView {
@@ -664,7 +676,11 @@ export class DiagramScreen implements Component {
 	#stack: string[];
 	#selected: string | undefined;
 	#selectedEdge: string | undefined;
+	/** In the outline view, `canvas` means the outline list has focus and `inspector` the block page. */
 	#pane: "canvas" | "inspector" = "canvas";
+	#view: "outline" | "canvas" = "outline";
+	#collapsed = new Set<string>();
+	#outlineTop = 0;
 	#modal: Modal | undefined;
 	#modalTitle: string | undefined;
 	#linkFrom: string | undefined;
@@ -683,15 +699,19 @@ export class DiagramScreen implements Component {
 		// surface, so the store gets an in-memory document to render and save.
 		const document = options.store.document ?? options.store.newDocument({ title: "New architecture" });
 		this.#stack = [document.root.id];
-		this.#selected = document.root.blocks[0]?.id;
+		const initial =
+			options.initialSelection !== undefined && findBlockLocation(document.root, options.initialSelection)
+				? options.initialSelection
+				: document.root.blocks[0]?.id;
+		if (initial !== undefined) this.#focus(initial);
 		this.#message =
 			options.store.importNotice === undefined
-				? "? help   o new block   i inspector   a actions   s save"
+				? "? help   o add   enter edit   space status   n next open   a actions   v map"
 				: `${options.store.importNotice}; press s to choose a new path`;
 		const staged = this.#stagedEntry();
 		if (staged) this.#message = `proposal staged for ${staged.label}; press R to review`;
 		if (start?.action === "draft") {
-			this.#beginDraft();
+			this.#beginDraft(start.purpose ?? "plan");
 		} else if (start?.action === "discover") {
 			this.#beginDiscover(start.target ?? ".");
 		} else if (staged && staged.documentId === document.id) {
@@ -699,6 +719,19 @@ export class DiagramScreen implements Component {
 			// so show it rather than making them find the R binding.
 			this.#openReview();
 		}
+	}
+
+	/**
+	 * Focus a block anywhere in the document. The diagram stack follows it, so
+	 * every editor that works on "the selected block in the current diagram"
+	 * works unchanged from the outline.
+	 */
+	#focus(blockId: string): void {
+		const location = findBlockLocation(this.#document.root, blockId);
+		if (!location) return;
+		this.#selected = blockId;
+		this.#selectedEdge = undefined;
+		this.#stack = findDiagramPath(this.#document.root, location.diagram.id)!.map(diagram => diagram.id);
 	}
 
 	/** Diagram ids from the root to the diagram on screen. */
@@ -751,11 +784,24 @@ export class DiagramScreen implements Component {
 		if (edge) return ["edge:label", "edge:direction", "edge:routing", "edge:fromPort", "edge:toPort"];
 		const block = this.#block;
 		if (!block) return [];
-		const ids: FieldId[] = ["title", "description", "expectedOutput", "criteria", "evidence", "enhance", "execute"];
-		for (let index = 0; index < block.sources.length; index += 1) ids.push(`source:${index}`);
-		ids.push("source:add");
-		if (block.children) ids.push("children");
+		const ids: FieldId[] = [];
+		for (const field of pageFields(this.#document.purpose)) {
+			if (field !== "sources") {
+				ids.push(field);
+				continue;
+			}
+			for (let index = 0; index < block.sources.length; index += 1) ids.push(`source:${index}`);
+			ids.push("source:add");
+		}
+		if (this.#view === "canvas" && block.children) ids.push("children");
 		return ids;
+	}
+
+	/** The purpose's word for a field, for prompts and inspector rows. */
+	#labelOf(field: FieldId): string {
+		if (field.startsWith("source")) return fieldLabel(this.#document.purpose, "sources");
+		if (field === "children" || field.startsWith("edge:")) return field;
+		return fieldLabel(this.#document.purpose, field as PageField);
 	}
 
 	#hasAuthoredContent(): boolean {
@@ -818,7 +864,17 @@ export class DiagramScreen implements Component {
 			this.#options.tui.requestRender();
 			return;
 		}
-		if (key === "ctrl+c" || key === "escape") {
+		if (key === "ctrl+c") {
+			this.#requestClose();
+			return;
+		}
+		if (key === "escape") {
+			// Escape backs out of the page (or inspector) first; only then does it close.
+			if (this.#pane === "inspector") {
+				this.#pane = "canvas";
+				this.#options.tui.requestRender();
+				return;
+			}
 			this.#requestClose();
 			return;
 		}
@@ -826,8 +882,279 @@ export class DiagramScreen implements Component {
 			this.#options.tui.requestRender();
 			return;
 		}
-		this.#handleCanvasKey(key);
+		if (this.#view === "outline") this.#handleOutlineKey(key);
+		else this.#handleCanvasKey(key);
 		this.#options.tui.requestRender();
+	}
+
+	/** Keys both views share: status, verbs, flow navigation, purpose and view. */
+	#handleFlowKey(key: string): boolean {
+		switch (key) {
+			case "space":
+				this.#cycleStatus();
+				return true;
+			case "n":
+				this.#goNextOpen();
+				return true;
+			case "r":
+			case "b":
+			case "X":
+				this.#runVerb(key);
+				return true;
+			case "p":
+				this.#runVerb("r");
+				return true;
+			case "P":
+				this.#openPurposeMenu();
+				return true;
+			case "v":
+				this.#toggleView();
+				return true;
+			case "x":
+				this.#openIncidentEdges();
+				return true;
+			case "d":
+				this.#confirmDeleteBlock();
+				return true;
+			case "u":
+				this.#message = this.#options.store.undo() ? "undone" : "nothing to undo";
+				this.#ensureVisible();
+				return true;
+			case "ctrl+r":
+				this.#message = this.#options.store.redo() ? "redone" : "nothing to redo";
+				this.#ensureVisible();
+				return true;
+			case "a":
+				this.#openActionMenu();
+				return true;
+			case "s":
+				this.#save();
+				return true;
+			case "R":
+				this.#openReview();
+				return true;
+			case "?":
+				this.#openHelp();
+				return true;
+			default:
+				return false;
+		}
+	}
+
+	#handleOutlineKey(key: string): void {
+		const rows = outlineRows(this.#document, this.#collapsed);
+		const index = rows.findIndex(row => row.block.id === this.#selected);
+		const row = rows[index];
+		switch (key) {
+			case "j":
+			case "down": {
+				const next = index === -1 ? rows[0] : rows[index + 1];
+				if (next) this.#focus(next.block.id);
+				return;
+			}
+			case "k":
+			case "up": {
+				const previous = index === -1 ? rows[0] : rows[index - 1];
+				if (previous) this.#focus(previous.block.id);
+				return;
+			}
+			case "h":
+			case "left":
+				if (!row) return;
+				if (row.hasChildren && !row.collapsed) this.#collapsed.add(row.block.id);
+				else if (row.parentId !== undefined) this.#focus(row.parentId);
+				return;
+			case "l":
+			case "right":
+				if (!row) return;
+				if (row.collapsed) this.#collapsed.delete(row.block.id);
+				else if (row.hasChildren) this.#focus(row.block.children!.blocks[0]!.id);
+				return;
+			case "J":
+				this.#reorder(1);
+				return;
+			case "K":
+				this.#reorder(-1);
+				return;
+			case "o":
+				this.#addOutlineBlock("sibling");
+				return;
+			case "O":
+				this.#addOutlineBlock("child");
+				return;
+			case "enter":
+			case "i":
+				this.#pane = "inspector";
+				this.#fieldIndex = 0;
+				return;
+			case "e":
+				this.#openLinkPicker();
+				return;
+			default:
+				this.#handleFlowKey(key);
+		}
+	}
+
+	#reorder(delta: -1 | 1): void {
+		const block = this.#block;
+		if (!block) {
+			this.#message = "select a block first";
+			return;
+		}
+		const blocks = this.#diagram.blocks;
+		const target = blocks.findIndex(candidate => candidate.id === block.id) + delta;
+		if (target < 0 || target >= blocks.length) {
+			this.#message = delta < 0 ? "already first" : "already last";
+			return;
+		}
+		this.#transact(document => {
+			moveBlockInOrder(document.root, block.id, delta);
+		}, `moved "${block.title}" ${delta < 0 ? "up" : "down"}`);
+	}
+
+	/** Add a block after the focused one, or inside it, and name it straight away. */
+	#addOutlineBlock(mode: "sibling" | "child"): void {
+		const focused = this.#selected === undefined ? undefined : findBlockLocation(this.#document.root, this.#selected);
+		if (mode === "child" && !focused) {
+			this.#message = "select a block first";
+			return;
+		}
+		const parent = mode === "child" ? focused!.block : undefined;
+		const diagram = parent ? parent.children : (focused?.diagram ?? this.#document.root);
+		const afterId = mode === "sibling" ? focused?.block.id : undefined;
+		const position = diagram ? placeNewBlock(diagram, afterId) : { x: 2, y: 2 };
+		const block = createBlock({ x: position.x, y: position.y });
+		this.#transact(
+			document => {
+				if (parent) {
+					const owner = findBlockLocation(document.root, parent.id)!.block;
+					owner.children ??= { id: crypto.randomUUID(), blocks: [], edges: [] };
+					addBlock(document.root, owner.children.id, block);
+					return;
+				}
+				const target = focused ? focused.diagram.id : document.root.id;
+				addBlock(document.root, target, block, afterId);
+			},
+			parent ? `added a block inside "${parent.title}"` : "added a block",
+		);
+		if (parent) this.#collapsed.delete(parent.id);
+		this.#focus(block.id);
+		this.#openTextPrompt("title", "", text => {
+			if (text.trim().length > 0) this.#commitBlockField("title", text);
+		});
+	}
+
+	#cycleStatus(): void {
+		const block = this.#block;
+		if (!block) {
+			this.#message = "select a block first";
+			return;
+		}
+		const purpose = this.#document.purpose;
+		const next = nextStatus(purpose, block.status);
+		if (next === undefined) {
+			this.#message = "brainstorm ideas have no status";
+			return;
+		}
+		const blockId = block.id;
+		this.#transact(document => {
+			const target = findBlockLocation(document.root, blockId);
+			if (target) target.block.status = next;
+		}, `"${block.title}" is now ${statusLabel(purpose, next)}`);
+	}
+
+	#goNextOpen(): void {
+		const document = this.#document;
+		const found = nextOpenBlock(document, this.#selected);
+		if (found === undefined) {
+			this.#message = document.purpose === "brainstorm" ? "no blocks yet" : "nothing left open";
+			return;
+		}
+		const before = this.#diagram.id;
+		this.#focus(found);
+		if (this.#view === "canvas") {
+			if (this.#diagram.id !== before) this.#viewport = { left: 0, top: 0 };
+			this.#ensureVisible();
+		}
+		this.#message = `next: "${this.#block?.title ?? found}"`;
+	}
+
+	#runVerb(key: string): void {
+		const purpose = this.#document.purpose;
+		const verb = verbsFor(purpose).find(candidate => candidate.key === key);
+		if (!verb) {
+			this.#message = `no ${key} action for a ${purpose} document`;
+			return;
+		}
+		const block = this.#block;
+		if (!block) {
+			this.#message = "select a block first";
+			return;
+		}
+		this.#openPreview(verb.intent, { kind: verb.kind, scope: { kind: "block", id: block.id } });
+	}
+
+	#openPurposeMenu(): void {
+		const current = this.#document.purpose;
+		this.#modal = {
+			kind: "list",
+			title: "what is this document for?",
+			items: [...PURPOSES],
+			index: PURPOSES.indexOf(current),
+			footer: "j/k select   Enter choose   Esc close",
+			onEnter: index => {
+				this.#modal = undefined;
+				const choice = PURPOSES[index];
+				if (!choice || choice === current) return;
+				this.#fieldIndex = 0;
+				this.#transact(document => {
+					document.purpose = choice;
+				}, `purpose: ${choice}`);
+			},
+		};
+	}
+
+	#toggleView(): void {
+		this.#view = this.#view === "outline" ? "canvas" : "outline";
+		this.#viewport = { left: 0, top: 0 };
+		this.#linkFrom = undefined;
+		this.#linkTarget = undefined;
+		this.#fieldIndex = 0;
+		if (this.#view === "canvas") this.#ensureVisible();
+		this.#message = this.#view === "canvas" ? "map view — v returns to the outline" : "outline view";
+	}
+
+	/** Outline linking: pick a sibling from a list, then name the relationship. */
+	#openLinkPicker(): void {
+		const block = this.#block;
+		if (!block) {
+			this.#message = "select a block first";
+			return;
+		}
+		const diagramId = this.#diagram.id;
+		const others = this.#diagram.blocks.filter(candidate => candidate.id !== block.id);
+		if (others.length === 0) {
+			this.#message = "need another block in this diagram to link";
+			return;
+		}
+		this.#modal = {
+			kind: "list",
+			title: `link "${block.title}" to…`,
+			items: others.map(candidate => candidate.title || "(untitled)"),
+			index: 0,
+			footer: "j/k select   Enter choose   Esc close",
+			onEnter: index => {
+				this.#modal = undefined;
+				const target = others[index];
+				if (!target) return;
+				this.#openTextPrompt("relationship label", "", label => {
+					const edge = createEdge({ from: block.id, to: target.id, label: label.trim() });
+					this.#transact(document => {
+						if (!addEdge(document.root, diagramId, edge)) throw new Error("that relationship would be invalid");
+					}, `linked "${block.title}" → "${target.title}"`);
+				});
+			},
+		};
 	}
 
 	#handleCanvasKey(key: string): void {
@@ -894,40 +1221,8 @@ export class DiagramScreen implements Component {
 			case "e":
 				this.#startLink();
 				return;
-			case "x":
-				this.#openIncidentEdges();
-				return;
-			case "d":
-				this.#confirmDeleteBlock();
-				return;
-			case "u":
-				this.#message = this.#options.store.undo() ? "undone" : "nothing to undo";
-				this.#ensureVisible();
-				return;
-			case "ctrl+r":
-				this.#message = this.#options.store.redo() ? "redone" : "nothing to redo";
-				this.#ensureVisible();
-				return;
-			case "p":
-				this.#openPreview("enhance");
-				return;
-			case "a":
-				this.#openActionMenu();
-				return;
-			case "s":
-				this.#save();
-				return;
-			case "n":
-				this.#selectNextUnknown();
-				return;
-			case "R":
-				this.#openReview();
-				return;
-			case "?":
-				this.#openHelp();
-				return;
 			default:
-				return;
+				this.#handleFlowKey(key);
 		}
 	}
 
@@ -1140,20 +1435,6 @@ export class DiagramScreen implements Component {
 		};
 	}
 
-	#selectNextUnknown(): void {
-		const diagram = this.#diagram;
-		const found = nextUnknownBlock(diagram, this.#selected);
-		if (found === undefined) {
-			this.#message = "no block in this diagram is marked unknown";
-			return;
-		}
-		this.#selected = found;
-		this.#selectedEdge = undefined;
-		this.#pane = "canvas";
-		this.#ensureVisible();
-		this.#message = `selected unknown block ${found}`;
-	}
-
 	// ------------------------------------------------------------------
 	// Inspector
 	// ------------------------------------------------------------------
@@ -1302,7 +1583,7 @@ export class DiagramScreen implements Component {
 		};
 		const prefill = prefills[field];
 		if (prefill === undefined) return;
-		this.#openTextPrompt(field, prefill, value => this.#commitBlockField(field, value));
+		this.#openTextPrompt(this.#labelOf(field), prefill, value => this.#commitBlockField(field, value));
 	}
 
 	#commitBlockField(field: FieldId, text: string): void {
@@ -1401,78 +1682,76 @@ export class DiagramScreen implements Component {
 	// Actions, preview, review
 	// ------------------------------------------------------------------
 
-	#scopeHere(): Scope {
-		if (this.#selectedEdge !== undefined || this.#selected === undefined) return { kind: "diagram", id: this.#diagram.id };
-		return { kind: "block", id: this.#selected };
-	}
-
 	#openActionMenu(): void {
 		const pending = this.#options.registry.pending();
-		const choices: { label: string; override: Override }[] = [
-			{ label: "Enhance selected block", override: { kind: "enhance", scope: this.#scopeHere() } },
-			{ label: "Enhance current subsystem", override: { kind: "enhance", scope: { kind: "diagram", id: this.#diagram.id } } },
-			{
-				label: "Refresh block from its sources",
-				override: {
-					kind: "refresh",
-					scope: this.#scopeHere(),
-					instruction:
-						"Inspect the source references on this scope with your own tools and propose updated descriptions, evidence labels, sources and decomposition.",
+		const purpose = this.#document.purpose;
+		const block = this.#block;
+		const choices: { label: string; run: () => void }[] = [];
+		if (block) {
+			for (const verb of verbsFor(purpose)) {
+				choices.push({
+					label: `${verb.label} "${block.title}"   ${verb.key}`,
+					run: () => this.#openPreview(verb.intent, { kind: verb.kind, scope: { kind: "block", id: block.id } }),
+				});
+			}
+		}
+		for (const action of projectActions(purpose)) {
+			choices.push({
+				label: `${action.label}…`,
+				run: () =>
+					action.kind === "draft"
+						? this.#beginDraft(purpose === "brainstorm" ? "brainstorm" : "plan")
+						: this.#beginDiscover("."),
+			});
+		}
+		choices.push({ label: "Change purpose   P", run: () => this.#openPurposeMenu() });
+		if (pending) {
+			choices.push({
+				label: "Discard pending request",
+				run: () => {
+					this.#options.registry.resolve(pending.requestId, "discarded");
+					this.#message = "pending request discarded; a late proposal for it will be refused";
 				},
-			},
-			{ label: "Investigate selected block", override: { kind: "investigate", scope: this.#scopeHere() } },
-			{ label: "Recommend an executor for this scope", override: { kind: "recommend", scope: this.#scopeHere() } },
-			{ label: "Draft a new architecture", override: { kind: "draft", scope: { kind: "project" } } },
-			{ label: "Discover a codebase", override: { kind: "discover", scope: { kind: "project" }, target: "." } },
-			{ label: "Execute selected scope", override: { kind: "execute", scope: this.#scopeHere() } },
-		];
+			});
+		}
 		this.#modal = {
 			kind: "list",
 			title: "actions",
-			items: [...choices.map(choice => choice.label), ...(pending ? ["Discard pending request"] : [])],
+			items: choices.map(choice => choice.label),
 			index: 0,
 			footer: "j/k select   Enter choose   Esc close",
 			onEnter: index => {
 				this.#modal = undefined;
-				if (pending && index === choices.length) {
-					this.#options.registry.resolve(pending.requestId, "discarded");
-					this.#message = "pending request discarded; a late proposal for it will be refused";
-					return;
-				}
-				const choice = choices[index];
-				if (!choice) return;
-				if (choice.override.kind === "draft") {
-					this.#beginDraft();
-					return;
-				}
-				if (choice.override.kind === "discover") {
-					this.#beginDiscover(choice.override.target ?? ".");
-					return;
-				}
-				this.#openPreview(choice.override.kind === "execute" ? "execute" : choice.override.kind === "recommend" ? "recommend" : choice.override.kind === "investigate" ? "investigate" : "enhance", choice.override);
+				choices[index]?.run();
 			},
 		};
 	}
 
-	#beginDraft(): void {
-		this.#openTextPrompt("project title", "New architecture", value => {
-			this.#openPreview("plan", { kind: "draft", scope: { kind: "project" }, title: value });
+	#beginDraft(purpose: "brainstorm" | "plan"): void {
+		this.#openTextPrompt("what is this about? (becomes the goal)", "", goal => {
+			if (goal.trim().length === 0) {
+				this.#message = "a draft needs a goal";
+				this.#options.tui.requestRender();
+				return;
+			}
+			this.#openPreview("plan", { kind: "draft", scope: { kind: "project" }, start: { kind: "draft", goal, purpose } });
 		});
 	}
 
 	#beginDiscover(target: string): void {
 		this.#openTextPrompt("codebase path to map", target, value => {
-			this.#openPreview("discover", { kind: "discover", scope: { kind: "project" }, target: value });
+			this.#openPreview("discover", {
+				kind: "discover",
+				scope: { kind: "project" },
+				start: { kind: "discover", target: value.trim() || "." },
+			});
 		});
 	}
 
-	#openPreview(intent: Intent, override?: Override): void {
-		const kind = override?.kind ?? "enhance";
-		const scope = override?.scope ?? this.#scopeHere();
+	#openPreview(intent: Intent, override: Override): void {
+		const { kind, scope } = override;
 		let save: Promise<unknown> | undefined;
-		let document = this.#document;
-
-		if (kind === "draft" || kind === "discover") {
+		if (override.start) {
 			// Starting a new document replaces the in-memory one, so a document with
 			// authored content must be saved first. A fresh empty document has
 			// nothing to lose and is replaced silently.
@@ -1481,55 +1760,35 @@ export class DiagramScreen implements Component {
 				this.#options.tui.requestRender();
 				return;
 			}
-			const prepared = this.#prepareNewDocument(kind, override?.title ?? "New architecture", override?.target ?? ".");
-			if (!prepared) return;
-			document = prepared.document;
-			save = prepared.save;
+			const started = startDocument(this.#options.store, this.#options.cwd, override.start);
+			this.#stack = [started.document.root.id];
+			this.#selected = undefined;
+			this.#selectedEdge = undefined;
+			this.#viewport = { left: 0, top: 0 };
+			this.#collapsed.clear();
+			save = started.save.then(result => {
+				if (!result.ok) this.#message = result.errors.join("; ");
+				this.#options.tui.requestRender();
+				return result;
+			});
 		}
-
-		const request = kind === "execute" ? undefined : { requestId: crypto.randomUUID(), baseRevision: document.revision };
-		let composed: ComposedPrompt;
+		let composed: ComposedRequest;
 		try {
-			composed = composePrompt(document, scope, intent, {
-				instruction: override?.instruction,
-				request,
+			composed = composeRequest({
+				document: this.#document,
+				kind,
+				intent,
+				scope,
+				branchKey: this.#options.branchKey,
+				baseDigest: this.#options.store.diskDigest,
 			});
 		} catch (error) {
 			this.#message = error instanceof ScopeError ? error.message : String(error);
 			return;
 		}
-		this.#preview = { composed, kind, scope, requestId: request?.requestId ?? crypto.randomUUID(), save };
-		this.#modal = { kind: "text", title: `preview — ${composed.label} (${composed.size} chars)`, lines: composed.text.split("\n"), offset: 0 };
+		this.#preview = { composed, kind, intent, scope, requestId: composed.request.requestId, save };
+		this.#modal = { kind: "text", title: `preview — ${composed.label} (${composed.size} chars)`, lines: composed.prompt.split("\n"), offset: 0 };
 		this.#message = "Enter submit   c copy to prompt editor   w export markdown   Esc back";
-	}
-
-	/** Create and explicitly save an empty named document before requesting its replacement. */
-	#prepareNewDocument(
-		kind: "draft" | "discover",
-		title: string,
-		target: string,
-	): { document: DiagramDocument; save: Promise<unknown> } | undefined {
-		const path =
-			kind === "discover"
-				? defaultDiscoveryPath(this.#options.cwd, target)
-				: (this.#options.store.path ?? defaultDocumentPath(this.#options.cwd));
-		const resolvedTarget = resolvePath(this.#options.cwd, target);
-		const document = this.#options.store.newDocument(
-			kind === "draft"
-				? { title }
-				: { title: `Discovery: ${basename(resolvedTarget) || target}`, goal: `Map the codebase under ${target}` },
-			path,
-		);
-		this.#stack = [document.root.id];
-		this.#selected = undefined;
-		this.#selectedEdge = undefined;
-		this.#viewport = { left: 0, top: 0 };
-		const save = this.#options.store.save().then(result => {
-			if (!result.ok) this.#message = result.errors.join("; ");
-			this.#options.tui.requestRender();
-			return result;
-		});
-		return { document, save };
 	}
 
 	#submitPreview(): void {
@@ -1568,21 +1827,26 @@ export class DiagramScreen implements Component {
 			this.#options.tui.requestRender();
 			return;
 		}
-		const request: BeginInput = {
-			requestId: preview.requestId,
-			kind: preview.kind,
-			intent: preview.composed.intent,
-			scope: preview.scope,
-			label: preview.composed.label,
-			branchKey: this.#options.branchKey,
-			documentId: this.#document.id,
-			baseRevision: this.#document.revision,
-			baseDigest: this.#options.store.diskDigest,
-			prompt: preview.composed.text,
-		};
+		// Recompose against the saved document so the request carries the digest it was saved with.
+		let composed: ComposedRequest;
+		try {
+			composed = composeRequest({
+				document: this.#document,
+				kind: preview.kind,
+				intent: preview.intent,
+				scope: preview.scope,
+				branchKey: this.#options.branchKey,
+				baseDigest: this.#options.store.diskDigest,
+				requestId: preview.requestId,
+			});
+		} catch (error) {
+			this.#message = error instanceof ScopeError ? error.message : String(error);
+			this.#options.tui.requestRender();
+			return;
+		}
 		this.#preview = undefined;
 		this.#modal = undefined;
-		this.#done({ kind: "submit", request, prompt: preview.composed.text });
+		this.#done({ kind: "submit", request: composed.request, prompt: composed.prompt });
 	}
 
 	#openReview(): void {
@@ -1645,10 +1909,30 @@ export class DiagramScreen implements Component {
 			return;
 		}
 		const proposal = entry.proposal;
+		const before = this.#document.revision;
 		this.#transact(document => applyReplacement(document, proposal.replacement, entry.scope.id), "proposal accepted");
 		this.#options.registry.resolve(requestId, "accepted");
 		this.#modal = undefined;
+		if (this.#document.revision !== before) this.#message = this.#acceptedMessage(entry);
 		this.#options.tui.requestRender();
+	}
+
+	/** After an accept, point at the human's next move: settle the block, then move on. */
+	#acceptedMessage(entry: JournalEntry): string {
+		const document = this.#document;
+		const purpose = document.purpose;
+		if (purpose === "brainstorm") return "proposal accepted";
+		const scoped =
+			entry.scope.kind === "block" && entry.scope.id !== undefined
+				? findBlockLocation(document.root, entry.scope.id)?.block
+				: undefined;
+		if (scoped) {
+			this.#collapsed.delete(scoped.id);
+			this.#focus(scoped.id);
+		}
+		const next = nextStatus(purpose, scoped?.status ?? "open");
+		const label = next === undefined ? "" : (statusLabel(purpose, next) ?? "");
+		return `accepted — space marks "${scoped?.title ?? document.title}" ${label}, n goes to the next open block`;
 	}
 
 	#rejectReview(requestId: string): void {
@@ -1663,31 +1947,50 @@ export class DiagramScreen implements Component {
 	// ------------------------------------------------------------------
 
 	#openHelp(): void {
+		const shared = [
+			"space              step the block's status",
+			"n                  go to the next open block",
+			"r / b / X          the block verbs (refine, break down, execute)",
+			"P                  change what the document is for",
+			"a                  action menu",
+			"R                  review a staged proposal",
+			"s                  save the project document",
+			"u / Ctrl+R         undo / redo",
+			"d                  delete the selected block and subtree",
+			"x                  list this block's relationships",
+			"Escape / Ctrl+C    back out of the page, then close the planner",
+		];
+		const outline = [
+			"j/k, arrows        move through the outline",
+			"h / l              collapse or go to parent / expand or go to first child",
+			"J / K              move the block down / up in authored order",
+			"o / O              add a block after this one / inside it",
+			"Enter / i          edit the block's page",
+			"e                  link the block to a sibling",
+			"v                  map view",
+			...shared,
+			"",
+			"page: j/k fields, Enter edit, o add source, m edit source, d remove, Esc back",
+		];
+		const canvas = [
+			"h/j/k/l, arrows    select a block directionally",
+			"Tab / Shift+Tab    cycle blocks in this diagram",
+			"H/J/K/L            move the selected block one cell",
+			"o                  add a block",
+			"i                  focus the inspector (and back)",
+			"Enter              descend into a block's subsystem",
+			"Backspace          ascend one level",
+			"e                  link the selected block to another",
+			"Ctrl+arrows        pan the canvas by four cells",
+			"v                  back to the outline",
+			...shared,
+			"",
+			"inspector: j/k fields, Enter open or edit, o add source, m edit source, d remove",
+		];
 		this.#modal = {
 			kind: "list",
 			title: "omp-visual-planner keys",
-			items: [
-				"h/j/k/l, arrows    select a block directionally",
-				"Tab / Shift+Tab    cycle blocks in this diagram",
-				"H/J/K/L            move the selected block one cell",
-				"o                  add a block",
-				"i                  focus the inspector (and back)",
-				"Enter              descend into a block's subsystem",
-				"Backspace          ascend one level",
-				"a                  action menu (draft, enhance, execute…)",
-				"p                  preview the prompt for this scope",
-				"R                  review a staged proposal",
-				"s                  save the project document",
-				"n                  select the next unknown block",
-				"u / Ctrl+R         undo / redo",
-				"d                  delete the selected block and subtree",
-				"e                  link the selected block to another",
-				"x                  list this block's relationships",
-				"Ctrl+arrows        pan the canvas by four cells",
-				"Escape / Ctrl+C    close the planner",
-				"",
-				"inspector: j/k fields, Enter open or edit, o add source, m edit source, d remove",
-			],
+			items: this.#view === "outline" ? outline : canvas,
 			index: 0,
 			footer: "Esc close",
 			onEnter: () => {
@@ -1758,7 +2061,7 @@ export class DiagramScreen implements Component {
 				return;
 			}
 			if (key === "c") {
-				this.#options.ui.setEditorText(this.#preview?.composed.text ?? modal.lines.join("\n"));
+				this.#options.ui.setEditorText(this.#preview?.composed.prompt ?? modal.lines.join("\n"));
 				this.#message = "copied the payload into the prompt editor";
 				this.#options.tui.requestRender();
 				return;
@@ -1859,7 +2162,7 @@ export class DiagramScreen implements Component {
 		const composed = this.#preview?.composed;
 		if (!composed) return;
 		try {
-			await Bun.write(path, composed.text);
+			await Bun.write(path, composed.prompt);
 			this.#message = `exported ${displayPath(path, this.#options.cwd)}`;
 		} catch (error) {
 			this.#message = `cannot write ${path}: ${error instanceof Error ? error.message : String(error)}`;
@@ -1889,7 +2192,7 @@ export class DiagramScreen implements Component {
 
 	#screenTitle(): string {
 		const dirty = this.#options.store.dirty ? " *" : "";
-		return `omp-visual-planner — ${this.#document.title}${dirty}`;
+		return `omp-visual-planner — ${this.#document.title}${dirty} · ${this.#document.purpose}`;
 	}
 
 	#renderTooSmall(width: number, rows: number): readonly string[] {
@@ -1906,6 +2209,10 @@ export class DiagramScreen implements Component {
 	}
 
 	#renderBreadcrumb(width: number): string {
+		if (this.#view === "outline") {
+			const hint = this.#pane === "inspector" ? "[Esc] outline   [v] map" : "[Enter] page   [v] map";
+			return truncateToWidth(` ${this.#focusPath().join(" › ")}   ${hint}`, width, Ellipsis.Unicode, true);
+		}
 		const parts = [this.#document.title];
 		for (const diagramId of this.#stack.slice(1)) {
 			parts.push(findOwnedDiagram(this.#document.root, diagramId)?.owner.title ?? "?");
@@ -1914,7 +2221,16 @@ export class DiagramScreen implements Component {
 		return truncateToWidth(` ${parts.join(" › ")}   ${hint}`, width, Ellipsis.Unicode, true);
 	}
 
+	/** Document title, ancestors and the focused block. */
+	#focusPath(): string[] {
+		const document = this.#document;
+		const location = this.#selected === undefined ? undefined : findBlockLocation(document.root, this.#selected);
+		if (!location) return [document.title];
+		return [document.title, ...location.ancestors.map(block => block.title), location.block.title];
+	}
+
 	#renderBody(width: number, layout: Layout): string[] {
+		if (this.#view === "outline") return this.#renderOutlineBody(width, layout);
 		if (layout.stacked) {
 			const inner = layout.canvasWidth;
 			const lines = this.#pane === "inspector" ? this.#inspectorLines(inner, layout.bodyHeight) : this.#canvasLines(inner, layout.bodyHeight);
@@ -1927,6 +2243,170 @@ export class DiagramScreen implements Component {
 			lines.push(`│ ${pad(canvas[index] ?? "", layout.canvasWidth)}│ ${pad(inspector[index] ?? "", layout.inspectorWidth)}│`);
 		}
 		return lines;
+	}
+
+	/** Outline on the left, the focused block's page on the right; stacked terminals show one. */
+	#renderOutlineBody(width: number, layout: Layout): string[] {
+		const theme = this.#options.theme;
+		const height = layout.bodyHeight;
+		const inner = Math.max(0, width - 4);
+		if (layout.stacked) {
+			const lines = this.#pane === "inspector" ? this.#pageLines(inner, height) : this.#outlineLines(inner, height);
+			return Array.from({ length: height }, (_, index) => panelRow(theme, lines[index] ?? "", width));
+		}
+		const outlineWidth = Math.min(48, Math.max(28, Math.floor(width * 0.38)));
+		const pageWidth = Math.max(0, inner - outlineWidth - 3);
+		const outline = this.#outlineLines(outlineWidth, height);
+		const page = this.#pageLines(pageWidth, height);
+		const separator = theme.fg("border", "│");
+		return Array.from({ length: height }, (_, index) =>
+			panelRow(theme, `${pad(outline[index] ?? "", outlineWidth)} ${separator} ${pad(page[index] ?? "", pageWidth)}`, width),
+		);
+	}
+
+	#outlineLines(width: number, height: number): string[] {
+		const theme = this.#options.theme;
+		const document = this.#document;
+		const purpose = document.purpose;
+		const rows = outlineRows(document, this.#collapsed);
+		if (rows.length === 0) {
+			const copy =
+				purpose === "brainstorm"
+					? ["empty mind map", "o add an idea   a seed from a prompt"]
+					: purpose === "explore"
+						? ["nothing mapped yet", "a map a codebase"]
+						: ["nothing planned yet", "o add a block   a draft or discover"];
+			return ["", theme.fg("muted", ` ${copy[0]}`), "", ` ${copy[1]}`].map(line => truncateToWidth(line, width));
+		}
+		const focusIndex = rows.findIndex(row => row.block.id === this.#selected);
+		if (focusIndex !== -1) {
+			if (focusIndex < this.#outlineTop) this.#outlineTop = focusIndex;
+			if (focusIndex >= this.#outlineTop + height) this.#outlineTop = focusIndex - height + 1;
+		}
+		this.#outlineTop = Math.max(0, Math.min(this.#outlineTop, Math.max(0, rows.length - height)));
+		const pending = this.#options.registry.pending();
+		const pendingBlock = pending?.scope.kind === "block" ? pending.scope.id : undefined;
+		const lines: string[] = [];
+		for (const row of rows.slice(this.#outlineTop, this.#outlineTop + height)) {
+			const block = row.block;
+			const focused = block.id === this.#selected;
+			const twisty = row.hasChildren ? (row.collapsed ? "▸" : "▾") : " ";
+			const glyph = statusGlyph(purpose, block.status);
+			const badge =
+				purpose === "brainstorm" ? "" : block.evidence === "observed" ? " *" : block.evidence === "unknown" ? " ?" : "";
+			const marker =
+				pending && pendingBlock === block.id ? (pending.state === "staged" ? theme.fg("accent", " ◆") : theme.fg("muted", " ⋯")) : "";
+			const title = block.title.length > 0 ? block.title : "(untitled)";
+			const prefix = focused ? theme.fg("accent", "›") : " ";
+			const text = `${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${focused ? theme.bold(title) : title}${badge}${marker}`;
+			lines.push(truncateToWidth(text, width, Ellipsis.Unicode));
+		}
+		return lines;
+	}
+
+	#pageLines(width: number, height: number): string[] {
+		const theme = this.#options.theme;
+		const document = this.#document;
+		const purpose = document.purpose;
+		const block = this.#block;
+		const lines: string[] = [];
+		const wrap = (text: string, max: number): string[] => wrapTextWithAnsi(text, Math.max(1, width)).slice(0, max);
+		const muted = (text: string): string => theme.fg("muted", text);
+		if (!block) {
+			lines.push(theme.bold(document.title));
+			lines.push(muted(document.purpose));
+			lines.push("");
+			lines.push(muted("goal"));
+			lines.push(...(document.goal.trim().length > 0 ? wrap(document.goal.trim(), 6) : [muted("—")]));
+			lines.push("");
+			lines.push(progressLabel(document));
+			lines.push("");
+			lines.push(muted(`a  ${projectActions(purpose).map(action => action.label.toLowerCase()).join(" · ")}`));
+			return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode));
+		}
+		const fields = this.#fields;
+		const current = fields[Math.min(this.#fieldIndex, Math.max(0, fields.length - 1))];
+		const active = this.#pane === "inspector";
+		let focusLine = 0;
+		const label = (text: string, focused: boolean): string => {
+			if (focused) focusLine = lines.length;
+			return focused ? `${theme.fg("accent", "›")} ${muted(text)}` : `  ${muted(text)}`;
+		};
+		const value = (text: string): string => `  ${text}`;
+		const empty = value(muted("—"));
+		lines.push(muted(this.#focusPath().join(" › ")));
+		lines.push(theme.bold(block.title.length > 0 ? block.title : "(untitled)"));
+		const status = statusLabel(purpose, block.status);
+		if (status !== undefined) lines.push(theme.fg("accent", status));
+		lines.push("");
+		for (const field of pageFields(purpose)) {
+			const name = fieldLabel(purpose, field);
+			if (field === "sources") {
+				lines.push(label(name, active && current !== undefined && current.startsWith("source")));
+				block.sources.forEach((source, index) => {
+					const focused = active && current === `source:${index}`;
+					lines.push(`${focused ? theme.fg("accent", " ›") : "  "}${formatSourceRef(source)}`);
+				});
+				if (block.sources.length === 0) lines.push(empty);
+				if (active) lines.push(`${current === "source:add" ? theme.fg("accent", " ›") : "  "}${muted("+ add")}`);
+				continue;
+			}
+			lines.push(label(name, active && current === field));
+			const text =
+				field === "title"
+					? block.title
+					: field === "description"
+						? block.description
+						: field === "expectedOutput"
+							? block.expectedOutput
+							: field === "evidence"
+								? block.evidence
+								: field === "enhance"
+									? block.actions.enhance
+									: field === "execute"
+										? block.actions.execute
+										: "";
+			if (field === "criteria") {
+				if (block.acceptanceCriteria.length === 0) lines.push(empty);
+				for (const criterion of block.acceptanceCriteria) lines.push(value(`• ${criterion}`));
+			} else if (text.trim().length === 0) {
+				lines.push(empty);
+			} else if (field === "description" || field === "expectedOutput") {
+				lines.push(...wrapTextWithAnsi(text.trim(), Math.max(1, width - 2)).slice(0, 6).map(value));
+			} else {
+				lines.push(value(firstLine(text.trim())));
+			}
+		}
+		lines.push("");
+		const children = block.children?.blocks ?? [];
+		const breakdown = verbsFor(purpose).find(verb => verb.id === "breakdown");
+		lines.push(
+			children.length > 0
+				? `Inside (${children.length}): ${children.slice(0, 8).map(child => child.title).join(" · ")}`
+				: muted(`Inside: nothing yet — O adds one${breakdown ? `, b ${breakdown.label.toLowerCase()}` : ""}`),
+		);
+		const edges = this.#diagram.edges.filter(edge => edge.from === block.id || edge.to === block.id);
+		if (edges.length > 0) {
+			lines.push("Relationships:");
+			for (const edge of edges) {
+				const outgoing = edge.from === block.id;
+				const other = this.#diagram.blocks.find(candidate => candidate.id === (outgoing ? edge.to : edge.from));
+				const name = edge.label.length > 0 ? ` "${edge.label}"` : "";
+				lines.push(value(`${outgoing ? "→" : "←"} ${other?.title ?? "?"}${name}`));
+			}
+		}
+		const hint = [
+			...verbsFor(purpose).map(verb => `${verb.key} ${verb.label.toLowerCase()}`),
+			...(purpose === "brainstorm" ? [] : ["space status"]),
+			"n next open",
+		].join("   ");
+		// Keep the focused field on screen and the hint pinned to the bottom row.
+		const room = Math.max(1, height - 1);
+		const start = focusLine >= room ? focusLine - room + 2 : 0;
+		const visible = lines.slice(start, start + room);
+		while (visible.length < room) visible.push("");
+		visible.push(muted(hint));
+		return visible.slice(0, height).map(line => truncateToWidth(line, width, Ellipsis.Unicode));
 	}
 
 	#canvasLines(width: number, height: number): string[] {
@@ -2070,19 +2550,19 @@ export class DiagramScreen implements Component {
 		const block = this.#block;
 		const edge = this.#edge;
 		if (field === "title") return `title: ${block?.title ?? ""}`;
-		if (field === "description") return `description: ${firstLine(block?.description ?? "")}`;
-		if (field === "expectedOutput") return `expected output: ${firstLine(block?.expectedOutput ?? "")}`;
+		if (field === "description") return `${this.#labelOf(field)}: ${firstLine(block?.description ?? "")}`;
+		if (field === "expectedOutput") return `${this.#labelOf(field)}: ${firstLine(block?.expectedOutput ?? "")}`;
 		if (field === "criteria") {
-			return `acceptance: ${block?.acceptanceCriteria.length ?? 0} item(s) ${firstLine(block?.acceptanceCriteria[0] ?? "")}`;
+			return `${this.#labelOf(field)}: ${block?.acceptanceCriteria.length ?? 0} item(s) ${firstLine(block?.acceptanceCriteria[0] ?? "")}`;
 		}
 		if (field === "evidence") return `evidence: ${block?.evidence ?? ""}`;
-		if (field === "enhance") return `enhance: ${firstLine(block?.actions.enhance ?? "")}`;
-		if (field === "execute") return `execute: ${firstLine(block?.actions.execute ?? "")}`;
+		if (field === "enhance") return `${this.#labelOf(field)}: ${firstLine(block?.actions.enhance ?? "")}`;
+		if (field === "execute") return `${this.#labelOf(field)}: ${firstLine(block?.actions.execute ?? "")}`;
 		if (field === "children") return `subsystem: ${block?.children?.blocks.length ?? 0} block(s), Enter to enter`;
-		if (field === "source:add") return "+ add source reference";
+		if (field === "source:add") return `+ add to ${this.#labelOf(field)}`;
 		if (field.startsWith("source:")) {
 			const source = block?.sources[Number(field.slice("source:".length))];
-			return `source: ${source ? formatSourceRef(source) : ""}`;
+			return `${this.#labelOf(field)}: ${source ? formatSourceRef(source) : ""}`;
 		}
 		if (field === "edge:label") return `label: ${edge?.label ?? ""}`;
 		if (field === "edge:direction") return `direction: ${edge?.direction ?? ""}`;
@@ -2092,13 +2572,15 @@ export class DiagramScreen implements Component {
 	}
 
 	#renderStatus(width: number): string {
-		const unknown = this.#diagram.blocks.filter(block => block.evidence === "unknown").length;
-		const segments = [
-			this.#pane,
-			`rev ${this.#document.revision}${this.#options.store.dirty ? "*" : ""}`,
-			`blocks ${this.#diagram.blocks.length}`,
-			`unknown ${unknown}`,
-		];
+		const segments =
+			this.#view === "outline"
+				? ["outline", progressLabel(this.#document)]
+				: [
+						this.#pane,
+						`rev ${this.#document.revision}${this.#options.store.dirty ? "*" : ""}`,
+						`blocks ${this.#diagram.blocks.length}`,
+						`unknown ${this.#diagram.blocks.filter(block => block.evidence === "unknown").length}`,
+					];
 		if (this.#stagedEntry()) segments.push("proposal staged [R]");
 		if (this.#options.registry.pending()) segments.push("request pending");
 		const message = this.#message.length > 0 ? `   ${this.#message}` : "";

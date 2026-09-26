@@ -23,6 +23,7 @@ const uiStub = { setEditorText: () => {} } as unknown as ExtensionUIContext;
 
 interface Harness {
 	screen: DiagramScreen;
+	store: DocumentStore;
 	result(): unknown;
 }
 
@@ -30,7 +31,12 @@ interface Harness {
  * Opens the fixture through a real file so the store reports it clean, the way
  * a document behaves outside a just-accepted proposal.
  */
-async function harness(options: { width: number; rows: number; document?: ReturnType<typeof fixture> } = { width: 120, rows: 24 }): Promise<Harness> {
+async function harness(
+	options: { width: number; rows: number; document?: ReturnType<typeof fixture>; view?: "outline" | "canvas" } = {
+		width: 120,
+		rows: 24,
+	},
+): Promise<Harness> {
 	const document = options.document ?? fixture();
 	const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-screen-"));
 	directories.push(directory);
@@ -72,7 +78,9 @@ async function harness(options: { width: number; rows: number; document?: Return
 			result = value;
 		},
 	);
-	return { screen, result: () => result };
+	// The outline is the default surface; canvas tests switch to the map once.
+	if (options.view === "canvas") screen.handleInput("v");
+	return { screen, store, result: () => result };
 }
 
 /**
@@ -137,7 +145,7 @@ describe("overlay geometry", () => {
 
 	test("a wide terminal splits 34 columns of inspector off the canvas", async () => {
 		const layout = layoutFor(120, 36);
-		const lines = plain((await harness({ width: 120, rows: 36 })).screen.render(120));
+		const lines = plain((await harness({ width: 120, rows: 36, view: "canvas" })).screen.render(120));
 		expect(lines[0]).toContain("omp-visual-planner — Service");
 		expect(lines[1]).toContain("[i] inspector");
 		// The inspector's vertical edges sit exactly at the reserved columns.
@@ -148,8 +156,9 @@ describe("overlay geometry", () => {
 });
 
 describe("canvas rendering", () => {
+	const canvas = { width: 120, rows: 24, view: "canvas" } as const;
 	test("draws a bordered card per block with its title and description", async () => {
-		const lines = plain((await harness()).screen.render(120));
+		const lines = plain((await harness(canvas)).screen.render(120));
 		const joined = lines.join("\n");
 		expect(joined).toContain("┌──────────┐");
 		expect(joined).toContain("│ API");
@@ -158,7 +167,7 @@ describe("canvas rendering", () => {
 	});
 
 	test("keeps an off-screen block off the canvas", async () => {
-		const lines = plain((await harness()).screen.render(120));
+		const lines = plain((await harness(canvas)).screen.render(120));
 		// `worker` is unknown and sits below the fold at 24 rows, so pan to it.
 		const joined = lines.join("\n");
 		expect(joined).toContain("API");
@@ -166,7 +175,7 @@ describe("canvas rendering", () => {
 	});
 
 	test("draws an orthogonal relationship with an arrowhead and its label", async () => {
-		const lines = plain((await harness()).screen.render(120));
+		const lines = plain((await harness(canvas)).screen.render(120));
 		const joined = lines.join("\n");
 		expect(joined).toContain("─");
 		expect(joined).toContain("stores");
@@ -175,7 +184,7 @@ describe("canvas rendering", () => {
 	});
 
 	test("the status strip reports the current diagram's unknown count", async () => {
-		const lines = plain((await harness()).screen.render(120));
+		const lines = plain((await harness(canvas)).screen.render(120));
 		const status = lines[lines.length - 2]!;
 		expect(status).toContain("canvas");
 		expect(status).toContain("blocks 3");
@@ -186,7 +195,7 @@ describe("canvas rendering", () => {
 	test("a relationship label is drawn in free space and never over a card", async () => {
 		const apart = fixture();
 		apart.root.blocks[1]!.position = { x: 60, y: 2 };
-		const lines = plain((await harness({ width: 120, rows: 24, document: apart })).screen.render(120));
+		const lines = plain((await harness({ ...canvas, document: apart })).screen.render(120));
 		const joined = lines.join("\n");
 		expect(joined).toContain("stores");
 		// The card borders survive: the label only used free cells.
@@ -194,18 +203,19 @@ describe("canvas rendering", () => {
 
 		// Two cells apart leaves no room, and the label is omitted rather than
 		// overwriting the neighbouring card.
-		const cramped = plain((await harness()).screen.render(120)).join("\n");
+		const cramped = plain((await harness(canvas)).screen.render(120)).join("\n");
 		expect(cramped).toContain("Database");
 		expect(cramped.match(/┌──────────┐/g)?.length).toBe(2);
 	});
 
 	test("a dirty document must be saved before starting a new one", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("o");
 		h.screen.handleInput("a");
 		h.screen.render(120);
-		for (let step = 0; step < 5; step += 1) h.screen.handleInput("j");
+		// Refine, Break down, Execute, Draft…, then Discover…
+		for (let step = 0; step < 4; step += 1) h.screen.handleInput("j");
 		h.screen.handleInput("\r");
 		h.screen.render(120);
 		h.screen.handleInput("\r");
@@ -263,24 +273,27 @@ describe("canvas rendering", () => {
 			() => {},
 		);
 		const lines = plain(screen.render(120));
-		expect(lines.join("\n")).toContain("No blocks in this subsystem yet.");
-		expect(lines.join("\n")).toContain("[o] add a block");
+		expect(lines.join("\n")).toContain("nothing planned yet");
+		expect(lines.join("\n")).toContain("o add a block   a draft or discover");
 		for (const line of lines) expect(visibleWidth(line)).toBe(120);
 	});
 
-	test("the empty state offers both ways to start", async () => {
-		const empty = createDocument({ id: "doc-2", title: "Empty" });
-		const lines = plain((await harness({ width: 120, rows: 24, document: empty })).screen.render(120));
-		const joined = lines.join("\n");
-		expect(joined).toContain("No blocks in this subsystem yet.");
-		expect(joined).toContain("[o] add a block");
-		expect(joined).toContain("[a] draft from prompt");
+	test("the empty state is worded for the document's purpose", async () => {
+		const empty = createDocument({ id: "doc-2", title: "Empty", purpose: "brainstorm" });
+		const joined = plain((await harness({ width: 120, rows: 24, document: empty })).screen.render(120)).join("\n");
+		expect(joined).toContain("empty mind map");
+		expect(joined).toContain("o add an idea   a seed from a prompt");
+		const canvasEmpty = plain(
+			(await harness({ width: 120, rows: 24, document: createDocument({ id: "doc-3" }), view: "canvas" })).screen.render(120),
+		).join("\n");
+		expect(canvasEmpty).toContain("No blocks in this subsystem yet.");
 	});
 });
 
 describe("interaction", () => {
+	const canvas = { width: 120, rows: 24, view: "canvas" } as const;
 	test("a block is added, selected, and the diagram re-renders", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("o");
 		const lines = plain(h.screen.render(120));
@@ -290,7 +303,7 @@ describe("interaction", () => {
 	});
 
 	test("undo and redo walk the edit history", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("o");
 		h.screen.handleInput("u");
@@ -300,7 +313,7 @@ describe("interaction", () => {
 	});
 
 	test("descending into a block and ascending restores the breadcrumb", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("\r");
 		const inside = plain(h.screen.render(120));
@@ -312,7 +325,7 @@ describe("interaction", () => {
 	});
 
 	test("moving a block changes its stored position", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		for (let step = 0; step < 3; step += 1) h.screen.handleInput("L");
 		const lines = plain(h.screen.render(120));
@@ -321,7 +334,7 @@ describe("interaction", () => {
 	});
 
 	test("a pending link commits with Enter even from the inspector pane", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("i");
 		h.screen.handleInput("e");
@@ -334,7 +347,7 @@ describe("interaction", () => {
 	});
 
 	test("escape cancels a pending link instead of closing the planner", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("e");
 		expect(plain(h.screen.render(120)).join("\n")).toContain("linking from API");
@@ -355,7 +368,7 @@ describe("interaction", () => {
 	});
 
 	test("escape on a dirty document asks before discarding", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("o");
 		h.screen.handleInput("\x1b");
@@ -430,13 +443,13 @@ describe("interaction", () => {
 	});
 
 	test("a modal is drawn over the diagram, not instead of it", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("a");
 		const lines = plain(h.screen.render(120));
 		const joined = lines.join("\n");
 		// the dialog is present...
-		expect(joined).toContain("Enhance selected block");
+		expect(joined).toContain('Refine "API"');
 		// ...and so are the cards it is floating over
 		expect(joined).toContain("API");
 		expect(joined).toContain("Database");
@@ -485,7 +498,7 @@ describe("interaction", () => {
 	});
 
 	test("a dirty document must be saved before a request starts", async () => {
-		const h = await harness();
+		const h = await harness(canvas);
 		h.screen.render(120);
 		h.screen.handleInput("o");
 		h.screen.handleInput("p");
@@ -505,7 +518,7 @@ describe("inspector field editor", () => {
 	}
 
 	test("the title field opens prefilled, replaces it, and commits on Enter", async () => {
-		const h = await harness({ width: 120, rows: 24, document: named("Zeta") });
+		const h = await harness({ width: 120, rows: 24, document: named("Zeta"), view: "canvas" });
 		h.screen.render(120);
 		h.screen.handleInput("i");
 		h.screen.handleInput("\r");
@@ -528,7 +541,7 @@ describe("inspector field editor", () => {
 	});
 
 	test("escape cancels a field edit and keeps the authored value", async () => {
-		const h = await harness({ width: 120, rows: 24, document: named("Zeta") });
+		const h = await harness({ width: 120, rows: 24, document: named("Zeta"), view: "canvas" });
 		h.screen.render(120);
 		h.screen.handleInput("i");
 		h.screen.handleInput("\r");
@@ -540,5 +553,88 @@ describe("inspector field editor", () => {
 		expect(lines.join("\n")).toContain("edit cancelled");
 		expect(lines.join("\n")).toContain("title: Zeta");
 		expect(dialogRows(lines, "Enter accepts").join("\n")).not.toContain("zzz");
+	});
+});
+
+describe("outline", () => {
+	/** The rendered outline row carrying the focus marker. */
+	function focusedRow(lines: string[]): string | undefined {
+		return lines.find(line => /│ › /.test(line));
+	}
+
+	test("opens on the first block with its subtree expanded", async () => {
+		const h = await harness();
+		const lines = plain(h.screen.render(120));
+		expect(focusedRow(lines)).toContain("› ▾ ○ API");
+		expect(lines.join("\n")).toContain("    ○ Auth");
+		expect(lines[0]).toContain("· plan");
+	});
+
+	test("j walks depth-first into the nested block", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("j");
+		expect(focusedRow(plain(h.screen.render(120)))).toContain("Auth");
+	});
+
+	test("space settles the focused block and the progress follows", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		expect(plain(h.screen.render(120)).at(-2)).toContain("0/4 planned");
+		h.screen.handleInput(" ");
+		const lines = plain(h.screen.render(120));
+		expect(lines.at(-2)).toContain("1/4 planned");
+		expect(lines.at(-2)).toContain('"API" is now planned');
+		expect(focusedRow(lines)).toContain("◐ API");
+	});
+
+	test("o adds a named sibling right after the focused block", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("o");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("title — Enter accepts");
+		for (const key of "Cache") h.screen.handleInput(key);
+		h.screen.handleInput("\r");
+		expect(h.store.require().root.blocks.map(block => block.title)).toEqual(["API", "Cache", "Database", "Worker"]);
+		expect(focusedRow(plain(h.screen.render(120)))).toContain("Cache");
+	});
+
+	test("O adds a child inside the focused block", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("j");
+		h.screen.handleInput("O");
+		for (const key of "Tokens") h.screen.handleInput(key);
+		h.screen.handleInput("\r");
+		const auth = h.store.require().root.blocks[0]!.children!.blocks[0]!;
+		expect(auth.children!.blocks.map(block => block.title)).toEqual(["Tokens"]);
+		expect(focusedRow(plain(h.screen.render(120)))).toContain("      ○ Tokens");
+	});
+
+	test("r previews the purpose's refine request for the focused block", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("r");
+		const joined = plain(h.screen.render(120)).join("\n");
+		expect(joined).toContain('preview — block "API"');
+		expect(joined).toContain("Refine this block's authored text");
+	});
+
+	test("a verb the purpose does not offer says so", async () => {
+		const document = fixture();
+		document.purpose = "brainstorm";
+		const h = await harness({ width: 120, rows: 24, document });
+		h.screen.render(120);
+		h.screen.handleInput("X");
+		expect(plain(h.screen.render(120)).at(-2)).toContain("no X action for a brainstorm document");
+	});
+
+	test("every line is exactly the width, outline and page alike", async () => {
+		for (const width of [60, 100, 160]) {
+			const h = await harness({ width, rows: 24 });
+			for (const line of h.screen.render(width)) expect(visibleWidth(line)).toBe(width);
+			h.screen.handleInput("\r");
+			for (const line of h.screen.render(width)) expect(visibleWidth(line)).toBe(width);
+		}
 	});
 });

@@ -146,12 +146,32 @@ describe("composed payloads", () => {
 		expect(execution.text).toContain("You are the harness");
 	});
 
-	test("operator instructions are included verbatim", () => {
-		const prompt = composePrompt(fixture(), { kind: "block", id: "api" }, "enhance", {
-			instruction: "inspect the selected sources and update the block",
-		});
-		expect(prompt.text).toContain("## Additional instructions from the operator");
-		expect(prompt.text).toContain("inspect the selected sources and update the block");
+	test("decompose is worded for the document's purpose", () => {
+		const briefs = {
+			brainstorm: "Expand this idea: propose sub-ideas as its `children`",
+			plan: "Break this block down: propose the building blocks it needs as its `children`",
+			explore: "Map what is inside this block: read the code its sources point to",
+		} as const;
+		for (const purpose of ["brainstorm", "plan", "explore"] as const) {
+			const document = fixture();
+			document.purpose = purpose;
+			const text = composePrompt(document, { kind: "block", id: "api" }, "decompose").text;
+			expect(text).toContain(briefs[purpose]);
+			expect(text).toContain(`purpose: ${purpose} — `);
+			expect(text.includes("## Evidence rules")).toBe(purpose === "explore");
+		}
+	});
+
+	test("status appears with the purpose's words, and never in a brainstorm", () => {
+		const document = fixture();
+		document.root.blocks[0]!.status = "settled";
+		expect(composePrompt(document, { kind: "block", id: "api" }, "enhance").text).toContain(
+			"- [api] API — evidence: inferred — status: planned",
+		);
+		document.purpose = "brainstorm";
+		const brainstorm = composePrompt(document, { kind: "block", id: "api" }, "enhance").text;
+		expect(brainstorm).toContain("purpose: brainstorm");
+		expect(brainstorm).not.toContain("— status:");
 	});
 
 	test("composition is deterministic", () => {

@@ -28,7 +28,7 @@ afterEach(async () => {
 });
 
 function sample() {
-	const document = createDocument({ title: "Service", goal: "Ship auth" });
+	const document = createDocument({ title: "Service", goal: "Ship auth", purpose: "explore" });
 	const api = createBlock({ id: "api", title: "API", x: 4, y: 4, expectedOutput: "REST surface" });
 	const db = createBlock({ id: "db", title: "Database", x: 30, y: 4 });
 	document.root.blocks.push(api, db);
@@ -36,7 +36,7 @@ function sample() {
 		createEdge({ id: "e1", from: "api", to: "db", label: "stores", fromPort: "east", toPort: "west" }),
 	);
 	api.acceptanceCriteria.push("401 on missing token");
-	const auth = createBlock({ id: "auth", title: "Auth", x: 2, y: 2 });
+	const auth = createBlock({ id: "auth", title: "Auth", x: 2, y: 2, status: "settled" });
 	api.children = createDiagram({ id: "api-inner", blocks: [auth] });
 	return document;
 }
@@ -85,6 +85,9 @@ describe("save and reload", () => {
 		expect(document.root.edges[0]!.fromPort).toBe("east");
 		expect(document.root.edges[0]!.toPort).toBe("west");
 		expect(document.root.edges[0]!.label).toBe("stores");
+		expect(document.purpose).toBe("explore");
+		expect(document.root.blocks[0]!.children!.blocks[0]!.status).toBe("settled");
+		expect(document.root.blocks[0]!.status).toBe("open");
 		expect(reopened.dirty).toBe(false);
 	});
 
@@ -323,6 +326,37 @@ describe("proposal application", () => {
 		expect(() => store.transact(current => applyReplacement(current, createBlock({ id: "ghost" }), "ghost"))).toThrow(
 			/no block ghost/,
 		);
+	});
+
+	test("a proposal never changes status: known blocks keep theirs, new blocks start open", () => {
+		const store = new DocumentStore(type);
+		store.adopt(sample(), "/tmp/architecture.json");
+		const replacement = createBlock({
+			id: "api",
+			title: "API",
+			status: "done",
+			children: createDiagram({
+				id: "api-inner",
+				blocks: [
+					createBlock({ id: "auth", title: "Auth", status: "open" }),
+					createBlock({ id: "rate", title: "Rate limit", status: "settled" }),
+				],
+			}),
+		});
+		store.transact(current => applyReplacement(current, replacement, "api"));
+		const api = store.require().root.blocks[0]!;
+		expect(api.status).toBe("open");
+		expect(api.children!.blocks.map(b => [b.id, b.status])).toEqual([
+			["auth", "settled"],
+			["rate", "open"],
+		]);
+	});
+
+	test("a document replacement keeps the purpose", () => {
+		const store = new DocumentStore(type);
+		store.adopt(sample(), "/tmp/architecture.json");
+		store.transact(current => applyReplacement(current, { ...sample(), purpose: "brainstorm" }, undefined));
+		expect(store.require().purpose).toBe("explore");
 	});
 });
 

@@ -75,66 +75,93 @@ The plugin manifest is the `omp` key in `package.json`:
 | command | effect |
 |---|---|
 | `/diagram` | open the active document, or offer New if there is none |
-| `/diagram new` | start a new document at `.omp-visual-planner/architecture.json` |
+| `/diagram new [brainstorm\|plan\|explore]` | start a new document at `.omp-visual-planner/architecture.json` (default: plan) |
 | `/diagram open <path>` | open a document (legacy boards import automatically) |
-| `/diagram draft` | draft an architecture from a planning brief |
-| `/diagram discover [path]` | map an existing codebase (default: cwd) |
+| `/diagram draft [brainstorm]` | draft a plan (or seed a mind map) from a prompt |
+| `/diagram discover [path]` | map an existing codebase (default: cwd) into an explore document |
+| `/diagram web` / `/diagram web stop` | serve this session's planner on `127.0.0.1` for a browser; stop it |
 
 The overlay is a full-screen terminal mode. The host owns the alternate screen
-and restores the transcript, editor, and cursor focus when you leave.
+and restores the transcript, editor, and cursor focus when you leave. Web mode
+renders the same flow in a browser; its labels, verbs and statuses come from
+the same `src/flow.ts`.
+
+## One block at a time
+
+A document has a **purpose**, which decides the words, the verbs and whether
+blocks carry a status (`P` in the overlay, the purpose select on the web page):
+
+| purpose | for | block verbs (`r` / `b` / `X`) | status (`space`) |
+|---|---|---|---|
+| brainstorm | a mind map, no implementation | Refine, Expand | none |
+| plan | brainstorming aimed at an implementation | Refine, Break down, Execute | todo → planned → done |
+| explore | learning an existing codebase | Investigate, Map inside | unexplored → explored |
+
+The overlay opens on an **outline** of nested blocks with the focused block's
+**page** beside it (stacked on narrow terminals). The loop: pick a block, edit
+its page, ask the agent to refine or break it down, review the proposal, then
+`space` to settle it and `n` to go to the next open block. Status belongs to
+the human: a proposal never changes it, and blocks a proposal adds start open.
+The box canvas is still there as the **map** view (`v`). Documents written
+before purposes existed load as `plan` with every block open.
 
 ## Keys
 
+Outline:
+
 | key | action |
 |---|---|
-| `h/j/k/l`, arrows | select a block directionally |
-| `Tab` / `Shift+Tab` | cycle blocks in the current diagram |
-| `H/J/K/L` | move the selected block one cell |
-| `Ctrl+arrows` | pan the canvas by four cells |
-| `o` | add a block |
-| `Enter` | descend into the selected block's subsystem |
-| `Backspace` | ascend one level |
-| `i` | focus the inspector (and back) |
-| `a` | action menu: Draft, Discover, Enhance, Refresh, Investigate, Recommend, Execute |
-| `p` | preview the composed prompt for this scope |
+| `j/k`, arrows | move through the outline |
+| `h` / `l` | collapse, or go to the parent / expand, or go to the first child |
+| `J` / `K` | move the block down / up in authored order |
+| `o` / `O` | add a block after the focused one / inside it, and name it |
+| `Enter` / `i` | edit the block's page (`Esc` returns to the outline) |
+| `space` | step the block's status |
+| `n` | go to the next open block |
+| `r` / `b` / `X` | the purpose's block verbs: preview, then `Enter` submits (`p` = `r`) |
+| `e` | link the block to a sibling, with a label |
+| `P` | change the document's purpose |
+| `v` | switch to the map view (and back) |
+| `a` | action menu: the block verbs, draft/discover, change purpose, discard a pending request |
 | `R` | review a staged proposal |
-| `e` | link the selected block to another (arrows/Tab pick, `Enter` commits, `Esc` cancels) |
-| `x` | list and edit the selected block's relationships |
-| `d` | delete the selected block and its subtree |
+| `x` | list and edit the block's relationships |
+| `d` | delete the block and its subtree |
 | `u` / `Ctrl+R` | undo / redo |
 | `s` | save (prompts for a path when the document has none) |
-| `n` | select the next `unknown` block |
 | `?` | help |
-| `Esc` / `Ctrl+C` | close (with Save / Discard / Cancel when dirty) |
+| `Esc` / `Ctrl+C` | leave the page, then close (with Save / Discard / Cancel when dirty) |
 
-Inspector: `j`/`k` move between fields, `Enter` opens or edits the field, `o`
-adds a source reference, `m` edits one, `d` removes one. `Enter` on a source
-reference opens a read-only, line-numbered source pane inside the overlay.
+Map view keeps the canvas bindings — `h/j/k/l` select directionally, `Tab`
+cycles, `H/J/K/L` move a card, `Ctrl+arrows` pan, `Enter`/`Backspace` descend
+and ascend, `i` focuses the inspector — plus the shared `space`, `n`, verbs, `P`
+and `v`.
 
-## The four gestures
+Page and inspector: `j`/`k` move between fields, `Enter` opens or edits the
+field, `o` adds a source reference, `m` edits one, `d` removes one. `Enter` on a
+source reference opens a read-only, line-numbered source pane inside the overlay.
 
-1. **Outline** — `o`, `H/J/K/L`, `Enter`, `Backspace`. Blocks nest without limit;
-   `children` are the next level of the same subsystem.
-2. **Compose** — `p` shows the exact payload for the current scope: authored
-   descriptions, expected outputs, acceptance criteria, source references, and
-   relationships that leave the scope. Copy it to the prompt editor (`c`) or
-   export it (`w`) instead of submitting.
-3. **Enhance / Investigate** — `a`. The model reads what it needs with its own
-   tools and stages a proposal. You review a structural diff and accept or
-   reject it. Rejecting leaves your document untouched; accepting is one
-   undoable edit that stays unsaved until you press `s`.
-4. **Execute** — `a` → Execute. The scope's composed prompt becomes one
-   attributed OMP prompt; OMP decomposes the work and decides on subagents.
-   Submission is reported as *submitted*, never as completed, and the diagram
-   is not touched. An execution request carries no proposal token.
+## Requests
+
+1. **Compose** — every verb opens a preview of the exact payload for the block:
+   authored text, status, source references, and relationships that leave the
+   scope. Copy it to the prompt editor (`c`) or export it (`w`) instead of
+   submitting.
+2. **Refine / Break down / Investigate / Map inside** — the model reads what it
+   needs with its own tools and stages a proposal. You review a structural diff
+   and accept or reject it. Rejecting leaves your document untouched; accepting
+   is one undoable edit that stays unsaved until you press `s`.
+3. **Execute** (plan only) — the block's composed prompt becomes one attributed
+   OMP prompt; OMP decomposes the work and decides on subagents. Submission is
+   reported as *submitted*, never as completed, and the diagram is not touched.
+   An execution request carries no proposal token.
 
 ## Evidence, not vibes
 
-Every block carries `evidence` and cards render it as a badge: `*` observed,
-`?` unknown, nothing for inferred. A block claiming `observed` **must** cite at
+Every block carries `evidence` and the outline shows it: `*` observed, `?`
+unknown, nothing for inferred. A block claiming `observed` **must** cite at
 least one `sources` entry, or the document is rejected naming the block — a
-diagram can never look more certain than its evidence. Discovery prompts forbid
-paths that were not read. `n` walks you to the next unknown block.
+diagram can never look more certain than its evidence. Discovery and explore
+prompts forbid paths that were not read.
 
 ## Proposal protocol
 
@@ -169,6 +196,7 @@ loaded, and writes atomically through a sibling temporary file.
   "id": "…",
   "title": "Service",
   "goal": "ship auth",
+  "purpose": "plan",
   "revision": 3,
   "root": {
     "id": "…",
@@ -182,6 +210,7 @@ loaded, and writes atomically through a sibling temporary file.
         "position": { "x": 2, "y": 2 },
         "sources": [{ "path": "src/app.ts", "startLine": 10, "endLine": 40 }],
         "evidence": "observed",
+        "status": "settled",
         "actions": { "enhance": "", "execute": "" },
         "children": null
       }
@@ -208,6 +237,9 @@ loaded, and writes atomically through a sibling temporary file.
   architecture, not an execution schedule. Self-edges are rejected.
 - `actions.enhance` / `actions.execute` are instruction text for prompts. They
   are never executed as shell.
+- `purpose` (`brainstorm` | `plan` | `explore`) and block `status` (`open` |
+  `settled` | `done`) are optional in version 1; a file without them reads as a
+  plan whose blocks are open.
 - Legacy `{ "boxes": [...], "edges": [...] }` boards import once, keeping the
   first text line as the title and the rest as the description; the legacy file
   is never overwritten.
@@ -216,7 +248,7 @@ loaded, and writes atomically through a sibling temporary file.
 
 ```sh
 bun install
-bun test          # 114 tests
+bun test          # 148 tests
 bun run check     # tsc --noEmit
 ```
 
@@ -232,8 +264,10 @@ python3 scripts/demo/scenario_full.py /tmp/demo.cast     # DEMO_CWD=/path/to/wor
 
 Modules: `src/model.ts` (schema, validation, graph operations), `src/store.ts`
 (project documents, digests, undo), `src/compose.ts` (scope prompts),
-`src/actions.ts` (request/proposal lifecycle), `src/ui.ts` (canvas, inspector,
-review), `src/index.ts` (commands, tools, session lifecycle).
+`src/flow.ts` (purposes, verbs, statuses, outline order, request composition —
+shared by both surfaces), `src/actions.ts` (request/proposal lifecycle),
+`src/ui.ts` (outline, page, map, review), `src/web.ts` + `src/web-page.ts` (web
+mode), `src/index.ts` (commands, tools, session lifecycle).
 
 Two constraints discovered by running inside OMP, both load-bearing:
 

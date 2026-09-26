@@ -13,8 +13,8 @@ import {
 	eachBlock,
 	importLegacyBoard,
 	incidentEdges,
+	moveBlockInOrder,
 	nearestBlock,
-	nextUnknownBlock,
 	removeBlock,
 	toolSchemasFor,
 	validateDiagram,
@@ -151,15 +151,47 @@ describe("graph operations", () => {
 		expect(nearestBlock(document.root, "api", "k")).toBeUndefined();
 	});
 
-	test("cycle and unknown traversal wrap deterministically", () => {
+	test("cycle traversal wraps deterministically", () => {
 		const document = fixture();
 		expect(cycleBlock(document.root, undefined)).toBe("api");
 		expect(cycleBlock(document.root, "db")).toBe("api");
 		expect(cycleBlock(document.root, "api", -1)).toBe("db");
-		const inner = document.root.blocks[0]!.children!;
-		expect(nextUnknownBlock(inner, undefined)).toBe("auth");
-		expect(nextUnknownBlock(inner, "auth")).toBe("auth");
-		expect(nextUnknownBlock(document.root, undefined)).toBeUndefined();
+	});
+
+	test("authored order: move swaps neighbours and refuses at either end", () => {
+		const document = fixture();
+		expect(moveBlockInOrder(document.root, "api", -1)).toBe(false);
+		expect(moveBlockInOrder(document.root, "db", 1)).toBe(false);
+		expect(moveBlockInOrder(document.root, "api", 1)).toBe(true);
+		expect(document.root.blocks.map(b => b.id)).toEqual(["db", "api"]);
+		expect(moveBlockInOrder(document.root, "tokens", -1)).toBe(true);
+		expect(document.root.blocks[1]!.children!.blocks.map(b => b.id)).toEqual(["tokens", "auth"]);
+		expect(moveBlockInOrder(document.root, "ghost", 1)).toBe(false);
+	});
+
+	test("addBlock inserts after an anchor and appends without one", () => {
+		const document = fixture();
+		expect(addBlock(document.root, document.root.id, createBlock({ id: "mid" }), "api")).toBe(true);
+		expect(addBlock(document.root, document.root.id, createBlock({ id: "end" }))).toBe(true);
+		expect(document.root.blocks.map(b => b.id)).toEqual(["api", "mid", "db", "end"]);
+	});
+});
+
+describe("version-1 files without purpose or status", () => {
+	test("load as a plan whose blocks are all open", () => {
+		const legacy = JSON.parse(JSON.stringify(fixture())) as Record<string, unknown>;
+		delete legacy.purpose;
+		const strip = (diagram: { blocks: Record<string, unknown>[] }): void => {
+			for (const block of diagram.blocks) {
+				delete block.status;
+				if (block.children) strip(block.children as { blocks: Record<string, unknown>[] });
+			}
+		};
+		strip(legacy.root as { blocks: Record<string, unknown>[] });
+		const result = validateDocument(legacy, type);
+		if (!result.ok) throw new Error(result.errors.join("; "));
+		expect(result.document.purpose).toBe("plan");
+		expect([...eachBlock(result.document.root)].map(l => l.block.status)).toEqual(["open", "open", "open", "open"]);
 	});
 });
 

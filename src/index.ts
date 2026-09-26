@@ -6,14 +6,17 @@
  * Nothing here patches OMP core or global configuration.
  */
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-import type { JournalEntry } from "./actions.ts";
+import type { BeginInput, JournalEntry } from "./actions.ts";
 import { ActionRegistry } from "./actions.ts";
 import { resolveScope } from "./compose.ts";
-import type { Scope } from "./model.ts";
-import { toolSchemasFor } from "./model.ts";
+import type { Purpose, Scope } from "./model.ts";
+import { PURPOSES, toolSchemasFor } from "./model.ts";
 import { DocumentStore, SESSION_NAMESPACE, defaultDocumentPath, displayPath } from "./store.ts";
 import type { ScreenResult, ScreenStart } from "./ui.ts";
 import { DiagramScreen } from "./ui.ts";
+import { type WebBinding, openBrowser, runningWeb, startWeb, stopWeb } from "./web.ts";
+
+const STATUS_KEY = "visual-planner-web";
 
 interface PersistedState {
 	path: string | undefined;
@@ -76,7 +79,31 @@ function sessionFor(pi: ExtensionAPI, ctx: ExtensionContext): PlannerSession {
 		branchToken: branchTokenOf(ctx),
 	};
 	SESSIONS.set(key, created);
+	// After a plugin reload the listener is still up but serves the previous
+	// module's state; point it at this one.
+	if (runningWeb(key)) startWeb(webBinding(pi, ctx));
 	return created;
+}
+
+function webBinding(pi: ExtensionAPI, ctx: ExtensionContext): WebBinding {
+	const key = sessionKey(ctx);
+	return {
+		sessionId: key,
+		cwd: ctx.cwd,
+		getSession: () => SESSIONS.get(key),
+		onChange: () => {
+			const session = SESSIONS.get(key);
+			if (session) persist(pi, session);
+		},
+		submit: (request, prompt) => {
+			const session = SESSIONS.get(key);
+			if (!session) return { ok: false, error: "the planner session is gone" };
+			const outcome = submitRequest(pi, ctx, session, request, prompt);
+			// The terminal transcript is where the request runs, so say it there too.
+			ctx.ui.notify(`visual planner: ${outcome.ok ? outcome.message : outcome.error}`, outcome.ok ? "info" : "warning");
+			return outcome;
+		},
+	};
 }
 
 function readPersisted(ctx: ExtensionContext): PersistedState | undefined {
@@ -204,6 +231,7 @@ async function runScreen(
 					hasUI: ctx.hasUI,
 					isIdle: () => ctx.isIdle(),
 					hasPendingMessages: () => ctx.hasPendingMessages(),
+					initialSelection: session.selected,
 				},
 				done,
 				start,
@@ -224,7 +252,8 @@ async function runScreen(
 	persist(pi, session);
 
 	if (result.kind === "submit") {
-		await submitRequest(pi, ctx, session, result);
+		const outcome = submitRequest(pi, ctx, session, result.request, result.prompt);
+		ctx.ui.notify(`visual planner: ${outcome.ok ? outcome.message : outcome.error}`, outcome.ok ? "info" : "warning");
 		return;
 	}
 	const staged = session.registry
@@ -235,49 +264,92 @@ async function runScreen(
 	}
 }
 
-async function submitRequest(
+/** Register a request and hand its prompt to the agent. Shared by the overlay and web mode. */
+function submitRequest(
 	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
+	ctx: ExtensionContext,
 	session: PlannerSession,
-	result: Extract<ScreenResult, { kind: "submit" }>,
-): Promise<void> {
+	request: BeginInput,
+	prompt: string,
+): { ok: true; message: string } | { ok: false; error: string } {
 	if (!ctx.isIdle() || ctx.hasPendingMessages()) {
-		ctx.ui.notify("visual planner: OMP is busy; finish or cancel the current task before submitting.", "warning");
-		return;
+		return { ok: false, error: "OMP is busy; finish or cancel the current task before submitting." };
 	}
-	const began = session.registry.begin(result.request);
-	if (!began.ok) {
-		ctx.ui.notify(`visual planner: ${began.errors.join("; ")}`, "error");
-		return;
-	}
+	const began = session.registry.begin(request);
+	if (!began.ok) return { ok: false, error: began.errors.join("; ") };
 	persist(pi, session);
-	pi.sendUserMessage(result.prompt, { attribution: "agent" });
-	ctx.ui.notify(
-		result.request.kind === "execute"
-			? `visual planner: execution request ${result.request.requestId} submitted (${result.request.label}); the diagram will not change by itself`
-			: `visual planner: request ${result.request.requestId} submitted (${result.request.label}); it is not complete until a proposal is reviewed`,
-		"info",
-	);
+	pi.sendUserMessage(prompt, { attribution: "agent" });
+	return {
+		ok: true,
+		message:
+			request.kind === "execute"
+				? `execution request ${request.requestId} submitted (${request.label}); the diagram will not change by itself`
+				: `request ${request.requestId} submitted (${request.label}); it is not complete until a proposal is reviewed`,
+	};
 }
 
+const NEW_TITLES: Record<Purpose, string> = { brainstorm: "New brainstorm", plan: "New plan", explore: "New map" };
+
 const HELP_TEXT = [
-	"/diagram                   open the active document (or offer New/Open)",
-	"/diagram new               start a new document",
-	"/diagram open <path>       open a document at a path",
-	"/diagram draft             draft an architecture from a brief",
-	"/diagram discover [path]   map an existing codebase (default: cwd)",
+	"/diagram                        open the active document (or offer New/Open)",
+	"/diagram new [brainstorm|plan|explore]   start a new document (default: plan)",
+	"/diagram open <path>            open a document at a path",
+	"/diagram draft [brainstorm]     draft a plan (or seed a mind map) from a prompt",
+	"/diagram discover [path]        map an existing codebase (default: cwd)",
+	"/diagram web                    open this session's planner in the browser (local server)",
+	"/diagram web stop               stop the local server",
 ].join("\n");
+
+const COMPLETIONS = [
+	"new",
+	"new brainstorm",
+	"new plan",
+	"new explore",
+	"open ",
+	"draft",
+	"draft brainstorm",
+	"discover",
+	"web",
+	"web stop",
+	"help",
+];
 
 export default function ompVisualPlanner(pi: ExtensionAPI): void {
 	const toolSchemas = toolSchemasFor(pi.arktype);
 
 	pi.registerCommand("diagram", {
-		description: "Open the visual architecture planner (open/new/draft/discover)",
+		description: "Open the visual planner (new/open/draft/discover/web)",
 		getArgumentCompletions: prefix => {
-			const matches = ["new", "open ", "draft", "discover", "help"].filter(item => item.startsWith(prefix));
+			const matches = COMPLETIONS.filter(item => item.startsWith(prefix));
 			return matches.length > 0 ? matches.map(item => ({ value: item, label: item })) : null;
 		},
 		handler: async (args, ctx) => {
+			const command = args.trim();
+			if (command === "web stop") {
+				const stopped = stopWeb(sessionKey(ctx));
+				ctx.ui.setStatus(STATUS_KEY, undefined);
+				ctx.ui.notify(stopped ? "visual planner: web server stopped" : "visual planner: no web server is running", "info");
+				return;
+			}
+			if (command === "web") {
+				const session = await ensureSession(pi, ctx);
+				const notice = await prepareDefault(ctx, session);
+				const reused = runningWeb(sessionKey(ctx)) !== undefined;
+				const handle = startWeb(webBinding(pi, ctx));
+				const link = `${handle.url}?token=${handle.token}`;
+				ctx.ui.setStatus(STATUS_KEY, `planner ${handle.url}`);
+				openBrowser(link);
+				ctx.ui.notify(
+					[
+						`visual planner: ${reused ? "web server already running" : "web server started"} at ${handle.url}`,
+						`open: ${link}`,
+						"stop with /diagram web stop; it also stops when this session ends",
+						...(notice ? [notice.replace(/; add blocks.*$/, "; create one from the page")] : []),
+					].join("\n"),
+					"info",
+				);
+				return;
+			}
 			if (!ctx.hasUI || ctx.mode !== "tui") {
 				ctx.ui.notify("visual planner: the diagram overlay needs an interactive terminal session.", "error");
 				return;
@@ -288,8 +360,14 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 				return;
 			}
 			const session = await ensureSession(pi, ctx);
-			if (trimmed === "new") {
-				const document = session.store.newDocument({ title: "New architecture" }, defaultDocumentPath(ctx.cwd));
+			if (trimmed === "new" || trimmed.startsWith("new ")) {
+				const argument = trimmed.slice("new".length).trim() || "plan";
+				const purpose = PURPOSES.find(candidate => candidate === argument);
+				if (!purpose) {
+					ctx.ui.notify(HELP_TEXT, "info");
+					return;
+				}
+				const document = session.store.newDocument({ title: NEW_TITLES[purpose], purpose }, defaultDocumentPath(ctx.cwd));
 				session.stack = [document.root.id];
 				session.selected = undefined;
 				await runScreen(pi, ctx, session, undefined, undefined);
@@ -311,9 +389,10 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 				await runScreen(pi, ctx, session, undefined, opened.kind === "legacy-import" ? opened.summary : undefined);
 				return;
 			}
-			if (trimmed === "draft") {
+			if (trimmed === "draft" || trimmed === "draft brainstorm" || trimmed === "draft plan") {
 				const notice = await prepareDefault(ctx, session);
-				await runScreen(pi, ctx, session, { action: "draft" }, notice);
+				const purpose = trimmed === "draft brainstorm" ? "brainstorm" : "plan";
+				await runScreen(pi, ctx, session, { action: "draft", purpose }, notice);
 				return;
 			}
 			if (trimmed === "discover" || trimmed.startsWith("discover ")) {
@@ -450,6 +529,7 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 		await adoptSession(pi, ctx);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		stopWeb(sessionKey(ctx));
 		SESSIONS.delete(sessionKey(ctx));
 	});
 }

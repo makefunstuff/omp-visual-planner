@@ -18,7 +18,7 @@ import {
 	validateDocument,
 } from "./model.ts";
 
-export type ActionKind = "draft" | "discover" | "enhance" | "refresh" | "recommend" | "investigate" | "execute";
+export type ActionKind = "draft" | "discover" | "enhance" | "decompose" | "investigate" | "execute";
 
 export type JournalState =
 	| "pending"

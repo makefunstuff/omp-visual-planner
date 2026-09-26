@@ -15,6 +15,8 @@ export type Evidence = "observed" | "inferred" | "unknown";
 export type EdgeDirection = "forward" | "both" | "none";
 export type EdgeRouting = "auto" | "horizontal-first" | "vertical-first";
 export type EdgePort = "auto" | "north" | "east" | "south" | "west";
+export type Purpose = "brainstorm" | "plan" | "explore";
+export type BlockStatus = "open" | "settled" | "done";
 
 export interface SourceRef {
 	path: string;
@@ -42,6 +44,7 @@ export interface Block {
 	position: BlockPosition;
 	sources: SourceRef[];
 	evidence: Evidence;
+	status: BlockStatus;
 	actions: BlockActions;
 	children: Diagram | null;
 }
@@ -68,6 +71,7 @@ export interface DiagramDocument {
 	id: string;
 	title: string;
 	goal: string;
+	purpose: Purpose;
 	revision: number;
 	root: Diagram;
 }
@@ -78,12 +82,14 @@ export interface Scope {
 	id?: string;
 }
 
-export type Intent = "plan" | "discover" | "enhance" | "execute" | "recommend" | "investigate";
+export type Intent = "plan" | "discover" | "enhance" | "decompose" | "investigate" | "execute";
 
 export type Direction = "h" | "j" | "k" | "l";
 
 /** Cycle order used by the inspector and by the schema itself. */
 export const EVIDENCE_VALUES: readonly Evidence[] = ["observed", "inferred", "unknown"];
+export const PURPOSES: readonly Purpose[] = ["brainstorm", "plan", "explore"];
+export const BLOCK_STATUSES: readonly BlockStatus[] = ["open", "settled", "done"];
 export const EDGE_DIRECTIONS: readonly EdgeDirection[] = ["forward", "both", "none"];
 export const EDGE_ROUTINGS: readonly EdgeRouting[] = ["auto", "horizontal-first", "vertical-first"];
 export const EDGE_PORTS: readonly EdgePort[] = ["auto", "north", "east", "south", "west"];
@@ -95,6 +101,8 @@ const DEFINITIONS = {
 	Direction: "'forward'|'both'|'none'",
 	Routing: "'auto'|'horizontal-first'|'vertical-first'",
 	Port: "'auto'|'north'|'east'|'south'|'west'",
+	Status: "'open'|'settled'|'done'",
+	Purpose: "'brainstorm'|'plan'|'explore'",
 	SourceRef: { path: "string", "startLine?": "number", "endLine?": "number" },
 	BlockPosition: { x: "number", y: "number" },
 	BlockActions: { enhance: "string", execute: "string" },
@@ -107,6 +115,7 @@ const DEFINITIONS = {
 		position: "BlockPosition",
 		sources: "SourceRef[]",
 		evidence: "Evidence",
+		"status?": "Status",
 		actions: "BlockActions",
 		children: "Diagram|null",
 	},
@@ -126,6 +135,7 @@ const DEFINITIONS = {
 		id: "string",
 		title: "string",
 		goal: "string",
+		"purpose?": "Purpose",
 		revision: "number",
 		root: "Diagram",
 	},
@@ -240,6 +250,7 @@ export function createBlock(
 		position: { x: init.x ?? 2, y: init.y ?? 2 },
 		sources: init.sources ? init.sources.map(s => ({ ...s })) : [],
 		evidence: init.evidence ?? "inferred",
+		status: init.status ?? "open",
 		actions: init.actions ? { ...init.actions } : { enhance: "", execute: "" },
 		children: init.children === undefined ? null : init.children,
 	};
@@ -262,12 +273,15 @@ export function createDiagram(init: Partial<Diagram> & { id?: string } = {}): Di
 	return { id: init.id ?? crypto.randomUUID(), blocks: init.blocks ?? [], edges: init.edges ?? [] };
 }
 
-export function createDocument(init: { title?: string; goal?: string; id?: string } = {}): DiagramDocument {
+export function createDocument(
+	init: { title?: string; goal?: string; purpose?: Purpose; id?: string } = {},
+): DiagramDocument {
 	return {
 		schemaVersion: SCHEMA_VERSION,
 		id: init.id ?? crypto.randomUUID(),
 		title: init.title ?? "Untitled architecture",
 		goal: init.goal ?? "",
+		purpose: init.purpose ?? "plan",
 		revision: 0,
 		root: createDiagram(),
 	};
@@ -358,12 +372,31 @@ export function removeBlock(root: Diagram, blockId: string): boolean {
 	return false;
 }
 
-/** Append a block to a diagram. Returns false when the diagram is unknown. */
-export function addBlock(root: Diagram, diagramId: string, block: Block): boolean {
+/**
+ * Insert a block into a diagram: right after `afterId` when that block is in the
+ * diagram, otherwise at the end. Returns false when the diagram is unknown.
+ */
+export function addBlock(root: Diagram, diagramId: string, block: Block, afterId?: string): boolean {
 	const diagram = findDiagram(root, diagramId);
 	if (!diagram) return false;
-	diagram.blocks.push(block);
+	const anchor = afterId === undefined ? -1 : diagram.blocks.findIndex(b => b.id === afterId);
+	if (anchor === -1) diagram.blocks.push(block);
+	else diagram.blocks.splice(anchor + 1, 0, block);
 	return true;
+}
+
+/** Swap a block with its neighbour in authored order. False at either end or for an unknown id. */
+export function moveBlockInOrder(root: Diagram, blockId: string, delta: -1 | 1): boolean {
+	for (const diagram of eachDiagram(root)) {
+		const index = diagram.blocks.findIndex(b => b.id === blockId);
+		if (index === -1) continue;
+		const target = index + delta;
+		if (target < 0 || target >= diagram.blocks.length) return false;
+		const [block] = diagram.blocks.splice(index, 1);
+		diagram.blocks.splice(target, 0, block!);
+		return true;
+	}
+	return false;
 }
 
 /** Append an edge. Rejects unknown endpoints and self-edges. */
@@ -416,14 +449,6 @@ export function nearestBlock(diagram: Diagram, fromId: string, direction: Direct
 		if (!best || score < best.score) best = { score, id: candidate.id };
 	}
 	return best?.id;
-}
-
-/** Next `unknown` block in this diagram, wrapping. */
-export function nextUnknownBlock(diagram: Diagram, afterId: string | undefined): string | undefined {
-	const unknowns = diagram.blocks.filter(b => b.evidence === "unknown");
-	if (unknowns.length === 0) return undefined;
-	const start = afterId === undefined ? -1 : unknowns.findIndex(b => b.id === afterId);
-	return unknowns[(start + 1) % unknowns.length]!.id;
 }
 
 /** Deterministic Tab order: authored block order in the current diagram. */
@@ -530,6 +555,8 @@ export function validateDocument(value: unknown, arktype: ArkTypeNamespace): Val
 	const parsed = schemasFor(arktype).DiagramDocument(value);
 	if (failed(parsed, arktype)) return { ok: false, errors: [parsed.summary] };
 	const document = parsed as DiagramDocument;
+	document.purpose ??= "plan";
+	fillDefaults(document.root);
 	const ledger: IdLedger = { errors: [], seen: new Map() };
 	claimId(ledger, document.id, "document");
 	checkDiagram(document.root, "root", ledger);
@@ -544,6 +571,7 @@ export function validateBlock(
 	const parsed = schemasFor(arktype).Block(value);
 	if (failed(parsed, arktype)) return { ok: false, errors: [parsed.summary] };
 	const block = parsed as Block;
+	fillDefaults({ id: "", blocks: [block], edges: [] });
 	const ledger: IdLedger = { errors: [], seen: new Map() };
 	checkBlock(block, block.title.length > 0 ? block.title : block.id, ledger);
 	if (block.children) checkDiagram(block.children, `block ${block.title}`, ledger);
@@ -558,10 +586,16 @@ export function validateDiagram(
 	const parsed = schemasFor(arktype).Diagram(value);
 	if (failed(parsed, arktype)) return { ok: false, errors: [parsed.summary] };
 	const diagram = parsed as Diagram;
+	fillDefaults(diagram);
 	const ledger: IdLedger = { errors: [], seen: new Map() };
 	checkDiagram(diagram, "replacement", ledger);
 	if (ledger.errors.length > 0) return { ok: false, errors: ledger.errors };
 	return { ok: true, diagram };
+}
+
+/** Fields that version-1 files may omit: every block without a status reads as `open`. */
+function fillDefaults(diagram: Diagram): void {
+	for (const { block } of eachBlock(diagram)) block.status ??= "open";
 }
 
 // ---------------------------------------------------------------------------
