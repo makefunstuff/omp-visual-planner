@@ -1,0 +1,11 @@
+{
+  "boxes": [
+    { "x": 4, "y": 4, "text": "api\npublic REST surface\n- auth middleware" },
+    { "x": 28, "y": 4, "text": "db\npostgres, migrations" },
+    { "x": 12, "y": 12, "text": "worker\nbackground jobs" }
+  ],
+  "edges": [
+    { "from": 0, "to": 1 },
+    { "from": 0, "to": 2 }
+  ]
+}
