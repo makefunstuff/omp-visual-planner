@@ -56,7 +56,8 @@ describe("purpose vocabulary", () => {
 				intent: "replan",
 				kind: "replan",
 			});
-			expect(projectActions(purpose).slice(-2).map(action => action.kind)).toEqual(["replan", "prune"]);
+			const kinds = projectActions(purpose).map(action => action.kind);
+			expect(kinds.slice(-2)).toEqual(purpose === "plan" ? ["prune", "execute"] : ["replan", "prune"]);
 			expect(verbsFor(purpose).some(verb => verb.id === "prune")).toBe(false);
 		}
 	});

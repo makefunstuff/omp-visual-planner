@@ -42,8 +42,10 @@ import {
 	type Evidence,
 	type Intent,
 	type Scope,
+	type Venue,
 	EVIDENCE_VALUES,
 	PURPOSES,
+	VENUES,
 	type Purpose,
 	addBlock,
 	addEdge,
@@ -634,11 +636,15 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 						(BLOCK_TEXT_FIELDS as readonly string[]).includes(key) ||
 						(BLOCK_ACTION_FIELDS as readonly string[]).includes(key) ||
 						key === "evidence" ||
-						key === "acceptanceCriteria";
+						key === "acceptanceCriteria" ||
+						key === "venue";
 					if (!editable) throw new OpError(`field ${key} cannot be edited here`);
 				}
 				if (patch.evidence !== undefined && !EVIDENCE_VALUES.includes(patch.evidence as Evidence)) {
 					throw new OpError(`evidence must be one of ${EVIDENCE_VALUES.join(", ")}`);
+				}
+				if (patch.venue !== undefined && !VENUES.includes(patch.venue as Venue)) {
+					throw new OpError(`venue must be one of ${VENUES.join(", ")}`);
 				}
 				const criteria =
 					patch.acceptanceCriteria === undefined
@@ -660,6 +666,10 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 						if (patch[key] !== undefined) target.block.actions[key] = str(patch[key], key);
 					}
 					if (patch.evidence !== undefined) target.block.evidence = patch.evidence as Evidence;
+					if (patch.venue !== undefined) {
+						if (patch.venue === "here") delete target.block.venue;
+						else target.block.venue = patch.venue as Venue;
+					}
 					if (criteria !== undefined) target.block.acceptanceCriteria = criteria;
 				});
 				return { ok: true, changed: true, message: "block updated" };
@@ -858,6 +868,9 @@ function requestScope(document: DiagramDocument, op: Record<string, unknown>): {
 	}
 	if (op.verb === "replan" && op.id === undefined) {
 		return { verb: { kind: "replan", intent: "replan" }, scope: { kind: "project" } };
+	}
+	if (op.verb === "execute" && op.id === undefined) {
+		return { verb: { kind: "execute", intent: "execute" }, scope: { kind: "project" } };
 	}
 	const { verb, id } = verbRequest(document, op);
 	return { verb, scope: { kind: "block", id } };

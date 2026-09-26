@@ -641,6 +641,7 @@ type FieldId =
 	| "criteria"
 	| "evidence"
 	| "enhance"
+	| "venue"
 	| "execute"
 	| "children"
 	| `source:${number}`
@@ -1754,6 +1755,17 @@ export class DiagramScreen implements Component {
 			}, `evidence ${next}`);
 			return;
 		}
+		if (field === "venue" && block) {
+			const order = ["here", "subagent", "worktree"] as const;
+			const next = order[(order.indexOf(block.venue ?? "here") + 1) % order.length]!;
+			this.#transact(document => {
+				const target = findBlockLocation(document.root, block.id);
+				if (!target) return;
+				if (next === "here") delete target.block.venue;
+				else target.block.venue = next;
+			}, `venue ${next}`);
+			return;
+		}
 		if (field === "source:add") {
 			this.#openTextPrompt("add source reference (path or path:10-40)", "", value => {
 				const source = parseSourceRef(value);
@@ -2706,6 +2718,8 @@ export class DiagramScreen implements Component {
 							? block.expectedOutput
 							: field === "evidence"
 								? block.evidence
+								: field === "venue"
+									? (block.venue ?? "here")
 								: field === "enhance"
 									? block.actions.enhance
 									: field === "execute"
@@ -2947,6 +2961,7 @@ export class DiagramScreen implements Component {
 			return `${this.#labelOf(field)}: ${block?.acceptanceCriteria.length ?? 0} item(s) ${firstLine(block?.acceptanceCriteria[0] ?? "")}`;
 		}
 		if (field === "evidence") return `evidence: ${block?.evidence ?? ""}`;
+		if (field === "venue") return `venue: ${block?.venue ?? "here"}`;
 		if (field === "enhance") return `${this.#labelOf(field)}: ${firstLine(block?.actions.enhance ?? "")}`;
 		if (field === "execute") return `${this.#labelOf(field)}: ${firstLine(block?.actions.execute ?? "")}`;
 		if (field === "children") return `subsystem: ${block?.children?.blocks.length ?? 0} block(s), Enter to enter`;

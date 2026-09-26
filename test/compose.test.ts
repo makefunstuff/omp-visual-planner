@@ -139,11 +139,15 @@ describe("composed payloads", () => {
 		expect(requested.text).toContain("baseRevision: 4");
 		expect(requested.text).toContain("`visual_planner_propose`");
 
-		const execution = composePrompt(document, { kind: "block", id: "api" }, "execute");
+		const auth = document.root.blocks[0]!.children!.blocks[0]!;
+		auth.status = "settled";
+		auth.acceptanceCriteria = ["rejects a missing token"];
+		const execution = composePrompt(document, { kind: "block", id: "auth" }, "execute");
 		expect(execution.text).not.toContain("## Proposal token");
 		expect(execution.text).not.toContain("visual_planner_propose");
-		expect(execution.text).toContain("## Reporting");
-		expect(execution.text).toContain("You are the harness");
+		expect(execution.text).toContain("Here — do these in this session");
+		expect(execution.text).toContain("[auth] Auth");
+		expect(execution.text).not.toContain("decide yourself");
 	});
 
 	test("decompose is worded for the document's purpose", () => {

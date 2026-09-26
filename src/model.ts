@@ -17,6 +17,8 @@ export type EdgeRouting = "auto" | "horizontal-first" | "vertical-first";
 export type EdgePort = "auto" | "north" | "east" | "south" | "west";
 export type Purpose = "brainstorm" | "plan" | "explore";
 export type BlockStatus = "open" | "settled" | "done";
+/** Where a ready leaf is executed. Omitted means this session. */
+export type Venue = "here" | "subagent" | "worktree";
 
 export interface SourceRef {
 	path: string;
@@ -45,6 +47,8 @@ export interface Block {
 	sources: SourceRef[];
 	evidence: Evidence;
 	status: BlockStatus;
+	/** Omitted means `here`. A proposal never changes it; acceptance keeps the human's choice. */
+	venue?: Venue;
 	actions: BlockActions;
 	children: Diagram | null;
 }
@@ -90,6 +94,7 @@ export type Direction = "h" | "j" | "k" | "l";
 export const EVIDENCE_VALUES: readonly Evidence[] = ["observed", "inferred", "unknown"];
 export const PURPOSES: readonly Purpose[] = ["brainstorm", "plan", "explore"];
 export const BLOCK_STATUSES: readonly BlockStatus[] = ["open", "settled", "done"];
+export const VENUES: readonly Venue[] = ["here", "subagent", "worktree"];
 export const EDGE_DIRECTIONS: readonly EdgeDirection[] = ["forward", "both", "none"];
 export const EDGE_ROUTINGS: readonly EdgeRouting[] = ["auto", "horizontal-first", "vertical-first"];
 export const EDGE_PORTS: readonly EdgePort[] = ["auto", "north", "east", "south", "west"];
@@ -102,6 +107,7 @@ const DEFINITIONS = {
 	Routing: "'auto'|'horizontal-first'|'vertical-first'",
 	Port: "'auto'|'north'|'east'|'south'|'west'",
 	Status: "'open'|'settled'|'done'",
+	Venue: "'here'|'subagent'|'worktree'",
 	Purpose: "'brainstorm'|'plan'|'explore'",
 	SourceRef: { path: "string", "startLine?": "number", "endLine?": "number" },
 	BlockPosition: { x: "number", y: "number" },
@@ -116,8 +122,8 @@ const DEFINITIONS = {
 		sources: "SourceRef[]",
 		evidence: "Evidence",
 		"status?": "Status",
+		"venue?": "Venue",
 		actions: "BlockActions",
-		children: "Diagram|null",
 	},
 	Edge: {
 		id: "string",
@@ -251,6 +257,7 @@ export function createBlock(
 		sources: init.sources ? init.sources.map(s => ({ ...s })) : [],
 		evidence: init.evidence ?? "inferred",
 		status: init.status ?? "open",
+		...(init.venue !== undefined && init.venue !== "here" ? { venue: init.venue } : {}),
 		actions: init.actions ? { ...init.actions } : { enhance: "", execute: "" },
 		children: init.children === undefined ? null : init.children,
 	};

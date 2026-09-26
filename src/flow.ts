@@ -13,7 +13,10 @@ import {
 	type Intent,
 	type Purpose,
 	type Scope,
+	type Venue,
+	VENUES,
 	eachBlock,
+	findBlockLocation,
 } from "./model.ts";
 import { type DocumentStore, type SaveResult, defaultDiscoveryPath, defaultDocumentPath } from "./store.ts";
 
@@ -138,14 +141,14 @@ export type PageField =
 	| "criteria"
 	| "evidence"
 	| "enhance"
-	| "execute"
+	| "venue"
 	| "sources";
 
 /** Fields a block's page shows, in order. */
 export function pageFields(purpose: Purpose): PageField[] {
 	if (purpose === "brainstorm") return ["title", "description"];
 	if (purpose === "explore") return ["title", "description", "evidence", "sources", "enhance"];
-	return ["title", "description", "expectedOutput", "criteria", "evidence", "enhance", "execute", "sources"];
+	return ["title", "description", "expectedOutput", "criteria", "evidence", "venue", "enhance", "execute", "sources"];
 }
 
 export function fieldLabel(purpose: Purpose, field: PageField): string {
@@ -164,6 +167,8 @@ export function fieldLabel(purpose: Purpose, field: PageField): string {
 			return purpose === "explore" ? "investigate notes" : "refine notes";
 		case "execute":
 			return "execute notes";
+		case "venue":
+			return "venue";
 		case "sources":
 			return purpose === "explore" ? "anchors" : "sources";
 	}
@@ -171,7 +176,7 @@ export function fieldLabel(purpose: Purpose, field: PageField): string {
 
 export interface ProjectAction {
 	/** The request this action submits, or the start flow it opens. */
-	kind: "draft" | "discover" | "replan" | "prune";
+	kind: "draft" | "discover" | "replan" | "prune" | "execute";
 	label: string;
 }
 
@@ -191,6 +196,7 @@ export function projectActions(purpose: Purpose): ProjectAction[] {
 		{ kind: "discover", label: "Discover a codebase" },
 		PROJECT_REPLAN,
 		PROJECT_PRUNE,
+		{ kind: "execute", label: "Execute ready leaves" },
 	];
 }
 
@@ -271,4 +277,175 @@ export function composeRequest(input: {
 /** The directory a request may read: a discovery reads its target, everything else the workspace. */
 export function codeRootFor(cwd: string, start: DocumentStart | undefined): string {
 	return start?.kind === "discover" ? resolve(cwd, start.target) : resolve(cwd);
+}
+
+export function venueOf(block: Block): Venue {
+	return block.venue ?? "here";
+}
+
+export type HoldKind = "brainstorm" | "refine" | "blocked" | "done" | "container";
+
+export interface DispatchLeaf {
+	id: string;
+	title: string;
+	venue: Venue;
+	acceptance: string[];
+	notes: string;
+}
+
+export interface DispatchHold {
+	id: string;
+	title: string;
+	kind: HoldKind;
+	reason: string;
+}
+
+export interface DispatchPlan {
+	/** Ready leaves, inbound neighbors in this list first. */
+	run: DispatchLeaf[];
+	held: DispatchHold[];
+}
+
+/** Execute found nothing it is allowed to run. */
+export class DispatchError extends Error {}
+
+/** Leaves an execute covers. A parent is a container: only its descendant leaves run. */
+function leavesIn(document: DiagramDocument, scope: Scope): { leaves: Block[]; container: Block | undefined } {
+	if (scope.kind === "block" && scope.id !== undefined) {
+		const location = findBlockLocation(document.root, scope.id);
+		if (!location) return { leaves: [], container: undefined };
+		if ((location.block.children?.blocks.length ?? 0) === 0) return { leaves: [location.block], container: undefined };
+		const leaves = [...eachBlock(location.block.children!)].map(entry => entry.block).filter(block => (block.children?.blocks.length ?? 0) === 0);
+		return { leaves, container: location.block };
+	}
+	const all = [...eachBlock(document.root)];
+	if (scope.kind === "project" || scope.id === undefined || scope.id === document.root.id) {
+		return { leaves: all.map(entry => entry.block).filter(block => (block.children?.blocks.length ?? 0) === 0), container: undefined };
+	}
+	const owned = all.filter(entry => {
+		const inside = entry.diagram.id === scope.id || entry.ancestors.some(ancestor => ancestor.children?.id === scope.id);
+		return inside && (entry.block.children?.blocks.length ?? 0) === 0;
+	});
+	return { leaves: owned.map(entry => entry.block), container: undefined };
+}
+
+function inboundOpen(document: DiagramDocument, block: Block, running: ReadonlySet<string>): string | undefined {
+	const location = findBlockLocation(document.root, block.id);
+	if (!location) return undefined;
+	for (const edge of location.diagram.edges) {
+		if (edge.to !== block.id) continue;
+		const from = location.diagram.blocks.find(candidate => candidate.id === edge.from);
+		if (!from || from.status === "done" || running.has(from.id)) continue;
+		return from.title.length > 0 ? from.title : from.id;
+	}
+	return undefined;
+}
+
+/**
+ * What an execute may run. Only a settled plan leaf with acceptance criteria runs.
+ * Open ideas stay on the proposal path. A parent is never one job.
+ */
+export function planDispatch(document: DiagramDocument, scope: Scope): DispatchPlan {
+	const { leaves, container } = leavesIn(document, scope);
+	const held: DispatchHold[] = [];
+	if (container) {
+		held.push({
+			id: container.id,
+			title: container.title,
+			kind: "container",
+			reason: "a parent is not one job; only its ready leaves run",
+		});
+	}
+	const ready: Block[] = [];
+	for (const block of leaves) {
+		const title = block.title.length > 0 ? block.title : block.id;
+		if (document.purpose !== "plan") {
+			held.push({ id: block.id, title, kind: "refine", reason: "execute is only for a plan" });
+			continue;
+		}
+		if (block.status === "done") {
+			held.push({ id: block.id, title, kind: "done", reason: "already done" });
+			continue;
+		}
+		if (block.status !== "settled" || block.acceptanceCriteria.length === 0) {
+			const kind = block.status === "open" && block.description.trim().length === 0 && block.acceptanceCriteria.length === 0 ? "brainstorm" : "refine";
+			const reason = block.status === "settled" ? "settled, but it has no acceptance criteria" : kind === "brainstorm" ? "still an idea — refine or break it down first" : "still open — settle it before executing";
+			held.push({ id: block.id, title, kind, reason });
+			continue;
+		}
+		ready.push(block);
+	}
+	const running = new Set(ready.map(block => block.id));
+	const runnable: Block[] = [];
+	for (const block of ready) {
+		const waiting = inboundOpen(document, block, running);
+		if (waiting) {
+			held.push({
+				id: block.id,
+				title: block.title.length > 0 ? block.title : block.id,
+				kind: "blocked",
+				reason: `blocked on ${waiting}`,
+			});
+			running.delete(block.id);
+			continue;
+		}
+		runnable.push(block);
+	}
+	const pending = new Set(runnable.map(block => block.id));
+	const ordered: Block[] = [];
+	const rest = [...runnable];
+	while (rest.length > 0) {
+		const index = rest.findIndex(block => {
+			const location = findBlockLocation(document.root, block.id);
+			if (!location) return true;
+			return !location.diagram.edges.some(edge => edge.to === block.id && pending.has(edge.from));
+		});
+		const next = rest.splice(index === -1 ? 0 : index, 1)[0]!;
+		pending.delete(next.id);
+		ordered.push(next);
+	}
+	return {
+		run: ordered.map(block => ({
+			id: block.id,
+			title: block.title.length > 0 ? block.title : block.id,
+			venue: venueOf(block),
+			acceptance: [...block.acceptanceCriteria],
+			notes: block.actions.execute.trim(),
+		})),
+		held,
+	};
+}
+
+const VENUE_HEADING: Record<Venue, string> = {
+	here: "Here — do these in this session",
+	subagent: "Subagent — one subagent per leaf, in this workspace. Do not do these inline",
+	worktree: "Worktree — one isolated worktree per leaf. Do not do these in this checkout",
+};
+
+/** The execute task text. Throws when nothing in the scope may run. */
+export function renderDispatch(document: DiagramDocument, scope: Scope): string {
+	const plan = planDispatch(document, scope);
+	if (plan.run.length === 0) {
+		const why = plan.held.map(item => `${item.title}: ${item.reason}`).join("; ");
+		throw new DispatchError(why.length > 0 ? why : "nothing in this scope is ready to execute");
+	}
+	const lines = [
+		"Execute only the ready leaves listed below, in the order given. Do not decompose further, do not reassign a leaf to a different venue, and do not modify the planner document. The human marks a leaf done after looking at the result.",
+		"A leaf with no venue was assigned here.",
+	];
+	for (const venue of VENUES) {
+		const leaves = plan.run.filter(leaf => leaf.venue === venue);
+		if (leaves.length === 0) continue;
+		lines.push("", `## ${VENUE_HEADING[venue]}`);
+		for (const leaf of leaves) {
+			lines.push(`- [${leaf.id}] ${leaf.title}`);
+			if (leaf.acceptance.length > 0) lines.push(`  acceptance: ${leaf.acceptance.join("; ")}`);
+			if (leaf.notes.length > 0) lines.push(`  notes: ${leaf.notes}`);
+		}
+	}
+	if (plan.held.length > 0) {
+		lines.push("", "## Not run");
+		for (const item of plan.held) lines.push(`- [${item.id}] ${item.title}: ${item.reason}`);
+	}
+	return lines.join("\n");
 }

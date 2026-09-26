@@ -56,6 +56,61 @@ Brainstorm, and an explore block you have not settled, open on a **walk**: the f
 | plan | Refine, Break down, Replan, Execute | todo → planned → done |
 | explore | Investigate, Map inside, Replan | unexplored → explored |
 
+## Use cases
+
+Four sessions. In each one the model may only stage a proposal. You accept it, or you do not. Saving is a separate key.
+
+### Brainstorm an idea
+
+You have a product thought and no structure. You do not want implementation steps.
+
+```text
+/diagram new brainstorm
+```
+
+The document opens on a walk. Dump the first line (`O` in the terminal, Enter in the browser). Dump the next line onto that idea to nest it, or onto the empty project to add a sibling. `r` previews Refine for the focused idea: title and note only, no new blocks. `b` previews Expand: sub-ideas come back as children. Accept the diff, then walk into one child and repeat. `space` does nothing here. Ideas have no status. Do not Execute. There is no Execute verb on a brainstorm.
+
+When the map is the thing you want to look at, `v` (or Map in the browser). Relationships are context, not a schedule.
+
+### Explore a codebase
+
+You are new to a repository and want a map grounded in files, not a redesign.
+
+```text
+/diagram discover .
+/diagram web
+```
+
+Discover submits a project-scope request. The proposal is a document of blocks with source ranges. Reject anything that cites a path you cannot open. After accept, the walk shows a citation under each block. Uncited blocks are dim. `g` hides them. Open a citation (`Enter` on the source row, or the path in the browser file tree). **Inspect syntax** is a Tree-sitter range, not a type or a reference.
+
+`r` on one block is Investigate: it may fill description, evidence, sources, and children, and only from code it read. `b` is Map inside, for one subsystem, not the whole repo. `space` marks the block explored and leaves the walk for the full page. Do not use this purpose to plan new work. That is a plan document.
+
+### Research a question interactively
+
+You are not mapping a repository and you are not shipping a feature. You are pulling a question apart and keeping the evidence next to the claim.
+
+```text
+/diagram new explore
+```
+
+Skip Discover. Author the question yourself (`o` in the terminal, **+ block** in the browser), then the competing claims as its children (`O`, or **+ inside**). Do not use Map inside for that. Map inside asks the model to derive children from code. Each claim gets a source reference (`path` or `path:10-40`) only after you have opened that range. Evidence stays `unknown` or `inferred` until a source exists. `observed` without a source is refused. Investigate (`r`) on one claim, review the diff, and reject a citation you did not check. `g` hides claims that are not grounded. `space` marks a claim explored. `n` selects the next open one.
+
+This is the same document type as codebase exploration. The difference is that you author the blocks, and the model only fills the one you point at.
+
+### Refine an existing project
+
+A plan already exists. One block is thin, or the nesting is wrong. You do not want a new document.
+
+```text
+/diagram open .omp-visual-planner/architecture.json
+```
+
+`n` moves to the next todo. `r` previews Refine for that block: description, expected output, acceptance criteria. It must not add or remove blocks. `b` is the separate request that adds children. `t` replans that block and its subtree. Settled and done blocks stay, under the same ids. A project replan or prune is `a`, and the same retention rule applies to the whole document.
+
+Accept, then `s`. Acceptance is unsaved until you save. Undo is still available before that.
+
+Execute is not refine. A leaf has to be planned (`space` once) and have acceptance criteria. Set its venue on the block page, or Enter on the venue row in the terminal: `here`, `subagent`, or `worktree`. Unset means here. `X` on a parent does not run the parent. It dispatches the ready leaves under it, in edge order, and lists everything else as not run. Execute ready leaves, from `a` or the project page, does that for the whole plan. The prompt names the venue. This plugin does not spawn the subagent or the worktree, and it does not mark the leaf done. You do, after you have looked at the result.
+
 ## Review and evidence
 
 A proposal replaces a block, its nested diagram, or the project only after review. The exact request is previewed first; `c` copies it to the OMP prompt editor and `w` exports it instead of submitting. A model stages its response through `visual_planner_propose`; `R` opens a structural diff to accept or reject. Rejection leaves the document unchanged. Acceptance is one undoable, unsaved edit; press `s` to write it. Replan and prune must retain blocks already settled by the human under the same IDs. Execute submits work to OMP, not a proposal, and does not mark a block done.

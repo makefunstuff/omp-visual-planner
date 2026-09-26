@@ -365,7 +365,13 @@ export class ActionRegistry {
 		return { ok: true, entry, proposal };
 	}
 
-	/** Refuse a proposal that no longer matches the document it was written against. */
+	/**
+	 * Refuse a proposal that no longer matches the document it was written against.
+	 * A project replacement swaps the whole tree, so any revision bump is a conflict.
+	 * A block or diagram replacement is applied onto the current document: edits
+	 * outside that target (including ones made while a nested refinement ran) do
+	 * not make it unapplicable.
+	 */
 	checkApplicable(
 		requestId: string,
 		current: { revision: number; digest: string | undefined; documentId: string; branchKey: string },
@@ -379,7 +385,7 @@ export class ActionRegistry {
 		if (entry.documentId !== current.documentId) {
 			return { ok: false, errors: [`request ${requestId} belongs to document ${entry.documentId}`] };
 		}
-		if (entry.baseRevision !== current.revision) {
+		if (entry.scope.kind === "project" && entry.baseRevision !== current.revision) {
 			return {
 				ok: false,
 				errors: [

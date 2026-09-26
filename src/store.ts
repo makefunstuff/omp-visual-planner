@@ -84,6 +84,7 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 			}),
 			evidence: block.evidence,
 			status: block.status,
+			...(block.venue !== undefined && block.venue !== "here" ? { venue: block.venue } : {}),
 			actions: { enhance: block.actions.enhance, execute: block.actions.execute },
 			children: block.children ? normalizeDiagram(block.children) : null,
 		})),
@@ -372,9 +373,9 @@ export function applyReplacement(
 	// Status and position are the human's: a proposal never changes them. Blocks
 	// it introduces start open, and their ids are returned so the caller can
 	// place them — a model's coordinates are never trusted for layout.
-	const kept = new Map<string, { status: BlockStatus; x: number; y: number }>();
+	const kept = new Map<string, { status: BlockStatus; x: number; y: number; venue: Block["venue"] }>();
 	for (const { block } of eachBlock(document.root)) {
-		kept.set(block.id, { status: block.status, x: block.position.x, y: block.position.y });
+		kept.set(block.id, { status: block.status, x: block.position.x, y: block.position.y, venue: block.venue });
 	}
 	replaceStructure(document, replacement, targetId);
 	const added: string[] = [];
@@ -383,8 +384,11 @@ export function applyReplacement(
 		if (prior) {
 			block.status = prior.status;
 			block.position = { x: prior.x, y: prior.y };
+			if (prior.venue !== undefined && prior.venue !== "here") block.venue = prior.venue;
+			else delete block.venue;
 		} else {
 			block.status = "open";
+			delete block.venue;
 			added.push(block.id);
 		}
 	}

@@ -132,7 +132,37 @@ describe("proposal staging", () => {
 		]);
 	});
 
-	test("a stale base revision is refused", () => {
+	test("a project proposal is refused when the document revision moved", () => {
+		const registry = new ActionRegistry(BRANCH);
+		const document = sampleDocument();
+		registry.begin({
+			requestId: "req-1",
+			kind: "replan",
+			intent: "replan",
+			scope: { kind: "project" },
+			label: "project",
+			branchKey: BRANCH,
+			documentId: document.id,
+			baseRevision: 3,
+			baseDigest: "digest-a",
+			prompt: "payload",
+		});
+		const staged = registry.stage("req-1", "replan", document, contextFor({ documentId: document.id, document }));
+		expect(staged.ok).toBe(true);
+
+		const moved = registry.checkApplicable("req-1", {
+			revision: 4,
+			digest: "digest-a",
+			documentId: document.id,
+			branchKey: BRANCH,
+		});
+		expect(moved.ok).toBe(false);
+		if (moved.ok) throw new Error("unreachable");
+		expect(moved.errors[0]).toContain("revision 3 to 4");
+		expect(moved.errors[0]).toContain("regenerate");
+	});
+
+	test("a block proposal stays applicable after an unrelated revision bump", () => {
 		const registry = new ActionRegistry(BRANCH);
 		const document = sampleDocument();
 		registry.begin({
@@ -147,19 +177,14 @@ describe("proposal staging", () => {
 			baseDigest: "digest-a",
 			prompt: "payload",
 		});
-		const staged = registry.stage("req-1", "refine", createBlock({ id: "auth", title: "Auth v2" }), contextFor({ documentId: document.id }));
-		expect(staged.ok).toBe(true);
-
+		expect(registry.stage("req-1", "refine", createBlock({ id: "auth", title: "Auth v2" }), contextFor({ documentId: document.id })).ok).toBe(true);
 		const moved = registry.checkApplicable("req-1", {
-			revision: 4,
+			revision: 11,
 			digest: "digest-a",
 			documentId: document.id,
 			branchKey: BRANCH,
 		});
-		expect(moved.ok).toBe(false);
-		if (moved.ok) throw new Error("unreachable");
-		expect(moved.errors[0]).toContain("revision 3 to 4");
-		expect(moved.errors[0]).toContain("regenerate");
+		expect(moved.ok).toBe(true);
 	});
 
 	test("a changed on-disk digest is refused", () => {

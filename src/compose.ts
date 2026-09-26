@@ -21,7 +21,7 @@ import {
 	findDiagram,
 	findOwnedDiagram,
 } from "./model.ts";
-import { statusLabel } from "./flow.ts";
+import { statusLabel, renderDispatch } from "./flow.ts";
 
 export interface ComposeOptions {
 	/** Present when the submission must come back through `visual_planner_propose`. */
@@ -295,7 +295,8 @@ const KEEP_SETTLED =
 	"Blocks the human already settled — any block whose status is not `open` — stay, under their ids.";
 
 /** The task brief for an intent, worded for what the document is for and what the scope covers. */
-function briefFor(intent: Intent, purpose: Purpose, scope: Scope): string {
+function briefFor(intent: Intent, document: DiagramDocument, scope: Scope): string {
+	const purpose = document.purpose;
 	switch (intent) {
 		case "plan":
 			return purpose === "brainstorm"
@@ -346,7 +347,7 @@ function briefFor(intent: Intent, purpose: Purpose, scope: Scope): string {
 			}
 			return `Prune this plan: remove the blocks that do not earn their place — duplicates, work already covered elsewhere, scope the goal does not require. Keep everything that carries the plan forward, exactly as authored: this request removes excess, it does not redesign. ${KEEP_SETTLED} Return the whole document with every surviving block keeping its id, position and fields, and name each removal with its reason in \`summary\`. Change no code in the repository.`;
 		case "execute":
-			return "Execute this scope. You are the harness: decompose the work, decide yourself whether subagents are warranted, and report what you did. Do not modify the planner document — the human reconciles results back into the planner afterwards.";
+			return renderDispatch(document, scope);
 	}
 }
 
@@ -377,7 +378,7 @@ export function composePrompt(
 		].join("\n"),
 	);
 	sections.push(
-		`## Task\nintent: ${intent}\n${briefFor(intent, document.purpose, resolution.scope)}\n${PURPOSE_LINE[document.purpose]}`,
+		`## Task\nintent: ${intent}\n${briefFor(intent, document, resolution.scope)}\n${PURPOSE_LINE[document.purpose]}`,
 	);
 	const readsCode = intent === "discover" || intent === "investigate" || document.purpose === "explore";
 	if (readsCode) {

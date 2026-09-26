@@ -602,7 +602,11 @@ function renderWorkspace() {
         if (editBodyOf === block.id) requestAnimationFrame(() => input.focus());
       }
     } else if (field === "criteria") cell.append(checklist(block.acceptanceCriteria, "Acceptance criterion", value => patch({ acceptanceCriteria: value })));
-    else if (field === "evidence") {
+    else if (field === "venue") {
+      const select = el("select", { onchange: () => patch({ venue: select.value }) },
+        ...["here", "subagent", "worktree"].map(value => el("option", { value, text: value, selected: value === (block.venue || "here") })));
+      cell.append(select);
+    } else if (field === "evidence") {
       const select = el("select", { onchange: () => patch({ evidence: select.value }) },
         ...["unknown", "inferred", "observed"].map(value => el("option", { value, text: value, selected: value === block.evidence })));
       cell.append(select);
@@ -1313,7 +1317,7 @@ async function submitVerb(verb, id) {
   if (result.ok) closeModal();
 }
 function startProject(kind, text) {
-  if (kind === "prune" || kind === "replan") { openPreview(kind); return; }
+  if (kind === "prune" || kind === "replan" || kind === "execute") { openPreview(kind); return; }
   if (kind === "draft") {
     if (!text.trim()) { flash("a draft needs a goal: type what this is about", true); render(); return; }
     op({ op: "submit", start: { kind: "draft", goal: text, purpose: state.document.purpose === "brainstorm" ? "brainstorm" : "plan" } });

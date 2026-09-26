@@ -261,16 +261,15 @@ describe("web mode review", () => {
 		expect(store.dirty).toBe(true);
 	});
 
-	test("a proposal overtaken by an edit is refused and marked stale, not merged", async () => {
+	test("a block proposal still applies after an unrelated edit", async () => {
 		const { op, store, session, document } = await harness();
 		stage(session, document.id, 0);
 		await op({ op: "patchBlock", id: "db", fields: { title: "Postgres" } });
 
-		const refused = await op({ op: "accept", requestId: "req-1" });
-		expect(refused.status).toBe(400);
-		expect(((await refused.json()) as { error: string }).error).toContain("revision");
-		expect(session.registry.entryFor("req-1")!.state).toBe("stale");
-		expect(findBlockLocation(store.require().root, "api")!.block.title).toBe("API");
+		expect((await op({ op: "accept", requestId: "req-1" })).status).toBe(200);
+		expect(session.registry.entryFor("req-1")!.state).toBe("accepted");
+		expect(findBlockLocation(store.require().root, "api")!.block.title).toBe("API v2");
+		expect(findBlockLocation(store.require().root, "db")!.block.title).toBe("Postgres");
 	});
 
 	test("reject leaves the document untouched", async () => {
