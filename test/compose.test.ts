@@ -305,3 +305,39 @@ describe("composed payloads", () => {
 		);
 	});
 });
+
+describe("judged related context", () => {
+	const related = {
+		judge: "j",
+		ranked: [
+			{ id: "worker", probability: 0.91 },
+			{ id: "db", probability: 0.4 },
+			{ id: "ghost", probability: 0.99 },
+		],
+	};
+
+	test("only blocks at or above the floor, and only ids still in the document", () => {
+		const text = composePrompt(fixture(), { kind: "block", id: "auth" }, "enhance", { related }).text;
+		expect(text).toContain("## Related context");
+		expect(text).toContain("- judge: j");
+		expect(text).toContain("- [worker] Service > Worker (p=0.91)");
+		// Below the floor.
+		expect(text).not.toContain("[db]");
+		// Ranked high but no longer in the document.
+		expect(text).not.toContain("ghost");
+	});
+
+	test("all probabilities below the floor leave no section", () => {
+		const text = composePrompt(fixture(), { kind: "block", id: "auth" }, "enhance", {
+			related: { judge: "j", ranked: [{ id: "worker", probability: 0.69 }] },
+		}).text;
+		expect(text).not.toContain("## Related context");
+		expect(text).not.toContain("[worker] Service > Worker (p=");
+	});
+
+	test("the section sits between the scope and the boundaries", () => {
+		const text = composePrompt(fixture(), { kind: "block", id: "auth" }, "enhance", { related }).text;
+		expect(text.indexOf("## Scope")).toBeLessThan(text.indexOf("## Related context"));
+		expect(text.indexOf("## Related context")).toBeLessThan(text.indexOf("## Boundaries"));
+	});
+});

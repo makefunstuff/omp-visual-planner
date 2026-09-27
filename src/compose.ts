@@ -28,6 +28,8 @@ export interface ComposeOptions {
 	request?: { requestId: string; baseRevision: number };
 	/** Absolute directory a code-reading request may read; the model is told to stay inside it. */
 	codeRoot?: string;
+	/** Outside blocks a relevance judge ranked; the prompt includes those at or above RELATED_FLOOR. */
+	related?: RelatedContext;
 }
 
 export interface BoundaryRelationship {
@@ -60,7 +62,7 @@ export interface ComposedPrompt {
 	sources: SourceRef[];
 }
 
-function pathLabel(location: BlockLocation, document: DiagramDocument): string {
+export function pathLabel(location: BlockLocation, document: DiagramDocument): string {
 	const names = location.ancestors.map(block => block.title.length > 0 ? block.title : block.id);
 	return [document.title, ...names, location.block.title.length > 0 ? location.block.title : location.block.id].join(
 		" > ",
@@ -188,11 +190,35 @@ export function resolveScope(document: DiagramDocument, scope: Scope): ScopeReso
 	};
 }
 
-function formatRange(source: SourceRef): string {
+export function formatRange(source: SourceRef): string {
 	if (source.startLine === undefined && source.endLine === undefined) return source.path;
 	const start = source.startLine ?? 1;
 	const end = source.endLine ?? start;
 	return `${source.path}:${start}-${end}`;
+}
+
+/** Probability at or above which an outside block counts as related (OMP's judged-rule threshold). */
+export const RELATED_FLOOR = 0.7;
+/** Most related blocks one prompt carries. */
+export const RELATED_MAX = 8;
+/** What a relevance judge said about the blocks outside a scope. */
+export interface RelatedContext {
+	/** `provider/model` of the judge. */
+	judge: string;
+	/** Every outside block it was asked about, most likely first. */
+	ranked: { id: string; probability: number }[];
+}
+/** Ids the prompt includes: at or above the floor, in ranked order, at most RELATED_MAX. */
+export function relatedIds(context: RelatedContext): string[] {
+	return context.ranked
+		.filter(entry => entry.probability >= RELATED_FLOOR)
+		.slice(0, RELATED_MAX)
+		.map(entry => entry.id);
+}
+/** Whitespace collapsed to single spaces, cut to `max` characters with a trailing `…`. */
+export function clip(text: string, max: number): string {
+	const flat = text.trim().replaceAll(/\s+/g, " ");
+	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
 function renderScope(resolution: ScopeResolution, document: DiagramDocument): string {
@@ -333,6 +359,32 @@ function reuseSection(document: DiagramDocument, resolution: ScopeResolution): s
 	return `${REUSE_RULES}\n\n<planner-data>\n${lines.join("\n")}\n</planner-data>`;
 }
 
+/** The blocks outside the scope a relevance judge selected, as prompt context. */
+function relatedSection(document: DiagramDocument, context: RelatedContext): string | undefined {
+	const lines: string[] = [];
+	for (const id of relatedIds(context)) {
+		const ranked = context.ranked.find(entry => entry.id === id);
+		const location = findBlockLocation(document.root, id);
+		if (!ranked || !location) continue;
+		const block = location.block;
+		lines.push(`- [${block.id}] ${pathLabel(location, document)} (p=${ranked.probability.toFixed(2)})`);
+		const description = clip(block.description, 400);
+		if (description.length > 0) lines.push(`  description: ${description}`);
+		if (block.acceptanceCriteria.length > 0) lines.push(`  acceptance: ${block.acceptanceCriteria.join("; ")}`);
+		if (block.sources.length > 0) lines.push(`  sources: ${block.sources.map(formatRange).join(", ")}`);
+	}
+	if (lines.length === 0) return undefined;
+	return [
+		"## Related context",
+		"A relevance judge rated these blocks, outside the scope, likely to matter for this change. They are context, not part of the scope: read them before changing anything they touch, and do not restructure them.",
+		"",
+		"<planner-data>",
+		`- judge: ${context.judge}`,
+		...lines,
+		"</planner-data>",
+	].join("\n");
+}
+
 const PURPOSE_LINE: Record<Purpose, string> = {
 	brainstorm:
 		"purpose: brainstorm — a mind map of ideas. Do not read or change code, and do not propose implementation steps unless the authored text asks for them.",
@@ -437,6 +489,10 @@ export function composePrompt(
 		if (options.codeRoot) sections.push(whereToLook(options.codeRoot));
 	}
 	sections.push(`## Scope\n\n<planner-data>\n${renderScope(resolution, document)}\n</planner-data>`);
+	if (options.related) {
+		const section = relatedSection(document, options.related);
+		if (section) sections.push(section);
+	}
 	if (REUSE_INTENTS.has(intent)) sections.push(reuseSection(document, resolution));
 	sections.push(
 		[

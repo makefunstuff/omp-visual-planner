@@ -5,8 +5,10 @@ description: >
   nests blocks. Use when the user wants to brainstorm, refine, expand, replan,
   prune, or execute a plan and no omp-visual-planner document is open. The
   iteration history is the harness /tree, which OMP and pi already have. One
-  node per turn. Do not use this if visual_planner tools are available and a
-  planner document is already open.
+  node per turn. Prefer the visual_planner tools instead when they are available
+  and a planner document is open: they preview the exact request, rank the
+  blocks outside the scope with the session's judge before it is sent, and
+  return a reviewed diff under stable ids, none of which a markdown file can do.
 ---
 
 # Decompose
@@ -16,6 +18,8 @@ The use case is the agent plus `/tree`. OMP and pi already have both. This skill
 `/tree` is the history. Each expand, refine, or replan is one turn. If that turn was wrong, the human goes back with `/tree` and continues from the earlier leaf. Do not keep alternate decompositions as extra files.
 
 `PLAN.md` is only the current tree, nested bullets, the way Logseq nests blocks. If `visual_planner_read` is available and a planner document is open, use that. Do not keep a second plan.
+
+When the planner is available and a document is open, it is the better surface for the same job, so switch to it rather than editing this file: it composes the request for one block or subsystem, shows that exact prompt before anything is sent, ranks the blocks outside the scope with the session's judge and carries the likely ones into the prompt, and returns a proposal as a reviewed diff that keeps every id you did not create. This skill stays for the case where there is no planner and no document.
 
 
 ## File

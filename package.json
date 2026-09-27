@@ -15,12 +15,14 @@
 		"check": "tsc --noEmit -p tsconfig.json"
 	},
 	"peerDependencies": {
+		"@oh-my-pi/pi-ai": ">=18.2.11",
 		"@oh-my-pi/pi-coding-agent": ">=18.2.11",
 		"@oh-my-pi/pi-natives": ">=18.2.11",
 		"@oh-my-pi/pi-tui": ">=18.2.11"
 	},
 	"devDependencies": {
 		"@oh-my-pi/omptype": "18.2.11",
+		"@oh-my-pi/pi-ai": "18.2.11",
 		"@oh-my-pi/pi-coding-agent": "18.2.11",
 		"@oh-my-pi/pi-natives": "18.2.11",
 		"@oh-my-pi/pi-tui": "18.2.11",

@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { ActionRegistry, type BeginInput } from "../src/actions.ts";
 import { createBlock, createDocument, findBlockLocation } from "../src/model.ts";
+import type { RelatedRanker } from "../src/relevance.ts";
 import { DocumentStore, serializeDocument } from "../src/store.ts";
 import { type WebHandle, type WebSession, type WebState, cookieName, startWeb, stopWeb } from "../src/web.ts";
 
@@ -13,7 +14,7 @@ afterEach(async () => {
 	for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-async function harness() {
+async function harness(options: { rankRelated?: RelatedRanker } = {}) {
 	const dir = await mkdtemp(join(tmpdir(), "omp-visual-planner-web-"));
 	cleanup.push(() => rm(dir, { recursive: true, force: true }));
 	const document = createDocument({ title: "Service" });
@@ -37,6 +38,7 @@ async function harness() {
 		cwd: dir,
 		getSession: () => session,
 		onChange: () => (changes += 1),
+		rankRelated: options.rankRelated,
 		// What the extension does, minus the agent: register the request.
 		submit: (request, prompt) => {
 			const began = session.registry.begin(request);
@@ -264,6 +266,28 @@ describe("web mode requests", () => {
 		expect((await op({ op: "discard", requestId: submitted[0]!.request.requestId })).status).toBe(200);
 		expect((await op({ op: "submit", verb: "replan" })).status).toBe(200);
 		expect(submitted[1]!.request).toMatchObject({ kind: "replan", scope: { kind: "project" } });
+	});
+
+	test("a ranking is previewed and submitted, and never reused after an edit", async () => {
+		const rankRelated: RelatedRanker = async () => ({
+			ok: true,
+			context: { judge: "test/jev", ranked: [{ id: "db", probability: 0.88 }] },
+			asked: 1,
+			elapsedMs: 5,
+			cost: 0.00002,
+		});
+		const { op, submitted } = await harness({ rankRelated });
+		const preview = await op({ op: "preview", verb: "refine", id: "api" });
+		const body = (await preview.json()) as { preview: { text: string; related?: string } };
+		expect(body.preview.related).toStartWith("related context: 1 of 1 blocks");
+		expect(body.preview.text).toContain("[db]");
+		expect((await op({ op: "submit", verb: "refine", id: "api" })).status).toBe(200);
+		expect(submitted[0]!.prompt).toContain("## Related context");
+		// The ranking belongs to one revision: an edit between preview and submit drops it.
+		await op({ op: "discard", requestId: submitted[0]!.request.requestId });
+		await op({ op: "patchBlock", id: "api", fields: { title: "Gateway" } });
+		expect((await op({ op: "submit", verb: "refine", id: "api", saveFirst: true })).status).toBe(200);
+		expect(submitted[1]!.prompt).not.toContain("## Related context");
 	});
 
 	test("a verb the purpose does not offer is refused by name", async () => {

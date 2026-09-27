@@ -432,7 +432,7 @@ function svg(tag, attrs) {
 }
 
 // ---------------------------------------------------------------- server
-const BUSY_WORDS = { save: "saving", submit: "sending to the agent", accept: "applying", preview: "composing", tidy: "tidying", undo: "undoing", redo: "redoing" };
+const BUSY_WORDS = { save: "saving", submit: "sending to the agent", accept: "applying", preview: "composing and ranking context", tidy: "tidying", undo: "undoing", redo: "redoing" };
 let inFlight = 0, inFlightWord = "";
 /** Every write goes through here. Resolves to { ok, status, data } and never throws. */
 async function op(body) {
@@ -1702,6 +1702,7 @@ function renderModal() {
   }) : null;
   host.append(el("div", { class: "modal", role: "dialog", "aria-label": "request preview" },
     el("h3", { text: "Preview — " + current.label + " (" + current.size + " chars)" }),
+    current.related ? el("p", { class: "subtle", text: current.related }) : null,
     note ? el("div", { class: "note" }, note) : null,
     el("pre", { text: current.text }),
     el("div", { class: "row" },

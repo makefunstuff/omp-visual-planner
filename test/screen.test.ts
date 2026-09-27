@@ -8,6 +8,7 @@ import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { type } from "@oh-my-pi/omptype";
 import { ActionRegistry, type BeginInput } from "../src/actions.ts";
 import { createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
+import type { RelatedOutcome, RelatedRanker } from "../src/relevance.ts";
 import { DocumentStore, serializeDocument } from "../src/store.ts";
 import { DiagramScreen, type ScreenLink, type SharedFocus, layoutFor } from "../src/ui.ts";
 
@@ -45,6 +46,7 @@ async function harness(
 		document?: ReturnType<typeof fixture>;
 		view?: "outline" | "canvas";
 		editor?: (text: string, name: string) => Promise<string | null>;
+		rankRelated?: RelatedRanker;
 	} = {
 		width: 120,
 		rows: 24,
@@ -108,6 +110,7 @@ async function harness(
 			hasPendingMessages: () => false,
 			link,
 			externalEditor: options.editor,
+			rankRelated: options.rankRelated,
 		},
 		value => {
 			result = value;
@@ -767,6 +770,61 @@ describe("interaction", () => {
 		expect(result.prompt).toContain(result.request.requestId);
 		expect(result.prompt).toContain("stages a proposal for review");
 		expect(result.prompt).not.toContain("completed successfully");
+	});
+
+	/** A ranker that stays pending until the test resolves it, recording its signal. */
+	function deferredRanker(): { rank: RelatedRanker; signals: AbortSignal[]; resolve: (outcome: RelatedOutcome) => void } {
+		const signals: AbortSignal[] = [];
+		let settle: ((outcome: RelatedOutcome) => void) | undefined;
+		return {
+			signals,
+			resolve: outcome => settle?.(outcome),
+			rank: (_document, _scope, signal) => {
+				signals.push(signal);
+				return new Promise<RelatedOutcome>(resolve => {
+					settle = resolve;
+				});
+			},
+		};
+	}
+
+	const ranked: RelatedOutcome = {
+		ok: true,
+		context: { judge: "test/jev", ranked: [{ id: "worker", probability: 0.93 }] },
+		asked: 1,
+		elapsedMs: 12,
+		cost: 0.00001,
+	};
+
+	test("a previewed request ranks related context before it may submit", async () => {
+		const ranker = deferredRanker();
+		const h = await harness({ width: 120, rows: 24, rankRelated: ranker.rank });
+		h.screen.render(120);
+		h.screen.handleInput("t");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("ranking related context…");
+		// What is previewed is what is sent: Enter waits rather than submitting without the ranking.
+		h.screen.handleInput("\r");
+		expect(h.result()).toBeUndefined();
+		expect(plain(h.screen.render(120)).join("\n")).toContain("still ranking related context");
+		ranker.resolve(ranked);
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(plain(h.screen.render(120)).join("\n")).toContain("related context: 1 of 1 blocks");
+		h.screen.handleInput("\r");
+		const result = h.result() as { prompt: string };
+		expect(result.prompt).toContain("## Related context");
+		expect(result.prompt).toContain("[worker] Service > Worker (p=0.93)");
+	});
+
+	test("closing a preview aborts the ranking in flight", async () => {
+		const ranker = deferredRanker();
+		const h = await harness({ width: 120, rows: 24, rankRelated: ranker.rank });
+		h.screen.render(120);
+		h.screen.handleInput("t");
+		h.screen.handleInput("\x1b");
+		expect(ranker.signals[0]?.aborted).toBe(true);
+		ranker.resolve(ranked);
+		await new Promise(resolve => setTimeout(resolve, 0));
+		expect(h.result()).toBeUndefined();
 	});
 
 	test("a dirty document must be saved before a request starts", async () => {

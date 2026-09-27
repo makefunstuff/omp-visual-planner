@@ -15,6 +15,7 @@
 import type { Server } from "bun";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
+import type { RelatedContext } from "./compose.ts";
 import {
 	type DocumentStart,
 	type FocusLinkKind,
@@ -69,6 +70,7 @@ import {
 	removeBlock,
 	removeUse,
 } from "./model.ts";
+import { type RelatedRanker, relatedSummary, wantsRelated } from "./relevance.ts";
 import { type DocumentStore, defaultDocumentPath, displayPath } from "./store.ts";
 import { type DocumentDiff, acceptReplacement, diffDocuments, emptyDiff, placeNewBlock, tidyDiagram } from "./ui.ts";
 import { WEB_PAGE } from "./web-page.ts";
@@ -92,6 +94,8 @@ export interface WebSession {
 	stack: string[];
 	selected: string | undefined;
 	branchToken: string;
+	/** The ranking behind the last preview, reused by the submit that follows it. */
+	related?: { key: string; context: RelatedContext };
 }
 
 export interface WebBinding {
@@ -102,6 +106,8 @@ export interface WebBinding {
 	onChange: () => void;
 	/** Register a request and hand its prompt to the agent, exactly as the overlay does. */
 	submit: (request: BeginInput, prompt: string) => { ok: true; message: string } | { ok: false; error: string };
+	/** Ranks outside blocks for a previewed request; absent in tests and when no session context exists. */
+	rankRelated?: RelatedRanker;
 }
 
 export interface WebHandle {
@@ -517,8 +523,17 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 // ---------------------------------------------------------------------------
 
 type OpResult =
-	| { ok: true; changed: boolean; message: string; preview?: { label: string; text: string; size: number } }
+	| { ok: true; changed: boolean; message: string; preview?: { label: string; text: string; size: number; related?: string } }
 	| { ok: false; error: string; status?: number; needsSave?: boolean };
+
+/**
+ * The identity a ranking belongs to. Saving does not bump `revision`, so a
+ * save-first submit still matches; any edit does, so a stale ranking is never
+ * reused for a document it was not ranked against.
+ */
+function relatedKey(document: DiagramDocument, kind: ActionKind, scope: Scope): string {
+	return `${document.id}@${document.revision}:${kind}:${scope.kind}:${scope.id ?? ""}`;
+}
 
 function str(value: unknown, name: string): string {
 	if (typeof value !== "string") throw new OpError(`${name} must be a string`);
@@ -614,6 +629,21 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 			}
 			case "preview": {
 				const { verb, scope } = requestScope(document, op);
+				const rank = binding.rankRelated;
+				let related: RelatedContext | undefined;
+				let summary: string | undefined;
+				if (rank && wantsRelated(verb.intent, scope)) {
+					const outcome = await rank(document, scope, new AbortController().signal);
+					summary = relatedSummary(outcome);
+					if (outcome.ok) {
+						related = outcome.context;
+						session.related = { key: relatedKey(document, verb.kind, scope), context: outcome.context };
+					} else {
+						session.related = undefined;
+					}
+				} else {
+					session.related = undefined;
+				}
 				const composed = composeRequest({
 					document,
 					kind: verb.kind,
@@ -622,29 +652,40 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					branchKey: session.branchToken,
 					baseDigest: store.diskDigest,
 					codeRoot: codeRootFor(binding.cwd, undefined),
+					related,
 				});
 				return {
 					ok: true,
 					changed: false,
 					message: "",
-					preview: { label: composed.label, text: composed.prompt, size: composed.size },
+					preview: {
+						label: composed.label,
+						text: composed.prompt,
+						size: composed.size,
+						...(summary === undefined ? {} : { related: summary }),
+					},
 				};
 			}
 			case "submit": {
 				const { verb, scope } = requestScope(document, op);
 				const saved = await saveBeforeSubmit(store, op);
 				if (saved) return saved;
+				const current = store.require();
+				const related =
+					session.related?.key === relatedKey(current, verb.kind, scope) ? session.related.context : undefined;
 				const composed = composeRequest({
-					document: store.require(),
+					document: current,
 					kind: verb.kind,
 					intent: verb.intent,
 					scope,
 					branchKey: session.branchToken,
 					baseDigest: store.diskDigest,
 					codeRoot: codeRootFor(binding.cwd, undefined),
+					related,
 				});
 				const outcome = binding.submit(composed.request, composed.prompt);
 				if (!outcome.ok) return { ok: false, error: outcome.error };
+				session.related = undefined;
 				return { ok: true, changed: true, message: outcome.message };
 			}
 			case "discard": {

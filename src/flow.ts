@@ -5,7 +5,7 @@
  */
 import { basename, resolve } from "node:path";
 import type { ActionKind, BeginInput } from "./actions.ts";
-import { composePrompt } from "./compose.ts";
+import { type RelatedContext, composePrompt } from "./compose.ts";
 import {
 	type Block,
 	type BlockStatus,
@@ -477,6 +477,8 @@ export function composeRequest(input: {
 	/** Absolute directory the request may read: the discovery target, else the workspace. */
 	codeRoot: string;
 	requestId?: string;
+	/** Outside blocks the judge ranked for this request; included at or above the floor. */
+	related?: RelatedContext;
 }): ComposedRequest {
 	const { document, kind, intent, scope, codeRoot } = input;
 	const requestId = input.requestId ?? crypto.randomUUID();
@@ -484,7 +486,9 @@ export function composeRequest(input: {
 		document,
 		scope,
 		intent,
-		kind === "execute" ? { codeRoot } : { request: { requestId, baseRevision: document.revision }, codeRoot },
+		kind === "execute"
+			? { codeRoot }
+			: { request: { requestId, baseRevision: document.revision }, codeRoot, related: input.related },
 	);
 	return {
 		request: {

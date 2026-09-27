@@ -33,7 +33,7 @@ import {
 	retentionErrors,
 } from "./actions.ts";
 import { blockToMarkdown, markdownToBlock } from "./block-markdown.ts";
-import { ScopeError } from "./compose.ts";
+import { type RelatedContext, ScopeError } from "./compose.ts";
 import {
 	type ComposedRequest,
 	type DocumentStart,
@@ -112,6 +112,7 @@ import {
 	removeUse,
 	usersOutside,
 } from "./model.ts";
+import { type RelatedOutcome, type RelatedRanker, relatedSummary, wantsRelated } from "./relevance.ts";
 import type { DocumentStore } from "./store.ts";
 import { MAX_VIEWER_FILE_BYTES, PROJECT_DIR, applyReplacement, displayPath } from "./store.ts";
 
@@ -143,6 +144,8 @@ export interface ScreenOptions {
 	 * when none is configured. Resolves to the saved text, or null to discard.
 	 */
 	externalEditor?: (text: string, name: string) => Promise<string | null>;
+	/** Ranks outside blocks for a previewed request; absent in tests and when no session context exists. */
+	rankRelated?: RelatedRanker;
 }
 
 export interface SharedFocus {
@@ -781,6 +784,12 @@ interface PreviewPending {
 	/** The directory the request may read, fixed when it was previewed. */
 	codeRoot: string;
 	save?: Promise<unknown>;
+	/** Outside blocks the judge ranked; submitted exactly as previewed. */
+	related?: RelatedContext;
+	/** Ranking state shown in the preview title; undefined when this request is not ranked. */
+	ranking?: RelatedOutcome | "pending";
+	/** Cancels an in-flight ranking when the preview closes. */
+	controller?: AbortController;
 }
 
 interface Override {
@@ -2259,12 +2268,64 @@ export class DiagramScreen implements Component {
 			return;
 		}
 		this.#preview = { composed, kind, intent, scope, requestId: composed.request.requestId, codeRoot, save };
-		this.#modal = { kind: "text", title: `preview — ${composed.label} (${composed.size} chars)`, lines: composed.prompt.split("\n"), offset: 0 };
+		const preview = this.#preview;
+		const rank = this.#options.rankRelated;
+		if (rank && !override.start && wantsRelated(intent, scope)) {
+			const controller = new AbortController();
+			preview.ranking = "pending";
+			preview.controller = controller;
+			void rank(this.#document, scope, controller.signal).then(outcome =>
+				this.#landRanking(preview.requestId, outcome),
+			);
+		}
+		this.#modal = { kind: "text", title: this.#previewTitle(preview), lines: composed.prompt.split("\n"), offset: 0 };
+	}
+
+	#previewTitle(preview: PreviewPending): string {
+		const ranking = preview.ranking ? ` · ${relatedSummary(preview.ranking)}` : "";
+		return `preview — ${preview.composed.label} (${preview.composed.size} chars)${ranking}`;
+	}
+
+	/** Land a judge ranking into the preview it was started for, if that preview is still open. */
+	#landRanking(requestId: string, outcome: RelatedOutcome): void {
+		const preview = this.#preview;
+		if (!preview || preview.requestId !== requestId) return;
+		preview.ranking = outcome;
+		preview.controller = undefined;
+		if (outcome.ok) {
+			try {
+				preview.composed = composeRequest({
+					document: this.#document,
+					kind: preview.kind,
+					intent: preview.intent,
+					scope: preview.scope,
+					branchKey: this.#options.branchKey,
+					baseDigest: this.#options.store.diskDigest,
+					codeRoot: preview.codeRoot,
+					requestId,
+					related: outcome.context,
+				});
+				preview.related = outcome.context;
+			} catch (error) {
+				this.#message = error instanceof ScopeError ? error.message : String(error);
+			}
+		}
+		const modal = this.#modal;
+		if (modal?.kind === "text") {
+			modal.title = this.#previewTitle(preview);
+			modal.lines = preview.composed.prompt.split("\n");
+		}
+		this.#options.tui.requestRender();
 	}
 
 	#submitPreview(): void {
 		const preview = this.#preview;
 		if (!preview) return;
+		if (preview.ranking === "pending") {
+			this.#message = "still ranking related context — Enter again once it lands, or Esc";
+			this.#options.tui.requestRender();
+			return;
+		}
 		if (this.#options.store.dirty) {
 			this.#modal = {
 				kind: "confirm",
@@ -2310,6 +2371,7 @@ export class DiagramScreen implements Component {
 				baseDigest: this.#options.store.diskDigest,
 				codeRoot: preview.codeRoot,
 				requestId: preview.requestId,
+				related: preview.related,
 			});
 		} catch (error) {
 			this.#message = error instanceof ScopeError ? error.message : String(error);
@@ -2512,6 +2574,7 @@ export class DiagramScreen implements Component {
 	}
 
 	#close(): void {
+		this.#preview?.controller?.abort();
 		this.#preview = undefined;
 		this.#sourceView = undefined;
 		this.#dropModal();
@@ -2566,6 +2629,7 @@ export class DiagramScreen implements Component {
 			// The key sheet is read-only; only a request preview submits.
 			if (key === "escape" || (!this.#preview && (key === "enter" || key === "q" || key === "?"))) {
 				this.#modal = undefined;
+				this.#preview?.controller?.abort();
 				this.#preview = undefined;
 				this.#options.tui.requestRender();
 				return;

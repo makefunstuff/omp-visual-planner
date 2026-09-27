@@ -9,8 +9,10 @@ import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@o
 import type { BeginInput, JournalEntry } from "./actions.ts";
 import { ActionRegistry, resumeBranchToken } from "./actions.ts";
 import { resolveScope } from "./compose.ts";
+import { resolvePlannerJudge } from "./judge.ts";
 import type { Purpose, Scope } from "./model.ts";
 import { PURPOSES, toolSchemasFor } from "./model.ts";
+import { relatedRanker } from "./relevance.ts";
 import { DocumentStore, SESSION_NAMESPACE, defaultDocumentPath, displayPath, resolveSessionPath } from "./store.ts";
 import type { ScreenResult, ScreenStart } from "./ui.ts";
 import { DiagramScreen } from "./ui.ts";
@@ -99,6 +101,7 @@ function webBinding(pi: ExtensionAPI, ctx: ExtensionContext): WebBinding {
 		sessionId: key,
 		cwd: ctx.cwd,
 		getSession: () => SESSIONS.get(key),
+		rankRelated: relatedRanker(() => resolvePlannerJudge(ctx)),
 		onChange: () => {
 			const session = SESSIONS.get(key);
 			if (!session) return;
@@ -240,6 +243,7 @@ async function runScreen(
 					hasUI: ctx.hasUI,
 					isIdle: () => ctx.isIdle(),
 					hasPendingMessages: () => ctx.hasPendingMessages(),
+					rankRelated: relatedRanker(() => resolvePlannerJudge(ctx)),
 					initialSelection: session.selected,
 					link: {
 						// Focus is shared: web mode reads it on its next poll.

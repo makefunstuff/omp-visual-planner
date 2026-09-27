@@ -2,7 +2,20 @@
 
 An OMP extension for planning systems and mapping codebases as nested blocks. It is built for OMP, not as a plugin for other harnesses. Work on one block at a time in a terminal or browser; use the map when relationships or layout matter. A model can stage a proposal, but only a person can accept it.
 
-The same decomposition, without the map, is one skill: [`skills/decompose`](skills/decompose/SKILL.md). The use case is the agent plus `/tree`, which OMP and pi already have. The agent edits one markdown file of nested bullets, the way Logseq nests blocks. `/tree` is how you go back to an earlier decomposition. No second integration. OMP loads the skill with this plugin. For pi, link the directory:
+## What is in it
+
+- **One nested document.** Blocks nest into diagrams to any depth, with stable ids, authored order, labelled edges, source references and `uses` links. `.omp-visual-planner/architecture.json`, schema 1, explicit atomic saves that refuse to overwrite an outside edit; legacy boards import.
+- **Three purposes.** `brainstorm` (ideas, no status), `plan` (todo → planned → done, Execute), `explore` (unexplored → explored, citations, grounded mode).
+- **Verbs, previewed and scoped.** Refine, Break down / Expand / Map inside, Investigate, Replan, Prune, Execute — each composes one exact prompt for the block, subsystem or project you point at and previews it before anything is sent. `Esc` cancels; Enter submits.
+- **Judged related context (Jev).** A request narrower than the project arrives with the blocks outside its scope already ranked. The session's `judge` role — a System One decision model, **Jev** by default (`openrouter/~typesafe/jev-latest`), or Laya behind the same wire — is asked one narrow yes/no question per outside block, and those at p ≥ 0.7 join the prompt as a `## Related context` section. Measured at roughly $0.00003 and 0.3 s for three blocks. See [Related context](#related-context).
+- **Reviewed proposals.** A model can only stage through `visual_planner_propose`, with every changed field shown before and after; only a person accepts, and acceptance is one undoable, unsaved edit. Replan and prune cannot drop work the human already settled.
+- **Reuse that survives a move.** Extract lifts a block to share it, its former sibling links become `uses`, and Execute reads a use as a dependency. See [Reuse](#reuse).
+- **Execute as dispatch.** Only written leaves with acceptance criteria run, in the venue the block states (`here`, `subagent`, `worktree`); the plugin hands the work to OMP and never marks it done.
+- **Two surfaces.** The terminal TUI and a loopback web view of the same session, sharing focus, undo and the store.
+- **Evidence over confidence.** Every block is `observed`, `inferred` or `unknown`; `observed` needs a source, and explore can hide what is not grounded.
+- **A skill for when no document is open.** [`skills/decompose`](skills/decompose/SKILL.md): the same decomposition as nested bullets in one markdown file, with `/tree` as the history.
+
+The skill is the agent plus `/tree`, which OMP and pi already have. The agent edits one markdown file of nested bullets, the way Logseq nests blocks. `/tree` is how you go back to an earlier decomposition. No second integration. OMP loads the skill with this plugin. For pi, link the directory:
 
 ```sh
 ln -s /path/to/omp-visual-planner/skills/decompose ~/.pi/agent/skills/decompose
@@ -132,6 +145,12 @@ The outline marks a block others use with `×N`, and deleting a used block says 
 Execute reads a use as a dependency: a leaf waits for what it uses and for what its ancestors use — a subsystem's needs are its parts' needs — and the sweep orders the library before its users. Sibling edges keep their present, non-inherited meaning.
 
 Requests that produce structure (plan, discover, decompose, investigate, replan, prune) carry a `## Reuse` section saying this, and a scoped request also lists the blocks outside that scope it may link to. Proposals carry `uses` like any other field: the review diff shows it as titles, and staging refuses a proposal that would leave a use pointing at a block it removes. `enhance` and `execute` prompts propose no structure, so they say nothing about reuse.
+
+## Related context
+
+A request narrower than the project — a block or a subsystem, every verb but Execute — is composed from its scope alone, and the blocks outside that scope reach the prompt only as titles. So the preview ranks them first: the session's `judge` role (a System One decision model such as Jev, or Laya behind the same wire) is asked one yes/no question per outside block, *should an agent about to change the focused block read this other block before it does?*. Every block at or above probability 0.7, at most eight, joins the prompt as a `## Related context` section carrying its note, acceptance criteria and sources, marked as context rather than scope. The preview says how many of how many were kept, which judge answered, and what it cost, and what is previewed is what is submitted.
+
+Blocks the prompt already names are not asked about: what the scope uses, what uses the scope, and the relationships that leave it. A `judge` role that is a chat model is refused by name instead of being prompted once per block; a ranking that fails says why in the preview and submits without the section; and the whole ranking is bounded at ten seconds.
 
 ## Review and evidence
 
