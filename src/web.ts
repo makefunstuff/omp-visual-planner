@@ -67,7 +67,13 @@ import { inspectSource } from "./code-evidence.ts";
 import { listWorkspaceFiles, readWorkspaceFile, workspacePath } from "./workspace-files.ts";
 
 export const WEB_HOSTNAME = "127.0.0.1";
-const COOKIE = "ovp_token";
+/**
+ * Cookies are scoped by host, not port: two sessions' servers on 127.0.0.1
+ * would overwrite one shared cookie and log each other's tab out.
+ */
+export function cookieName(port: number): string {
+	return `ovp_token_${port}`;
+}
 
 /** The slice of a planner session web mode reads and mutates. */
 export interface WebSession {
@@ -191,12 +197,13 @@ function sameToken(candidate: string | undefined, token: string): boolean {
 	return timingSafeEqual(Buffer.from(candidate), Buffer.from(token));
 }
 
-function cookieToken(request: Request): string | undefined {
+function cookieToken(request: Request, port: number): string | undefined {
 	const header = request.headers.get("cookie");
 	if (!header) return undefined;
+	const wanted = cookieName(port);
 	for (const part of header.split(";")) {
 		const [name, ...rest] = part.trim().split("=");
-		if (name === COOKIE) return rest.join("=");
+		if (name === wanted) return rest.join("=");
 	}
 	return undefined;
 }
@@ -219,11 +226,11 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 				headers: {
 					...SECURITY_HEADERS,
 					location: "/",
-					"set-cookie": `${COOKIE}=${entry.token}; HttpOnly; SameSite=Strict; Path=/`,
+					"set-cookie": `${cookieName(entry.port)}=${entry.token}; HttpOnly; SameSite=Strict; Path=/`,
 				},
 			});
 		}
-		if (!sameToken(cookieToken(request), entry.token)) {
+		if (!sameToken(cookieToken(request, entry.port), entry.token)) {
 			return new Response("open the link printed by /diagram web", { status: 403, headers: SECURITY_HEADERS });
 		}
 		return new Response(WEB_PAGE, {
@@ -237,7 +244,7 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 	}
 
 	if (!url.pathname.startsWith("/api/")) return new Response("not found", { status: 404, headers: SECURITY_HEADERS });
-	if (!sameToken(cookieToken(request), entry.token)) return json({ error: "unauthorized" }, 401);
+	if (!sameToken(cookieToken(request, entry.port), entry.token)) return json({ error: "unauthorized" }, 401);
 
 	const session = entry.binding.getSession();
 	if (!session) return json({ error: "the planner session is gone; run /diagram web again" }, 410);

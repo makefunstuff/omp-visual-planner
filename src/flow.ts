@@ -191,6 +191,7 @@ export type PageField =
 	| "criteria"
 	| "evidence"
 	| "enhance"
+	| "execute"
 	| "venue"
 	| "sources";
 

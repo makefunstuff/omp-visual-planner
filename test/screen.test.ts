@@ -182,7 +182,8 @@ describe("overlay geometry", () => {
 		const layout = layoutFor(120, 36);
 		const lines = plain((await harness({ width: 120, rows: 36, view: "canvas" })).screen.render(120));
 		expect(lines[0]).toContain("omp-visual-planner — Service");
-		expect(lines[1]).toContain("[i] inspector");
+		// The breadcrumb is only the path: the keys live in the status line.
+		expect(lines[1]).toContain("Service");
 		// The inspector's vertical edges sit exactly at the reserved columns.
 		const inspectorStart = layout.canvasWidth + 2;
 		expect(lines[3]![inspectorStart]).toBe("│");
@@ -195,7 +196,8 @@ describe("canvas rendering", () => {
 	test("draws a bordered card per block with its title and description", async () => {
 		const lines = plain((await harness(canvas)).screen.render(120));
 		const joined = lines.join("\n");
-		expect(joined).toContain("┌──────────┐");
+		// A plan card carries its status on the top border.
+		expect(joined).toMatch(/┌○─{9}┐/);
 		expect(joined).toContain("│ API");
 		expect(joined).toContain("HTTP surface");
 		expect(joined).toContain("Database");
@@ -218,13 +220,9 @@ describe("canvas rendering", () => {
 		expect(arrow).toBeDefined();
 	});
 
-	test("the status strip reports the current diagram's unknown count", async () => {
+	test("the status strip reports the current diagram's block and unknown counts", async () => {
 		const lines = plain((await harness(canvas)).screen.render(120));
-		const status = lines[lines.length - 2]!;
-		expect(status).toContain("canvas");
-		expect(status).toContain("blocks 3");
-		expect(status).toContain("unknown 1");
-		expect(status).toContain("rev 0");
+		expect(lines[lines.length - 2]!).toContain("map · 3 blocks · 1 unknown");
 	});
 
 	test("a relationship label is drawn in free space and never over a card", async () => {
@@ -234,13 +232,13 @@ describe("canvas rendering", () => {
 		const joined = lines.join("\n");
 		expect(joined).toContain("stores");
 		// The card borders survive: the label only used free cells.
-		expect(joined).toContain("┌──────────┐");
+		expect(joined).toMatch(/┌.─{9}┐/);
 
 		// Two cells apart leaves no room, and the label is omitted rather than
 		// overwriting the neighbouring card.
 		const cramped = plain((await harness(canvas)).screen.render(120)).join("\n");
 		expect(cramped).toContain("Database");
-		expect(cramped.match(/┌──────────┐/g)?.length).toBe(2);
+		expect(cramped.match(/┌.─{9}┐/g)?.length).toBe(2);
 	});
 
 	test("a dirty document must be saved before starting a new one", async () => {
@@ -256,7 +254,7 @@ describe("canvas rendering", () => {
 		h.screen.handleInput("\r");
 		const lines = plain(h.screen.render(120));
 		expect(lines.join("\n")).toContain("save this document (s) before starting a new one");
-		expect(lines.join("\n")).toContain("blocks 4");
+		expect(h.store.require().root.blocks).toHaveLength(4);
 	});
 
 	test("a cold start lets discovery proceed instead of demanding a save", async () => {
@@ -327,23 +325,36 @@ describe("canvas rendering", () => {
 	test("brainstorm and unexplored blocks walk; a settled explore block keeps the page", async () => {
 		const ideas = createDocument({ id: "ideas", title: "Ideas", purpose: "brainstorm" });
 		ideas.root.blocks.push(createBlock({ id: "spark", title: "Spark", description: "a loose idea" }));
-		const brainstorm = plain((await harness({ width: 120, rows: 24, document: ideas })).screen.render(120)).join("\n");
-		expect(brainstorm).toContain("brainstorm / walk");
-		expect(brainstorm).toContain("Spark");
-		expect(brainstorm).toContain("O dumps one");
+		const brainstorm = plain((await harness({ width: 120, rows: 24, document: ideas })).screen.render(120));
+		expect(brainstorm.at(-2)).toContain("walk");
+		expect(brainstorm.join("\n")).toContain("Spark");
+		expect(brainstorm.join("\n")).toContain("O dumps a line onto it");
 
 		const map = fixture();
 		map.purpose = "explore";
 		map.root.blocks[0]!.sources = [{ path: "src/flow.ts", startLine: 10, endLine: 12 }];
-		const walking = plain((await harness({ width: 120, rows: 24, document: map })).screen.render(120)).join("\n");
-		expect(walking).toContain("explore / walk");
-		expect(walking).toContain("src/flow.ts:10-12");
-		expect(walking).toContain("g grounded");
+		const walking = plain((await harness({ width: 120, rows: 24, document: map })).screen.render(120));
+		expect(walking.at(-2)).toContain("walk");
+		expect(walking.join("\n")).toContain("src/flow.ts:10-12");
+		expect(walking.at(-2)).toContain("g grounded");
 
 		map.root.blocks[0]!.status = "settled";
-		const page = plain((await harness({ width: 120, rows: 24, document: map })).screen.render(120)).join("\n");
-		expect(page).not.toContain("explore / walk");
-		expect(page).toContain("notes");
+		const page = plain((await harness({ width: 120, rows: 24, document: map })).screen.render(120));
+		expect(page.at(-2)).not.toContain("walk");
+		expect(page.join("\n")).toContain("notes");
+	});
+
+	test("Enter on a walked idea opens its editable page", async () => {
+		const ideas = createDocument({ id: "ideas", title: "Ideas", purpose: "brainstorm" });
+		ideas.root.blocks.push(createBlock({ id: "spark", title: "Spark" }));
+		const h = await harness({ width: 120, rows: 24, document: ideas });
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		h.screen.handleInput("j");
+		h.screen.handleInput("\r");
+		for (const key of "a loose idea") h.screen.handleInput(key);
+		h.screen.handleInput("\r");
+		expect(h.store.require().root.blocks[0]!.description).toBe("a loose idea");
 	});
 
 	test("discovering from the terminal highlights the cited source", async () => {
@@ -370,6 +381,36 @@ describe("canvas rendering", () => {
 		expect(source).toContain("token");
 	});
 
+	test("a cited file indented with tabs never reaches the terminal as tabs", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-tabs-"));
+		directories.push(directory);
+		const file = join(directory, "tabs.ts");
+		await writeFile(file, "export function f() {\n\tif (x) {\n\t\treturn 1;\n\t}\n}\n");
+		const map = createDocument({ id: "map", title: "Map", purpose: "explore" });
+		map.root.blocks.push(createBlock({ id: "f", title: "F", sources: [{ path: file, startLine: 1, endLine: 5 }] }));
+		const opened = await harness({ width: 120, rows: 24, document: map });
+		// The citation and the source view load asynchronously and ask for a redraw when read.
+		const tui = opened.tui as unknown as { requestRender: () => void };
+		const redrawn = () => {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			tui.requestRender = resolve;
+			return promise;
+		};
+		const read = redrawn();
+		opened.screen.render(120);
+		await read;
+		// A tab jumps to the terminal's next tab stop while the layout counted three columns.
+		const walk = opened.screen.render(120);
+		expect(plain(walk).join("\n")).toContain("return 1;");
+		for (const line of walk) expect(line).not.toContain("\t");
+		// Enter redraws at once; the file read redraws again when it lands.
+		opened.screen.handleInput("\r");
+		await redrawn();
+		const source = opened.screen.render(120);
+		expect(plain(source).join("\n")).toContain("source:");
+		for (const line of source) expect(line).not.toContain("\t");
+	});
+
 	test("a code fence on the page is syntax-highlighted", async () => {
 		const document = fixture();
 		document.root.blocks[0]!.description = "```ts\nexport const n = 1;\n```";
@@ -386,7 +427,7 @@ describe("interaction", () => {
 		h.screen.handleInput("o");
 		const lines = plain(h.screen.render(120));
 		expect(lines.join("\n")).toContain("added a block");
-		expect(lines[lines.length - 2]).toContain("blocks 4");
+		expect(h.store.require().root.blocks).toHaveLength(4);
 		expect(lines.join("\n")).toContain("New block");
 	});
 
@@ -418,7 +459,7 @@ describe("interaction", () => {
 		for (let step = 0; step < 3; step += 1) h.screen.handleInput("L");
 		const lines = plain(h.screen.render(120));
 		expect(lines.join("\n")).toContain("moved API");
-		expect(lines[lines.length - 2]).toContain("rev 3");
+		expect(h.store.require().revision).toBe(3);
 	});
 
 	test("a pending link commits with Enter even from the inspector pane", async () => {
@@ -463,13 +504,13 @@ describe("interaction", () => {
 		expect(h.result()).toBeUndefined();
 		const lines = plain(h.screen.render(120));
 		expect(lines.join("\n")).toContain("unsaved changes");
-		expect(lines.join("\n")).toContain("> Save");
+		expect(lines.join("\n")).toContain("› Save");
 		// Cancel keeps the overlay and the edit.
 		h.screen.handleInput("j");
 		h.screen.handleInput("j");
 		h.screen.handleInput("\r");
 		expect(h.result()).toBeUndefined();
-		expect(plain(h.screen.render(120)).join("\n")).toContain("blocks 4");
+		expect(h.store.require().root.blocks).toHaveLength(4);
 	});
 
 	test("opening the planner with a staged proposal lands on the review", async () => {
@@ -604,12 +645,15 @@ describe("interaction", () => {
 		for (const line of lines) expect(visibleWidth(line)).toBe(120);
 	});
 
-	test("help lists the bindings and closes again", async () => {
-		const h = await harness();
+	test("help lists the bindings in this document's words and closes again", async () => {
+		const h = await harness({ width: 120, rows: 60 });
 		h.screen.render(120);
 		h.screen.handleInput("?");
-		expect(plain(h.screen.render(120)).join("\n")).toContain("omp-visual-planner keys");
-		h.screen.handleInput("\x1b");
+		const sheet = plain(h.screen.render(120)).join("\n");
+		expect(sheet).toContain("step the status: todo → planned → done");
+		expect(sheet).toContain("Break down the focused block");
+		h.screen.handleInput("\r");
+		expect(plain(h.screen.render(120)).join("\n")).not.toContain("step the status");
 		expect(h.result()).toBeUndefined();
 	});
 
@@ -684,7 +728,7 @@ describe("inspector field editor", () => {
 		expect(lines.join("\n")).toContain("updated title");
 		expect(lines.join("\n")).toContain("Gateway");
 		expect(lines.join("\n")).not.toContain("title — Enter accepts");
-		expect(lines[lines.length - 2]).toContain("rev 1");
+		expect(h.store.require().revision).toBe(1);
 	});
 
 	test("escape cancels a field edit and keeps the authored value", async () => {
@@ -698,7 +742,7 @@ describe("inspector field editor", () => {
 		h.screen.handleInput("\x1b");
 		const lines = plain(h.screen.render(120));
 		expect(lines.join("\n")).toContain("edit cancelled");
-		expect(lines.join("\n")).toContain("title: Zeta");
+		expect(h.store.require().root.blocks[0]!.title).toBe("Zeta");
 		expect(dialogRows(lines, "Enter accepts").join("\n")).not.toContain("zzz");
 	});
 

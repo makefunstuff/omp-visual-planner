@@ -96,6 +96,9 @@ class Screen:
         self.bold = self.dim = self.italic = self.underline = self.inverse = False
         self.pending = ""
         self.state = "text"  # text | esc | csi | osc | osc_st | apc
+        # Inside a synchronized update (DEC mode 2026) a real terminal shows nothing
+        # until the update ends; a frame sampled there would show half a redraw.
+        self.synchronizing = False
 
     # -- grid ops ----------------------------------------------------------
     def clear(self) -> None:
@@ -287,12 +290,16 @@ class Screen:
         elif final == "u":
             self.x, self.y = self.saved
         elif final == "h" and prefix == "?":
-            if first == 1049 and self.alt_grid is None:
+            if first == 2026:
+                self.synchronizing = True
+            elif first == 1049 and self.alt_grid is None:
                 self.alt_grid = self.grid
                 self.grid = [[Cell() for _ in range(self.cols)] for _ in range(self.rows)]
                 self.clear()
         elif final == "l" and prefix == "?":
-            if first in (1049, 47) and self.alt_grid is not None:
+            if first == 2026:
+                self.synchronizing = False
+            elif first in (1049, 47) and self.alt_grid is not None:
                 self.grid = self.alt_grid
                 self.alt_grid = None
 
@@ -367,7 +374,7 @@ class Recorder:
                 timeline += gap
             previous_stamp = stamp
             screen.feed(data)
-            if timeline >= next_sample:
+            if timeline >= next_sample and not screen.synchronizing:
                 shots.append((timeline, self._clone(screen)))
                 next_sample = timeline + sample
         shots.append((timeline, self._clone(screen)))

@@ -10,7 +10,7 @@ ln -s /path/to/omp-visual-planner/skills/decompose ~/.pi/agent/skills/decompose
 
 [![Discovery of omp-visual-planner](docs/visual-planner-demo.png)](docs/visual-planner-demo.mp4)
 
-[36s demo](docs/visual-planner-demo.mp4). A live browser session: the discovery map of this repo, a cited block opened from the file tree, and the investigate preview before submit. The still above is the poster; the link is the recording.
+[31s tour](docs/visual-planner-demo.mp4), stitched from real browser captures of this repo's discovery document, one per step: the walk, the map, a file found in the tree with the blocks that cite it, the citing block, the Investigate preview before submit, and the `?` sheet. The still above is the map with the file tree open.
 
 ## Install
 
@@ -39,7 +39,7 @@ bun scripts/demo/fixture.ts "$DEMO_DIR"
 omp --cwd "$DEMO_DIR" --no-extensions -e "$PWD/src/index.ts"
 ```
 
-In OMP, run `/diagram open architecture.json`. Move through the outline with `j`/`k`, press `Enter` for a block page, then `Enter` on its source reference. Scroll with `j`/`k`, arrows, `PgUp`/`PgDn`, or `g`/`G`; `Esc` returns. `t` previews a block replan; `a` offers project replan and prune. **Esc cancels a preview; Enter submits its request to the model.** The generated directory is disposable.
+In OMP, run `/diagram open architecture.json`. Move through the outline with `j`/`k`, press `Enter` to open the block's page, move to its source reference with `j`, and press `Enter` again. Scroll with `j`/`k`, arrows, `PgUp`/`PgDn`, or `g`/`G`; `Esc` returns. `t` previews a block replan; `a` offers project replan and prune. **Esc cancels a preview; Enter submits its request to the model.** The generated directory is disposable.
 
 ## Commands
 
@@ -52,9 +52,11 @@ In OMP, run `/diagram open architecture.json`. Move through the outline with `j`
 | `/diagram discover [path]` | Ask the model to map an existing codebase (default: cwd) |
 | `/diagram web` / `/diagram web stop` | Open/stop the browser view of this session |
 
-The terminal opens on a nested outline and the selected block's page. The focused block leads with one next step; `r`, `b`, `t`, and `X` are the rest. `space` advances its status; `n` selects the next open block. `R` reviews a staged proposal. `v` switches to the coordinate map, `E` edits a block as Markdown in `$VISUAL`/`$EDITOR`, and `s` saves. Press `?` for the full key list.
+The terminal opens on a nested outline beside the selected block's page. Browsing, the page shows only what is written, and flags what a plan block still lacks. Its last line is the one next step for that block; `r`, `b`, `t`, and `X` are the other verbs. `Enter` opens every field with a cursor (`j`/`k` picks one, `Enter` edits it, `Esc` returns). `space` advances the status; `n` selects the next open block. `R` reviews a staged proposal. `v` switches to the coordinate map, `E` edits the whole block as Markdown in `$VISUAL`/`$EDITOR`, and `s` saves. The status line lists the keys that work where you are; `?` groups all of them.
 
-Brainstorm, and an explore block you have not settled, open on a **walk**: the focused block, what is inside it, and the blocks it connects to. Dump a line onto the focused idea (Enter in the browser, `O` in the terminal). In explore, a citation is the subtitle, uncited blocks are dim, and **grounded** (`g`) hides them. Mark a block explored to get the full page. Plan documents stay on that page. **Map** is coordinates. Both views share the session.
+The browser has the same outline on the left and the same page or walk beside it. The top bar holds the document, its progress, undo, the file tree, the map and Save; the status line at the bottom lists the keys, and `?` opens the full sheet. On the page, the next step is the first button and the one sentence under the buttons says why.
+
+Brainstorm, and an explore block you have not settled, open on a **walk**: the focused block, what is inside it, and the blocks it links to. Dump a line onto the focused idea (Enter in the browser, `O` in the terminal). In explore, a citation is the subtitle, uncited blocks are dim, and **grounded** (`g`) hides them. `Enter` on a cited block opens the source; `i` (or `Enter` on an uncited one) opens the editable page. Mark a block explored and it stays on the full page. Plan documents stay on that page. **Map** is coordinates. Both views share the session.
 
 | Purpose | Block actions | Human status |
 |---|---|---|
@@ -119,7 +121,7 @@ Execute is not refine. On the block you clicked, a written leaf runs even while 
 
 ## Review and evidence
 
-A proposal replaces a block, its nested diagram, or the project only after review. The exact request is previewed first; `c` copies it to the OMP prompt editor and `w` exports it instead of submitting. A model stages its response through `visual_planner_propose`; `R` opens a structural diff to accept or reject. Rejection leaves the document unchanged. Acceptance is one undoable, unsaved edit; press `s` to write it. Replan and prune must retain blocks already settled by the human under the same IDs. Execute submits work to OMP, not a proposal, and does not mark a block done.
+A proposal replaces a block, its nested diagram, or the project only after review. The exact request is previewed first; `c` copies it to the OMP prompt editor and `w` exports it instead of submitting (in the browser, **Copy** puts it on the clipboard). A model stages its response through `visual_planner_propose`; `R` in the terminal, or the panel that opens in the browser, shows every changed field before and after, then the blocks and links it adds or removes. Rejection leaves the document unchanged. Acceptance is one undoable, unsaved edit; press `s` to write it. Replan and prune must retain blocks already settled by the human under the same IDs. Execute submits work to OMP, not a proposal, and does not mark a block done.
 
 Every block marks its evidence `observed`, `inferred`, or `unknown`. `observed` requires a source reference, which may include a line range. Discovery prompts require the agent to read cited files. Browser **Inspect syntax** reports Tree-sitter ranges and node kinds, not LSP references, types, or diagnostics. Browser file reads stay inside the workspace after symlink resolution.
 

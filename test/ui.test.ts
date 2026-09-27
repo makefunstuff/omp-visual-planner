@@ -27,10 +27,10 @@ function rect(x: number, y: number, w = 16, h = CARD_HEIGHT) {
 }
 
 describe("card geometry", () => {
-	test("card width clamps between 12 and 32", () => {
+	test("card width fits the title with a space either side, clamped between 12 and 32", () => {
 		expect(cardWidth("hi")).toBe(12);
 		expect(cardWidth("a".repeat(100))).toBe(32);
-		expect(cardWidth("a".repeat(20))).toBe(22);
+		expect(cardWidth("a".repeat(20))).toBe(24);
 	});
 
 	test("a card is four rows tall", () => {
@@ -230,17 +230,19 @@ describe("document diff", () => {
 		expect(diff.titleChanged).toEqual({ from: "Service", to: "Service v2" });
 		expect(diff.added.map(entry => entry.id)).toEqual(["auth"]);
 		expect(diff.removed.map(entry => entry.id)).toEqual(["db"]);
-		expect(diff.modified).toEqual([{ id: "api", title: "API", fields: ["description"], path: "root" }]);
+		expect(diff.modified).toEqual([
+			{ id: "api", title: "API", changes: [{ field: "description", from: "surface", to: "new surface" }], path: "root" },
+		]);
 		expect(diff.edgesRemoved).toEqual(['API -> Database (stores)']);
 	});
 
-	test("nested additions are reported with their path", () => {
+	test("a nested addition is reported once, with its path, not again as a changed parent", () => {
 		const before = fixture();
 		const after = structuredClone(before);
 		after.root.blocks[0]!.children = createDiagram({ id: "inner", blocks: [createBlock({ id: "auth", title: "Auth" })] });
 		const diff = diffDocuments(before, after);
 		expect(diff.added).toEqual([{ id: "auth", title: "Auth", path: "root > API" }]);
-		expect(diff.modified.map(entry => entry.fields)).toEqual([["children"]]);
+		expect(diff.modified).toEqual([]);
 	});
 });
 

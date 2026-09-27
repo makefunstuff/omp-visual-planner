@@ -6,7 +6,7 @@ import { type } from "@oh-my-pi/omptype";
 import { ActionRegistry, type BeginInput } from "../src/actions.ts";
 import { createBlock, createDocument, findBlockLocation } from "../src/model.ts";
 import { DocumentStore, serializeDocument } from "../src/store.ts";
-import { type WebHandle, type WebSession, type WebState, startWeb, stopWeb } from "../src/web.ts";
+import { type WebHandle, type WebSession, type WebState, cookieName, startWeb, stopWeb } from "../src/web.ts";
 
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -47,7 +47,7 @@ async function harness() {
 	});
 	cleanup.push(() => void stopWeb(sessionId));
 	const origin = `http://127.0.0.1:${handle.port}`;
-	const cookie = `ovp_token=${handle.token}`;
+	const cookie = `${cookieName(handle.port)}=${handle.token}`;
 	const op = (body: unknown) =>
 		fetch(`${origin}/api/op`, { method: "POST", headers: { cookie, origin, "content-type": "application/json" }, body: JSON.stringify(body) });
 	const state = async () => (await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json()) as WebState;
@@ -56,7 +56,7 @@ async function harness() {
 
 describe("web mode access", () => {
 	test("the link token is exchanged for a cookie; nothing is served without it", async () => {
-		const { handle, origin } = await harness();
+		const { handle, origin, cookie } = await harness();
 		expect((await fetch(`${origin}/`)).status).toBe(403);
 		expect((await fetch(`${origin}/api/state`)).status).toBe(401);
 		expect((await fetch(`${origin}/?token=${"0".repeat(64)}`, { redirect: "manual" })).status).toBe(403);
@@ -67,9 +67,30 @@ describe("web mode access", () => {
 		expect(exchanged.headers.get("set-cookie")).toContain("HttpOnly");
 		expect(exchanged.headers.get("set-cookie")).toContain("SameSite=Strict");
 
-		const page = await fetch(`${origin}/`, { headers: { cookie: `ovp_token=${handle.token}` } });
+		const page = await fetch(`${origin}/`, { headers: { cookie } });
 		expect(page.status).toBe(200);
 		expect(page.headers.get("content-security-policy")).toContain("default-src 'none'");
+	});
+
+	test("the page carries its characters as text, not as \\u escapes", async () => {
+		const { origin, cookie } = await harness();
+		const page = await (await fetch(`${origin}/`, { headers: { cookie } })).text();
+		expect(page).toContain("disconnected from the OMP session — run /diagram web again");
+		expect(page).not.toMatch(/\\u[0-9a-fA-F]{4}/);
+	});
+
+	test("two sessions' tabs keep separate cookies on the same loopback host", async () => {
+		const first = await harness();
+		const second = await harness();
+		const exchange = async (h: typeof first) =>
+			(await fetch(`${h.origin}/?token=${h.handle.token}`, { redirect: "manual" })).headers.get("set-cookie")!.split(";")[0]!;
+		const a = await exchange(first);
+		const b = await exchange(second);
+		expect(a.split("=")[0]).not.toBe(b.split("=")[0]);
+		// The browser sends both cookies to both ports; each server finds its own.
+		const both = `${a}; ${b}`;
+		expect((await fetch(`${first.origin}/api/state`, { headers: { cookie: both } })).status).toBe(200);
+		expect((await fetch(`${second.origin}/api/state`, { headers: { cookie: both } })).status).toBe(200);
 	});
 
 	test("another host name and cross-origin writes are refused", async () => {
@@ -248,11 +269,11 @@ describe("web mode review", () => {
 		const { op, store, session, document, origin, cookie } = await harness();
 		stage(session, document.id, 0);
 
-		const state = (await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json()) as {
-			review: { requestId: string; diff: { modified: { title: string; fields: string[] }[] } };
-		};
-		expect(state.review.requestId).toBe("req-1");
-		expect(state.review.diff.modified).toEqual([expect.objectContaining({ title: "API v2", fields: ["title"] })]);
+		const state = (await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json()) as WebState;
+		expect(state.review!.requestId).toBe("req-1");
+		expect(state.review!.diff.modified).toEqual([
+			expect.objectContaining({ title: "API v2", changes: [{ field: "title", from: "API", to: "API v2" }] }),
+		]);
 		expect(findBlockLocation(store.require().root, "api")!.block.title).toBe("API");
 
 		expect((await op({ op: "accept", requestId: "req-1" })).status).toBe(200);
@@ -335,7 +356,7 @@ describe("web server lifecycle", () => {
 		const same = startWeb({ sessionId: "lifecycle", ...quiet });
 		expect(same.port).toBe(again.port);
 		expect(same.token).toBe(again.token);
-		const gone = await fetch(`${again.url}api/state`, { headers: { cookie: `ovp_token=${again.token}` } });
+		const gone = await fetch(`${again.url}api/state`, { headers: { cookie: `${cookieName(again.port)}=${again.token}` } });
 		expect(gone.status).toBe(410);
 		expect(stopWeb("lifecycle")).toBe(true);
 		await expect(fetch(`${again.url}api/state`)).rejects.toThrow();

@@ -19,6 +19,8 @@ import {
 	getLanguageFromPath,
 	highlightCode,
 	parseKey,
+	replaceTabs,
+	stripTerminalSequences,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -48,8 +50,10 @@ import {
 	progressLabel,
 	projectActions,
 	startDocument,
+	statusCycle,
 	statusGlyph,
 	statusLabel,
+	venueOf,
 	verbsFor,
 } from "./flow.ts";
 import type {
@@ -72,6 +76,7 @@ import {
 	EDGE_ROUTINGS,
 	EVIDENCE_VALUES,
 	PURPOSES,
+	VENUES,
 	addBlock,
 	addEdge,
 	createBlock,
@@ -158,8 +163,9 @@ export interface Rect {
 
 export const CARD_HEIGHT = 4;
 
+/** Border, a space, the title, a space, border: a title of up to 28 columns is never cut. */
 export function cardWidth(title: string): number {
-	return Math.max(12, Math.min(32, visibleWidth(title) + 2));
+	return Math.max(12, Math.min(32, visibleWidth(title) + 4));
 }
 
 export function cardRect(block: Block): Rect {
@@ -353,10 +359,17 @@ export function cornerName(incoming: { dx: number; dy: number }, outgoing: { dx:
 	return CORNERS[`${incoming.dx},${incoming.dy}->${outgoing.dx},${outgoing.dy}`];
 }
 
+/** One changed field of a kept block, as the text a reviewer compares. */
+export interface FieldChange {
+	field: DiffField;
+	from: string;
+	to: string;
+}
+
 export interface DocumentDiff {
 	added: { id: string; title: string; path: string }[];
 	removed: { id: string; title: string; path: string }[];
-	modified: { id: string; title: string; fields: string[]; path: string }[];
+	modified: { id: string; title: string; changes: FieldChange[]; path: string }[];
 	edgesAdded: string[];
 	edgesRemoved: string[];
 	edgesModified: string[];
@@ -364,17 +377,28 @@ export interface DocumentDiff {
 	goalChanged?: { from: string; to: string };
 }
 
-const BLOCK_FIELDS: (keyof Block)[] = [
-	"title",
-	"description",
-	"expectedOutput",
-	"acceptanceCriteria",
-	"position",
-	"sources",
-	"evidence",
-	"actions",
-	"children",
-];
+/**
+ * Fields a proposal can change on a block it keeps. Children are not one of
+ * them: the nested walk already reports every block added or removed inside.
+ */
+const BLOCK_FIELDS = ["title", "description", "expectedOutput", "acceptanceCriteria", "sources", "evidence", "actions", "position"] as const;
+export type DiffField = (typeof BLOCK_FIELDS)[number];
+
+/** A field as lines of text: one criterion or reference per line, so a reviewer compares line by line. */
+function fieldText(block: Block, field: DiffField): string {
+	switch (field) {
+		case "acceptanceCriteria":
+			return block.acceptanceCriteria.join("\n");
+		case "sources":
+			return block.sources.map(formatSourceRef).join("\n");
+		case "actions":
+			return [block.actions.enhance, block.actions.execute].filter(text => text.trim().length > 0).join("\n");
+		case "position":
+			return `${block.position.x},${block.position.y}`;
+		default:
+			return block[field];
+	}
+}
 
 function edgeSignature(edge: Edge): string {
 	return [edge.from, edge.to, edge.label, edge.direction, edge.routing, edge.fromPort, edge.toPort].join("|");
@@ -403,7 +427,9 @@ export function diffDocuments(before: DiagramDocument, after: DiagramDocument): 
 				continue;
 			}
 			const fields = BLOCK_FIELDS.filter(field => JSON.stringify(previous[field]) !== JSON.stringify(block[field]));
-			if (fields.length > 0) diff.modified.push({ id, title: block.title, fields, path });
+			if (fields.length === 0) continue;
+			const changes = fields.map(field => ({ field, from: fieldText(previous, field), to: fieldText(block, field) }));
+			diff.modified.push({ id, title: block.title, changes, path });
 		}
 		const beforeEdges = new Map(a.edges.map(edge => [edge.id, edge]));
 		const afterEdges = new Map(b.edges.map(edge => [edge.id, edge]));
@@ -644,7 +670,6 @@ type FieldId =
 	| "enhance"
 	| "venue"
 	| "execute"
-	| "children"
 	| `source:${number}`
 	| "source:add"
 	| "edge:label"
@@ -679,6 +704,7 @@ interface TextModal {
 
 interface ReviewModal {
 	kind: "review";
+	offset: number;
 	requestId: string;
 	entry: JournalEntry;
 	diff: DocumentDiff;
@@ -746,7 +772,6 @@ export class DiagramScreen implements Component {
 	#grounded = false;
 	#outlineTop = 0;
 	#modal: Modal | undefined;
-	#modalTitle: string | undefined;
 	#linkFrom: string | undefined;
 	#linkTarget: string | undefined;
 	#sourceView: SourceView | undefined;
@@ -778,12 +803,9 @@ export class DiagramScreen implements Component {
 				? options.initialSelection
 				: document.root.blocks[0]?.id;
 		if (initial !== undefined) this.#focus(initial);
-		this.#message =
-			options.store.importNotice === undefined
-				? "? help   o add   enter edit   space status   n next open   a actions   v map"
-				: `${options.store.importNotice}; press s to choose a new path`;
+		// Only an import notice greets you; the status line computes key hints and the staged-proposal marker itself.
+		this.#message = options.store.importNotice === undefined ? "" : `${options.store.importNotice}; press s to choose a new path`;
 		const staged = this.#stagedEntry();
-		if (staged) this.#message = `proposal staged for ${staged.label}; press R to review`;
 		if (start?.action === "draft") {
 			this.#beginDraft(start.purpose ?? "plan");
 		} else if (start?.action === "discover") {
@@ -920,14 +942,13 @@ export class DiagramScreen implements Component {
 			for (let index = 0; index < block.sources.length; index += 1) ids.push(`source:${index}`);
 			ids.push("source:add");
 		}
-		if (this.#view === "canvas" && block.children) ids.push("children");
 		return ids;
 	}
 
 	/** The purpose's word for a field, for prompts and inspector rows. */
 	#labelOf(field: FieldId): string {
 		if (field.startsWith("source")) return fieldLabel(this.#document.purpose, "sources");
-		if (field === "children" || field.startsWith("edge:")) return field;
+		if (field.startsWith("edge:")) return field;
 		return fieldLabel(this.#document.purpose, field as PageField);
 	}
 
@@ -961,7 +982,9 @@ export class DiagramScreen implements Component {
 	// Input routing
 	// ------------------------------------------------------------------
 
+	/** A message answers the key that caused it; the next key clears it and brings the hints back. */
 	handleInput(data: string): void {
+		this.#message = "";
 		this.#route(data);
 		this.#publish();
 	}
@@ -1671,13 +1694,6 @@ export class DiagramScreen implements Component {
 	// ------------------------------------------------------------------
 
 	#handleInspectorKey(key: string): boolean {
-		if (key === "enter" && this.#walking(this.#block)) {
-			const source = this.#block?.sources[0];
-			if (source) {
-				void this.#loadSource(source);
-				return true;
-			}
-		}
 		const fields = this.#fields;
 		if (fields.length === 0) return false;
 		const index = Math.min(this.#fieldIndex, fields.length - 1);
@@ -1780,10 +1796,6 @@ export class DiagramScreen implements Component {
 		if (field.startsWith("source:") && block) {
 			const source = block.sources[Number(field.slice("source:".length))];
 			if (source) void this.#loadSource(source);
-			return;
-		}
-		if (field === "children") {
-			this.#descend();
 			return;
 		}
 		if (field.startsWith("edge:")) {
@@ -1952,9 +1964,13 @@ export class DiagramScreen implements Component {
 				const all = text.split("\n");
 				const start = Math.max(1, source.startLine ?? 1);
 				const end = Math.min(all.length, Math.max(source.endLine ?? start, start));
-				const slice = all.slice(start - 1, Math.min(end, start + 7));
-				const highlighted = renderSourceLines(this.#options.theme, slice.join("\n"), source.path, start, Math.max(12, width));
-				const more = end > start + 7 ? [this.#options.theme.fg("muted", "enter opens the rest")] : [];
+				// Tabs expanded, then the shared indent removed: a snippet from deep inside a
+				// function should not spend half the pane on leading whitespace.
+				const slice = all.slice(start - 1, Math.min(end, start + 7)).map(line => replaceTabs(line));
+				const indent = Math.min(...slice.filter(line => line.trim().length > 0).map(line => line.length - line.trimStart().length));
+				const code = slice.map(line => line.slice(Number.isFinite(indent) ? indent : 0)).join("\n");
+				const highlighted = renderSourceLines(this.#options.theme, code, source.path, start, Math.max(12, width));
+				const more = end > start + 7 ? [this.#options.theme.fg("muted", `… ${end - start - 7} more lines — Enter opens the file`)] : [];
 				if (this.#citationPreview?.key !== key) return;
 				this.#citationPreview = { key, lines: [...highlighted, ...more] };
 			}
@@ -2088,7 +2104,6 @@ export class DiagramScreen implements Component {
 		}
 		this.#preview = { composed, kind, intent, scope, requestId: composed.request.requestId, codeRoot, save };
 		this.#modal = { kind: "text", title: `preview — ${composed.label} (${composed.size} chars)`, lines: composed.prompt.split("\n"), offset: 0 };
-		this.#message = "Enter submit   c copy to prompt editor   w export markdown   Esc back";
 	}
 
 	#submitPreview(): void {
@@ -2160,6 +2175,7 @@ export class DiagramScreen implements Component {
 		if (!projected.ok) {
 			this.#modal = {
 				kind: "review",
+				offset: 0,
 				requestId: entry.requestId,
 				entry,
 				diff: emptyDiff(),
@@ -2169,6 +2185,7 @@ export class DiagramScreen implements Component {
 		}
 		this.#modal = {
 			kind: "review",
+			offset: 0,
 			requestId: entry.requestId,
 			entry,
 			diff: diffDocuments(this.#document, projected.document),
@@ -2201,6 +2218,7 @@ export class DiagramScreen implements Component {
 			this.#options.registry.resolve(requestId, "stale", applicable.errors.join("; "));
 			this.#modal = {
 				kind: "review",
+				offset: 0,
 				requestId,
 				entry,
 				diff: emptyDiff(),
@@ -2248,59 +2266,59 @@ export class DiagramScreen implements Component {
 	// Help, save, close
 	// ------------------------------------------------------------------
 
+	/** The key sheet: grouped by what you are doing, in this document's words. */
 	#openHelp(): void {
-		const shared = [
-			"space              step the block's status",
-			"n                  go to the next open block",
-			"r / b / t / X      the block verbs: refine, break down, replan, execute",
-			"P                  change what the document is for",
-			"a                  action menu",
-			"R                  review a staged proposal",
-			"T                  tidy: lay the focused block's diagram out on the grid",
-			"E                  edit the block as markdown in $VISUAL / $EDITOR",
-			"s                  save the project document",
-			"u / Ctrl+R         undo / redo",
-			"d                  delete the selected block and subtree",
-			"x                  list this block's relationships",
-			"source: j/k scroll, PgUp/PgDn page, g/G ends, Esc back",
-			"Escape / Ctrl+C    back out of the page, then close the planner",
-		];
-		const outline = [
-			"j/k, arrows        move through the outline",
-			"h / l              collapse or go to parent / expand or go to first child",
-			"J / K              move the block down / up in authored order",
-			"o / O              add a block after this one / inside it",
-			"Enter / i          edit the block's page",
-			"e                  link the block to a sibling",
-			"v                  map view",
-			...shared,
-			"",
-			"page: j/k fields, Enter edit, o add source, m edit source, d remove, Esc back",
-		];
-		const canvas = [
-			"h/j/k/l, arrows    select a block directionally",
-			"Tab / Shift+Tab    cycle blocks in this diagram",
-			"H/J/K/L            move the selected block one cell",
-			"o                  add a block",
-			"i                  focus the inspector (and back)",
-			"Enter              descend into a block's subsystem",
-			"Backspace          ascend one level",
-			"e                  link the selected block to another",
-			"Ctrl+arrows        pan the canvas by four cells",
-			"v                  back to the outline",
-			...shared,
-			"",
-			"inspector: j/k fields, Enter open or edit, o add source, m edit source, d remove",
-		];
+		const theme = this.#options.theme;
+		const purpose = this.#document.purpose;
+		const cycle = statusCycle(purpose).map(status => statusLabel(purpose, status)).join(" → ");
+		const row = (keys: string, what: string): string => `  ${keys.padEnd(16)}${what}`;
+		const section = (title: string, rows: string[]): string[] => [theme.bold(title), ...rows, ""];
+		const verbs = verbsFor(purpose).map(verb => row(verb.key, `${verb.label} the focused block — previewed first`));
+		const move =
+			this.#view === "outline"
+				? section("Move", [
+						row("j / k", "next / previous block"),
+						row("h / l", "collapse or go to the parent / expand or go inside"),
+						row("n", purpose === "brainstorm" ? "next idea" : "next open block"),
+						row("v", "switch to the map"),
+					])
+				: section("Map", [
+						row("arrows", "select the nearest block that way"),
+						row("Tab", "cycle blocks in this diagram"),
+						row("Enter / Bksp", "go inside the block / up one level"),
+						row("H J K L", "move the selected block one cell"),
+						row("Ctrl+arrows", "pan"),
+						row("i", "inspect the block's fields"),
+						row("T", "tidy this diagram onto a grid"),
+						row("v", "back to the outline"),
+					]);
+		const edit = section("Edit", [
+			row("Enter", "open the page: j/k picks a field, Enter edits it, Esc returns"),
+			...(purpose === "explore" ? [row("Enter (cited)", "in the walk, open the cited source; i opens the page")] : []),
+			row("o / O", purpose === "brainstorm" ? "add an idea after this one / dump a line inside it" : "add a block after this one / inside it"),
+			row("J / K", "move the block down / up among its siblings"),
+			...(cycle.length > 0 ? [row("space", `step the status: ${cycle}`)] : []),
+			...(purpose === "explore" ? [row("g", "grounded: hide blocks without a citation")] : []),
+			row("e / x", "link to a sibling / list and edit its links"),
+			row("E", "edit the whole block as markdown in $VISUAL or $EDITOR"),
+			row("d", "delete the block and everything inside it"),
+			row("u / Ctrl+R", "undo / redo"),
+		]);
+		const agent = section("Ask the agent — you review every proposal", [
+			...verbs,
+			row("a", "all actions, including whole-document replan and prune"),
+			row("R", "review a staged proposal: Enter accepts, r rejects"),
+		]);
+		const document = section("Document", [
+			row("s", "save — nothing is written until you do"),
+			row("P", "change what the document is for"),
+			row("Esc", "back out; on the outline it closes the planner"),
+		]);
 		this.#modal = {
-			kind: "list",
-			title: "omp-visual-planner keys",
-			items: this.#view === "outline" ? outline : canvas,
-			index: 0,
-			footer: "Esc close",
-			onEnter: () => {
-				this.#modal = undefined;
-			},
+			kind: "text",
+			title: "keys",
+			lines: [...move, ...edit, ...agent, ...document].slice(0, -1),
+			offset: 0,
 		};
 	}
 
@@ -2340,6 +2358,32 @@ export class DiagramScreen implements Component {
 	// Modal input
 	// ------------------------------------------------------------------
 
+	/** Scroll keys for the preview, the key sheet and the review; the renderer clamps the far end. */
+	#scrolled(offset: number, key: string | undefined): number {
+		const page = Math.max(1, layoutFor(this.#lastWidth, this.#options.tui.terminal.rows).bodyHeight - 4);
+		switch (key) {
+			case "j":
+			case "down":
+				return offset + 1;
+			case "k":
+			case "up":
+				return Math.max(0, offset - 1);
+			case "pageDown":
+			case "space":
+				return offset + page;
+			case "pageUp":
+				return Math.max(0, offset - page);
+			case "g":
+			case "home":
+				return 0;
+			case "G":
+			case "end":
+				return Number.MAX_SAFE_INTEGER;
+			default:
+				return offset;
+		}
+	}
+
 	#handleModalInput(data: string, key: string | undefined): void {
 		const modal = this.#modal;
 		if (!modal) return;
@@ -2355,7 +2399,8 @@ export class DiagramScreen implements Component {
 			return;
 		}
 		if (modal.kind === "text") {
-			if (key === "escape") {
+			// The key sheet is read-only; only a request preview submits.
+			if (key === "escape" || (!this.#preview && (key === "enter" || key === "q" || key === "?"))) {
 				this.#modal = undefined;
 				this.#preview = undefined;
 				this.#options.tui.requestRender();
@@ -2365,18 +2410,17 @@ export class DiagramScreen implements Component {
 				this.#submitPreview();
 				return;
 			}
-			if (key === "c") {
-				this.#options.ui.setEditorText(this.#preview?.composed.prompt ?? modal.lines.join("\n"));
-				this.#message = "copied the payload into the prompt editor";
+			if (key === "c" && this.#preview) {
+				this.#options.ui.setEditorText(this.#preview.composed.prompt);
+				this.#message = "copied the request into the prompt editor";
 				this.#options.tui.requestRender();
 				return;
 			}
-			if (key === "w") {
+			if (key === "w" && this.#preview) {
 				void this.#exportPrompt(resolvePath(this.#options.cwd, PROJECT_DIR, "prompt.md"));
 				return;
 			}
-			if (key === "j" || key === "down") modal.offset = Math.min(modal.offset + 1, Math.max(0, modal.lines.length - 1));
-			if (key === "k" || key === "up") modal.offset = Math.max(0, modal.offset - 1);
+			modal.offset = this.#scrolled(modal.offset, key);
 			this.#options.tui.requestRender();
 			return;
 		}
@@ -2415,6 +2459,8 @@ export class DiagramScreen implements Component {
 				this.#rejectReview(modal.requestId);
 				return;
 			}
+			modal.offset = this.#scrolled(modal.offset, key);
+			this.#options.tui.requestRender();
 			return;
 		}
 		if (modal.kind === "confirm") {
@@ -2479,6 +2525,11 @@ export class DiagramScreen implements Component {
 	// Rendering
 	// ------------------------------------------------------------------
 
+	/**
+	 * Tabs are expanded at this one boundary: widths count a tab as three
+	 * columns, the terminal would jump to the next tab stop, and a cited file
+	 * indented with tabs would otherwise shear the whole screen.
+	 */
 	render(width: number): readonly string[] {
 		this.#lastWidth = width;
 		const rows = this.#options.tui.terminal.rows;
@@ -2492,7 +2543,7 @@ export class DiagramScreen implements Component {
 		lines.push(this.#renderStatus(width));
 		lines.push(panelBottom(this.#options.theme, width));
 		while (lines.length < rows) lines.push(" ".repeat(width));
-		return lines.slice(0, Math.max(1, rows));
+		return lines.slice(0, Math.max(1, rows)).map(line => (line.includes("\t") ? replaceTabs(line) : line));
 	}
 
 	#screenTitle(): string {
@@ -2513,17 +2564,18 @@ export class DiagramScreen implements Component {
 		return lines.slice(0, Math.max(1, rows));
 	}
 
+	/** Where you are: the outline follows the focused block, the map the diagram on screen. Keys live in the status line. */
 	#renderBreadcrumb(width: number): string {
-		if (this.#view === "outline") {
-			const hint = this.#pane === "inspector" ? "[Esc] outline   [v] map" : "[Enter] page   [v] map";
-			return truncateToWidth(` ${this.#focusPath().join(" › ")}   ${hint}`, width, Ellipsis.Unicode, true);
-		}
-		const parts = [this.#document.title];
-		for (const diagramId of this.#stack.slice(1)) {
-			parts.push(findOwnedDiagram(this.#document.root, diagramId)?.owner.title ?? "?");
-		}
-		const hint = this.#pane === "inspector" ? "[i] canvas" : "[i] inspector";
-		return truncateToWidth(` ${parts.join(" › ")}   ${hint}`, width, Ellipsis.Unicode, true);
+		const parts =
+			this.#view === "outline"
+				? this.#focusPath()
+				: [
+						this.#document.title,
+						...this.#stack.slice(1).map(diagramId => findOwnedDiagram(this.#document.root, diagramId)?.owner.title ?? "?"),
+					];
+		const theme = this.#options.theme;
+		const trail = parts.slice(0, -1).map(part => `${part} › `).join("");
+		return truncateToWidth(` ${theme.fg("muted", trail)}${theme.bold(parts.at(-1) ?? "")}`, width, Ellipsis.Unicode, true);
 	}
 
 	/** Document title, ancestors and the focused block. */
@@ -2597,18 +2649,28 @@ export class DiagramScreen implements Component {
 			const focused = block.id === this.#selected;
 			const twisty = row.hasChildren ? (row.collapsed ? "▸" : "▾") : " ";
 			const glyph = statusGlyph(purpose, block.status);
+			// Evidence is marked only where it tells you something: in an exploration every
+			// block should be cited, so the uncited ones are dimmed instead of the rest starred.
+			const uncited = purpose === "explore" && block.evidence !== "observed";
 			const badge =
-				purpose === "brainstorm" ? "" : block.evidence === "observed" ? " *" : block.evidence === "unknown" ? " ?" : "";
+				purpose === "brainstorm"
+					? ""
+					: block.evidence === "unknown"
+						? theme.fg("warning", " ?")
+						: block.evidence === "observed" && purpose === "plan"
+							? theme.fg("success", " *")
+							: "";
 			const marker =
 				pending && pendingBlock === block.id
 					? pending.state === "staged"
-						? theme.fg("accent", " ◆")
-						: theme.fg("accent", ` ${spinnerFrame()}`)
+						? theme.fg("accent", " ◆ review")
+						: theme.fg("accent", ` ${spinnerFrame()} working`)
 					: "";
 			const title = block.title.length > 0 ? block.title : "(untitled)";
+			const name = focused ? theme.bold(title) : uncited ? theme.fg("muted", title) : title;
 			const prefix = focused ? theme.fg("accent", "›") : " ";
-			const text = `${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${focused ? theme.bold(title) : title}${badge}${marker}`;
-			lines.push(truncateToWidth(text, width, Ellipsis.Unicode));
+			const text = truncateToWidth(`${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${name}${badge}${marker}`, width, Ellipsis.Unicode);
+			lines.push(focused ? theme.bg("selectedBg", pad(text, width)) : text);
 		}
 		return lines;
 	}
@@ -2660,116 +2722,160 @@ export class DiagramScreen implements Component {
 		return [...out.slice(0, limit - 1), theme.fg("muted", `… ${out.length - limit + 1} more lines — E opens it all`)];
 	}
 
+	/**
+	 * The focused block's page. Browsing the outline shows only what is written;
+	 * Enter opens every field with a cursor. Brainstorm ideas and unexplored
+	 * blocks browse as a walk instead, and open the same editable page.
+	 */
 	#pageLines(width: number, height: number): string[] {
 		const theme = this.#options.theme;
 		const document = this.#document;
 		const purpose = document.purpose;
 		const block = this.#block;
-		if (this.#walking(block)) return this.#walkLines(width, height);
-		const lines: string[] = [];
-		const wrap = (text: string, max: number): string[] => wrapTextWithAnsi(text, Math.max(1, width)).slice(0, max);
+		const editing = this.#pane === "inspector";
+		if (!editing && this.#walking(block)) return this.#walkLines(width, height);
 		const muted = (text: string): string => theme.fg("muted", text);
+		const lines: string[] = [];
 		if (!block) {
-			lines.push(theme.bold(document.title));
-			lines.push(muted(document.purpose));
-			lines.push("");
-			lines.push(muted("goal"));
-			lines.push(...(document.goal.trim().length > 0 ? wrap(document.goal.trim(), 6) : [muted("—")]));
-			lines.push("");
-			lines.push(progressLabel(document));
-			lines.push("");
-			const starts = projectActions(purpose).filter(action => action.kind === "draft" || action.kind === "discover");
-			lines.push(muted(`a  ${starts.map(action => action.label.toLowerCase()).join(" · ")}`));
-			return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode));
+			lines.push(`  ${theme.bold(document.title)}`, `  ${muted(`${purpose} · ${progressLabel(document)}`)}`);
+			if (document.goal.trim().length > 0) {
+				lines.push("", `  ${muted("goal")}`, ...wrapTextWithAnsi(document.goal.trim(), Math.max(1, width - 4)).slice(0, 6).map(line => `    ${line}`));
+			}
+			const actions = projectActions(purpose).map(action => action.label.toLowerCase());
+			lines.push("", ...wrapTextWithAnsi(muted(`a  ${actions.join(" · ")}`), Math.max(1, width - 2)).map(line => `  ${line}`));
+			return this.#withFooter(lines, this.#stepLines(undefined, width), width, height, 0);
 		}
 		const fields = this.#fields;
-		const current = fields[Math.min(this.#fieldIndex, Math.max(0, fields.length - 1))];
-		const active = this.#pane === "inspector";
+		const current = editing ? fields[Math.min(this.#fieldIndex, Math.max(0, fields.length - 1))] : undefined;
 		let focusLine = 0;
-		const label = (text: string, focused: boolean): string => {
+		const cursor = (focused: boolean): string => {
 			if (focused) focusLine = lines.length;
-			return focused ? `${theme.fg("accent", "›")} ${muted(text)}` : `  ${muted(text)}`;
+			return focused ? `${theme.fg("accent", "›")} ` : "  ";
 		};
-		const value = (text: string): string => `  ${text}`;
-		const empty = value(muted("—"));
-		lines.push(muted(this.#focusPath().join(" › ")));
-		lines.push(theme.bold(block.title.length > 0 ? block.title : "(untitled)"));
 		const status = statusLabel(purpose, block.status);
-		if (status !== undefined) lines.push(theme.fg("accent", status));
+		const badge = status === undefined ? "" : `  ${theme.fg("accent", `${statusGlyph(purpose, block.status)} ${status}`)}`;
+		lines.push(`${cursor(current === "title")}${theme.bold(block.title.length > 0 ? block.title : "(untitled)")}${badge}`);
+		if (!editing && purpose !== "brainstorm") {
+			const meta = [`${muted("evidence")} ${block.evidence}`];
+			if (purpose === "plan") meta.push(`${muted("venue")} ${venueOf(block)}`);
+			lines.push(`  ${meta.join("   ")}`);
+		}
 		lines.push("");
+		const missing: string[] = [];
 		for (const field of pageFields(purpose)) {
+			if (field === "title" || (!editing && (field === "evidence" || field === "venue"))) continue;
 			const name = fieldLabel(purpose, field);
 			if (field === "sources") {
-				lines.push(label(name, active && current !== undefined && current.startsWith("source")));
-				block.sources.forEach((source, index) => {
-					const focused = active && current === `source:${index}`;
-					lines.push(`${focused ? theme.fg("accent", " ›") : "  "}${formatSourceRef(source)}`);
-				});
-				if (block.sources.length === 0) lines.push(empty);
-				if (active) lines.push(`${current === "source:add" ? theme.fg("accent", " ›") : "  "}${muted("+ add")}`);
+				if (block.sources.length === 0 && !editing) continue;
+				lines.push(`  ${muted(name)}`);
+				block.sources.forEach((source, index) => lines.push(`${cursor(current === `source:${index}`)}  ${formatSourceRef(source)}`));
+				if (editing) lines.push(`${cursor(current === "source:add")}  ${muted("+ add a reference")}`);
 				continue;
 			}
-			lines.push(label(name, active && current === field));
-			const text =
-				field === "title"
-					? block.title
-					: field === "description"
-						? block.description
-						: field === "expectedOutput"
-							? block.expectedOutput
-							: field === "evidence"
-								? block.evidence
-								: field === "venue"
-									? (block.venue ?? "here")
-								: field === "enhance"
-									? block.actions.enhance
-									: field === "execute"
-										? block.actions.execute
-										: "";
-			if (field === "criteria") {
-				if (block.acceptanceCriteria.length === 0) lines.push(empty);
-				for (const criterion of block.acceptanceCriteria) lines.push(value(`• ${criterion}`));
-			} else if (text.trim().length === 0) {
-				lines.push(empty);
-			} else if (field === "description") {
-				lines.push(...this.#markdownLines(text.trim(), width - 2, 16).map(value));
-			} else if (field === "expectedOutput") {
-				lines.push(...wrapTextWithAnsi(text.trim(), Math.max(1, width - 2)).slice(0, 6).map(value));
-			} else {
-				lines.push(value(firstLine(text.trim())));
+			const body = this.#fieldBody(block, field, Math.max(1, width - 4));
+			if (body.length === 0 && !editing) {
+				if (purpose === "plan" && (field === "description" || field === "expectedOutput" || field === "criteria")) missing.push(name);
+				continue;
 			}
+			lines.push(`${cursor(current === field)}${muted(name)}`);
+			lines.push(...(body.length > 0 ? body : [muted("—")]).map(line => `    ${line}`));
 		}
-		lines.push("");
-		const children = block.children?.blocks ?? [];
-		const breakdown = verbsFor(purpose).find(verb => verb.id === "breakdown");
-		lines.push(
-			children.length > 0
-				? `Inside (${children.length}): ${children.slice(0, 8).map(child => child.title).join(" · ")}`
-				: muted(`Inside: nothing yet — O adds one${breakdown ? `, b ${breakdown.label.toLowerCase()}` : ""}`),
-		);
-		const edges = this.#diagram.edges.filter(edge => edge.from === block.id || edge.to === block.id);
-		if (edges.length > 0) {
-			lines.push("Relationships:");
-			for (const edge of edges) {
-				const outgoing = edge.from === block.id;
-				const other = this.#diagram.blocks.find(candidate => candidate.id === (outgoing ? edge.to : edge.from));
-				const name = edge.label.length > 0 ? ` "${edge.label}"` : "";
-				lines.push(value(`${outgoing ? "→" : "←"} ${other?.title ?? "?"}${name}`));
-			}
+		if (missing.length > 0) lines.push("", `  ${muted(`not written yet: ${missing.join(" · ")}`)}`);
+		lines.push(...this.#neighbourLines(block, false));
+		return this.#withFooter(lines, this.#stepLines(block, width), width, height, focusLine);
+	}
+
+	/** A field's value as page lines; none when it is empty. */
+	#fieldBody(block: Block, field: PageField, width: number): string[] {
+		const theme = this.#options.theme;
+		const wrap = (text: string, max: number): string[] => (text.trim().length === 0 ? [] : wrapTextWithAnsi(text.trim(), width).slice(0, max));
+		const choices = (values: readonly string[], chosen: string): string[] => [
+			values.map(value => (value === chosen ? theme.fg("accent", `[${value}]`) : theme.fg("muted", value))).join("  "),
+		];
+		switch (field) {
+			case "description":
+				return block.description.trim().length === 0 ? [] : this.#markdownLines(block.description.trim(), width, 16);
+			case "expectedOutput":
+				return wrap(block.expectedOutput, 6);
+			case "criteria":
+				return block.acceptanceCriteria.flatMap(criterion => wrapTextWithAnsi(`• ${criterion}`, width));
+			case "evidence":
+				return choices(EVIDENCE_VALUES, block.evidence);
+			case "venue":
+				return choices(VENUES, venueOf(block));
+			case "enhance":
+				return wrap(block.actions.enhance, 3);
+			case "execute":
+				return wrap(block.actions.execute, 3);
+			default:
+				return [];
 		}
+	}
+
+	/** A block's first citation for one line: `path:10-40 +2`, or why there is none. */
+	#citeLabel(block: Block): string {
+		const source = block.sources[0];
+		if (source) return formatSourceRef(source) + (block.sources.length > 1 ? ` +${block.sources.length - 1}` : "");
+		return this.#document.purpose === "explore" ? `not cited · ${block.evidence}` : "";
+	}
+
+	/** What is inside the block and what it is linked to; grounded mode drops uncited blocks. */
+	#neighbourLines(block: Block, cite: boolean): string[] {
+		const theme = this.#options.theme;
+		const purpose = this.#document.purpose;
+		const muted = (text: string): string => theme.fg("muted", text);
+		const shown = (candidate: Block): boolean => !this.#grounded || candidate.evidence === "observed";
+		const name = (candidate: Block): string => {
+			const title = candidate.title.length > 0 ? candidate.title : "(untitled)";
+			const glyph = statusGlyph(purpose, candidate.status);
+			const reference = cite ? this.#citeLabel(candidate) : "";
+			const text = purpose === "explore" && candidate.evidence !== "observed" ? muted(title) : title;
+			return `${glyph.length > 0 ? `${glyph} ` : ""}${text}${reference.length > 0 ? `  ${muted(reference)}` : ""}`;
+		};
+		const lines: string[] = [];
+		const inside = (block.children?.blocks ?? []).filter(shown);
+		if (inside.length > 0) {
+			lines.push("", `  ${muted(`inside (${inside.length})`)}`, ...inside.slice(0, 12).map(child => `    ${name(child)}`));
+			if (inside.length > 12) lines.push(`    ${muted(`… ${inside.length - 12} more`)}`);
+		}
+		const linked = this.#diagram.edges.flatMap(edge => {
+			const inbound = edge.to === block.id;
+			const otherId = edge.from === block.id ? edge.to : inbound ? edge.from : undefined;
+			const other = otherId === undefined ? undefined : this.#diagram.blocks.find(candidate => candidate.id === otherId);
+			if (!other || !shown(other)) return [];
+			return [`    ${inbound ? "←" : "→"} ${name(other)}${edge.label.length > 0 ? muted(` · ${edge.label}`) : ""}`];
+		});
+		if (linked.length > 0) lines.push("", `  ${muted("linked")}`, ...linked);
+		return lines;
+	}
+
+	/** The one next step for the focused block, pinned under both the page and the walk. */
+	#stepLines(block: Block | undefined, width: number): string[] {
+		const theme = this.#options.theme;
 		const step = nextStep(this.#document, block);
-		const keys = [
-			...verbsFor(purpose).map(verb => `${verb.key} ${verb.label.toLowerCase()}`),
-			...(purpose === "brainstorm" ? [] : ["space status"]),
-			"n next open",
-		].join("   ");
-		const room = Math.max(1, height - 2);
-		const start = focusLine >= room ? focusLine - room + 2 : 0;
-		const visible = lines.slice(start, start + room);
+		return wrapTextWithAnsi(`${theme.fg("accent", `→ ${step.label}`)}  ${theme.fg("muted", step.detail)}`, Math.max(1, width)).slice(0, 2);
+	}
+
+	/**
+	 * Pin `footer` to the bottom of a pane; the body scrolls so `focusLine` stays
+	 * on screen. Sections open with a blank line whether or not the one before
+	 * them rendered, so runs of blanks collapse to one here.
+	 */
+	#withFooter(lines: string[], footer: string[], width: number, height: number, focusLine: number): string[] {
+		const body: string[] = [];
+		let focus = focusLine;
+		lines.forEach((line, index) => {
+			if (line.length === 0 && (body.length === 0 || body.at(-1)!.length === 0)) {
+				if (index < focusLine) focus -= 1;
+				return;
+			}
+			body.push(line);
+		});
+		const room = Math.max(1, height - footer.length - 1);
+		const start = focus >= room ? focus - room + 1 : 0;
+		const visible = body.slice(start, start + room);
 		while (visible.length < room) visible.push("");
-		visible.push(muted(`${step.label} — ${step.detail}`));
-		visible.push(muted(keys));
-		return visible.slice(0, height).map(line => truncateToWidth(line, width, Ellipsis.Unicode));
+		return [...visible, "", ...footer].slice(0, height).map(line => truncateToWidth(line, width, Ellipsis.Unicode));
 	}
 
 	#walking(block: Block | undefined): boolean {
@@ -2778,43 +2884,34 @@ export class DiagramScreen implements Component {
 		return purpose === "explore" && (block === undefined || block.status === "open");
 	}
 
+	/** The walk: the focused block, its citation and note, then what is inside and linked. */
 	#walkLines(width: number, height: number): string[] {
 		const theme = this.#options.theme;
-		const purpose = this.#document.purpose;
+		const document = this.#document;
+		const purpose = document.purpose;
 		const block = this.#block;
-		const shown = (candidate: Block): boolean => !this.#grounded || candidate.evidence === "observed";
-		const cite = (candidate: Block): string => {
-			const source = candidate.sources[0];
-			if (!source) return purpose === "explore" && candidate.evidence !== "observed" ? candidate.evidence : "";
-			return formatSourceRef(source) + (candidate.sources.length > 1 ? ` +${candidate.sources.length - 1}` : "");
-		};
-		const lines = [theme.fg("muted", `${purpose} / walk${this.#grounded ? " · grounded" : ""}`)];
+		const muted = (text: string): string => theme.fg("muted", text);
+		const lines: string[] = [];
 		if (!block) {
-			lines.push(theme.bold(this.#document.title), "", theme.fg("muted", "O dumps an idea inside the focused block"));
-			return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode)).slice(0, height);
+			lines.push(`  ${theme.bold(document.title)}`);
+			if (document.goal.trim().length > 0) lines.push(...wrapTextWithAnsi(muted(document.goal.trim()), Math.max(1, width - 2)).slice(0, 4).map(line => `  ${line}`));
+			lines.push("", `  ${muted(purpose === "brainstorm" ? "o dumps an idea; j moves onto one" : "j moves onto the first block")}`);
+			return this.#withFooter(lines, this.#stepLines(undefined, width), width, height, 0);
 		}
-		lines.push(theme.bold(block.title || "(untitled)"));
-		const citation = cite(block);
-		if (citation) lines.push(theme.fg(block.evidence === "observed" ? "accent" : "muted", citation));
-		lines.push(...this.#citationLines(block, width));
-		if (block.description.trim()) lines.push(...this.#markdownLines(block.description.trim(), width, 6));
-		const inside = (block.children?.blocks ?? []).filter(shown);
-		if (inside.length === 0) lines.push(theme.fg("muted", this.#grounded ? "  nothing cited" : "  nothing yet — O dumps one"));
-		for (const child of inside) {
-			const title = child.title.length > 0 ? child.title : "(untitled)";
-			lines.push(truncateToWidth(`  ${title}  ${cite(child)}`, width, Ellipsis.Unicode));
+		const status = statusLabel(purpose, block.status);
+		const badge = status === undefined ? "" : `  ${theme.fg("accent", `${statusGlyph(purpose, block.status)} ${status}`)}`;
+		lines.push(`  ${theme.bold(block.title.length > 0 ? block.title : "(untitled)")}${badge}`);
+		const reference = this.#citeLabel(block);
+		if (reference.length > 0) lines.push(`  ${theme.fg(block.sources.length > 0 ? "accent" : "muted", reference)}`);
+		lines.push(...this.#citationLines(block, Math.max(12, width - 2)).map(line => `  ${line}`));
+		if (block.description.trim().length > 0) {
+			lines.push("", ...this.#markdownLines(block.description.trim(), Math.max(1, width - 2), 6).map(line => `  ${line}`));
 		}
-		const next = this.#diagram.edges.flatMap(edge => {
-			const otherId = edge.from === block.id ? edge.to : edge.to === block.id ? edge.from : undefined;
-			const other = otherId ? this.#diagram.blocks.find(candidate => candidate.id === otherId) : undefined;
-			return other && shown(other)
-				? [truncateToWidth(`  ${edge.to === block.id ? "from" : "next"} ${other.title}${edge.label ? ` · ${edge.label}` : ""}`, width, Ellipsis.Unicode)]
-				: [];
-		});
-		lines.push("", theme.fg("muted", "next"), ...(next.length > 0 ? next : [theme.fg("muted", "  no relationships")]));
-		if (purpose === "explore") lines.push("", theme.fg("muted", "enter opens the cited source   g grounded   space marks explored"));
-		lines.push("", theme.fg("accent", nextStep(this.#document, block).detail));
-		return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode)).slice(0, height);
+		lines.push(...this.#neighbourLines(block, purpose === "explore"));
+		if (purpose === "brainstorm" && (block.children?.blocks.length ?? 0) === 0) {
+			lines.push("", `  ${muted("nothing inside yet — O dumps a line onto it")}`);
+		}
+		return this.#withFooter(lines, this.#stepLines(block, width), width, height, 0);
 	}
 
 	#canvasLines(width: number, height: number): string[] {
@@ -2907,164 +3004,181 @@ export class DiagramScreen implements Component {
 		grid.put(x, y + 1, box.vertical, border);
 		grid.put(x, y + 2, box.vertical, border);
 		grid.put(x, y + 3, box.bottomLeft + box.horizontal.repeat(Math.max(0, rect.w - 2)) + box.bottomRight, border);
+		// Status sits on the top border; evidence and "has inside" use the right padding cell,
+		// so the title keeps the full width `cardWidth` reserved for it.
+		const glyph = statusGlyph(this.#document.purpose, block.status);
+		if (glyph.length > 0) grid.put(x + 1, y, glyph, border);
 		const badge = block.evidence === "unknown" ? "?" : block.evidence === "observed" ? "*" : "";
 		const badgeStyle: StyleKey = block.evidence === "unknown" ? "unknown" : block.evidence === "observed" ? "observed" : "plain";
-		const title = truncateToWidth(block.title.length > 0 ? block.title : "(untitled)", Math.max(0, rect.w - 4 - badge.length));
+		const title = truncateToWidth(block.title.length > 0 ? block.title : "(untitled)", Math.max(0, rect.w - 4));
 		grid.put(x + 2, y + 1, title, selected ? "titleSelected" : "title");
-		if (badge.length > 0) grid.put(x + 2 + visibleWidth(title), y + 1, badge, badgeStyle);
-		const description = truncateToWidth(block.description.replaceAll("\n", " "), Math.max(0, rect.w - 4));
+		if (badge.length > 0) grid.put(x + rect.w - 2, y + 1, badge, badgeStyle);
+		const description = truncateToWidth(block.description.replace(/\s+/g, " ").trim(), Math.max(0, rect.w - 4));
 		grid.put(x + 2, y + 2, description, selected ? "mutedSelected" : "muted");
 		if (block.children && block.children.blocks.length > 0) {
-			grid.put(x + rect.w - 3, y + 2, "▸", selected ? "borderSelected" : "muted");
+			grid.put(x + rect.w - 2, y + 2, "▸", selected ? "borderSelected" : "muted");
 		}
 	}
 
+	/** The map's side panel: the same page the outline shows for a block, or a relationship's own fields. */
 	#inspectorLines(width: number, height: number): string[] {
+		const edge = this.#edge;
+		if (!edge) {
+			if (this.#block) return this.#pageLines(width, height);
+			return [this.#options.theme.fg("muted", "nothing selected")];
+		}
+		const theme = this.#options.theme;
 		const fields = this.#fields;
 		const index = Math.min(this.#fieldIndex, Math.max(0, fields.length - 1));
-		const lines: string[] = [];
-		const edge = this.#edge;
-		const block = this.#block;
-		lines.push(
-			truncateToWidth(
-				edge
-					? `relationship ${edge.from} -> ${edge.to}`
-					: block
-						? `block ${block.title || block.id}`
-						: "nothing selected",
-				width,
-				Ellipsis.Unicode,
-			),
-		);
-		lines.push("");
-		for (let fieldIndex = 0; fieldIndex < fields.length; fieldIndex += 1) {
-			const marker = this.#pane === "inspector" && fieldIndex === index ? ">" : " ";
-			lines.push(truncateToWidth(`${marker} ${this.#fieldText(fields[fieldIndex]!)}`, width));
-		}
-		while (lines.length < Math.max(0, height - 1)) lines.push("");
-		lines.push(
-			truncateToWidth(
-				this.#pane === "inspector"
-					? "j/k field  Enter open  o +source  m edit  d remove"
-					: "i  focus the inspector",
-				width,
-				Ellipsis.Unicode,
-			),
-		);
-		return lines.slice(0, height);
+		const name = (id: string): string => this.#diagram.blocks.find(block => block.id === id)?.title || id;
+		const values: Record<string, [string, string]> = {
+			"edge:label": ["label", edge.label.length > 0 ? edge.label : "—"],
+			"edge:direction": ["direction", edge.direction],
+			"edge:routing": ["routing", edge.routing],
+			"edge:fromPort": ["from port", edge.fromPort],
+			"edge:toPort": ["to port", edge.toPort],
+		};
+		const lines = [theme.bold(`${name(edge.from)} → ${name(edge.to)}`), theme.fg("muted", "relationship"), ""];
+		fields.forEach((field, fieldIndex) => {
+			const [label, value] = values[field] ?? [field, ""];
+			const focused = this.#pane === "inspector" && fieldIndex === index;
+			lines.push(`${focused ? theme.fg("accent", "›") : " "} ${theme.fg("muted", `${label}:`)} ${value}`);
+		});
+		return lines.map(line => truncateToWidth(line, width, Ellipsis.Unicode)).slice(0, height);
 	}
 
-	#fieldText(field: FieldId): string {
-		const block = this.#block;
-		const edge = this.#edge;
-		if (field === "title") return `title: ${block?.title ?? ""}`;
-		if (field === "description") return `${this.#labelOf(field)}: ${firstLine(block?.description ?? "")}`;
-		if (field === "expectedOutput") return `${this.#labelOf(field)}: ${firstLine(block?.expectedOutput ?? "")}`;
-		if (field === "criteria") {
-			return `${this.#labelOf(field)}: ${block?.acceptanceCriteria.length ?? 0} item(s) ${firstLine(block?.acceptanceCriteria[0] ?? "")}`;
-		}
-		if (field === "evidence") return `evidence: ${block?.evidence ?? ""}`;
-		if (field === "venue") return `venue: ${block?.venue ?? "here"}`;
-		if (field === "enhance") return `${this.#labelOf(field)}: ${firstLine(block?.actions.enhance ?? "")}`;
-		if (field === "execute") return `${this.#labelOf(field)}: ${firstLine(block?.actions.execute ?? "")}`;
-		if (field === "children") return `subsystem: ${block?.children?.blocks.length ?? 0} block(s), Enter to enter`;
-		if (field === "source:add") return `+ add to ${this.#labelOf(field)}`;
-		if (field.startsWith("source:")) {
-			const source = block?.sources[Number(field.slice("source:".length))];
-			return `${this.#labelOf(field)}: ${source ? formatSourceRef(source) : ""}`;
-		}
-		if (field === "edge:label") return `label: ${edge?.label ?? ""}`;
-		if (field === "edge:direction") return `direction: ${edge?.direction ?? ""}`;
-		if (field === "edge:routing") return `routing: ${edge?.routing ?? ""}`;
-		if (field === "edge:fromPort") return `from port: ${edge?.fromPort ?? ""}`;
-		return `to port: ${edge?.toPort ?? ""}`;
-	}
-
+	/**
+	 * One status line: where you are, what the agent is doing, then the last
+	 * message — or, when there is none, the keys that work right now.
+	 */
 	#renderStatus(width: number): string {
-		const segments =
-			this.#view === "outline"
-				? ["outline", progressLabel(this.#document)]
-				: [
-						this.#pane,
-						`rev ${this.#document.revision}${this.#options.store.dirty ? "*" : ""}`,
-						`blocks ${this.#diagram.blocks.length}`,
-						`unknown ${this.#diagram.blocks.filter(block => block.evidence === "unknown").length}`,
-					];
-		if (this.#stagedEntry()) segments.push("proposal staged [R]");
+		const theme = this.#options.theme;
+		const document = this.#document;
+		const segments: string[] = [];
+		if (this.#view === "outline") {
+			if (this.#pane === "canvas" && this.#walking(this.#block)) segments.push(this.#grounded ? "walk · grounded" : "walk");
+			segments.push(progressLabel(document));
+		} else {
+			const blocks = this.#diagram.blocks;
+			const unknown = blocks.filter(block => block.evidence === "unknown").length;
+			segments.push(`map · ${blocks.length} block${blocks.length === 1 ? "" : "s"}${unknown > 0 ? ` · ${unknown} unknown` : ""}`);
+		}
+		if (this.#stagedEntry()) segments.push(theme.fg("accent", "◆ proposal ready — R reviews"));
 		const working = this.#working();
-		if (working) segments.push(`${spinnerFrame()} agent working ${elapsedClock(working.createdAt)}`);
-		const message = this.#message.length > 0 ? `   ${this.#message}` : "";
-		return truncateToWidth(` ${segments.join("  ")}${message}`, width, Ellipsis.Unicode, true);
+		if (working) segments.push(theme.fg("accent", `${spinnerFrame()} agent working ${elapsedClock(working.createdAt)}`));
+		const tail = this.#message.length > 0 ? this.#message : theme.fg("muted", this.#keyHints());
+		return truncateToWidth(` ${segments.join("  ")}   ${tail}`, width, Ellipsis.Unicode, true);
+	}
+
+	/** The keys that do something in the current context, most useful first; `?` lists the rest. */
+	#keyHints(): string {
+		// A dialog pins its own keys at its foot.
+		if (this.#modal) return "";
+		if (this.#sourceView) return "j/k scroll  PgUp/PgDn page  g/G ends  Esc back";
+		if (this.#linkFrom !== undefined) return "arrows or Tab pick the target  Enter links  Esc cancels";
+		const purpose = this.#document.purpose;
+		if (this.#view === "canvas") {
+			return this.#pane === "inspector"
+				? "? keys  j/k field  Enter edit  i back to the map"
+				: "? keys  arrows select  Enter inside  Backspace up  H/J/K/L move  o add  e link  i inspect  v outline";
+		}
+		if (this.#pane === "inspector") return "? keys  j/k field  Enter edit  E whole block in $EDITOR  Esc back";
+		const block = this.#block;
+		// Most specific first: the status line is cut from the right on narrow terminals.
+		const hints = ["? keys"];
+		if (this.#walking(block) && block?.sources[0]) hints.push("Enter source  i edit");
+		else hints.push("Enter edit");
+		if (purpose === "brainstorm") hints.push("O dump a line");
+		if (purpose === "plan") hints.push("space status");
+		if (purpose === "explore") hints.push("space explored", `g ${this.#grounded ? "all claims" : "grounded"}`);
+		hints.push(...verbsFor(purpose).map(verb => `${verb.key} ${verb.label.toLowerCase()}`));
+		if (purpose !== "brainstorm") hints.push("o/O add");
+		hints.push("v map");
+		return hints.join("  ");
 	}
 
 	#renderOverlayBody(width: number, layout: Layout): string[] {
 		const height = layout.bodyHeight;
-		// The diagram stays visible behind a modal: you edit a block while still
-		// seeing where it sits.
-		const lines = this.#renderBody(width, layout).slice();
-		while (lines.length < height) lines.push(" ".repeat(width));
-		const content: string[] = [];
 		const theme = this.#options.theme;
+		// The page stays visible behind a dialog, dimmed, so you still see where you are
+		// without mistaking it for part of the dialog.
+		const lines = this.#renderBody(width, layout).map(line => theme.fg("dim", stripTerminalSequences(line)));
+		while (lines.length < height) lines.push(" ".repeat(width));
 		const modal = this.#modal;
+		let boxWidth = Math.min(width, 100);
+		let title = "";
+		let content: string[] = [];
+		let footer: string | undefined;
+		/** The slice of `all` that fits above the footer, starting at `offset` clamped to the end. */
+		const scroll = (all: string[], offset: number): { lines: string[]; offset: number } => {
+			const room = Math.max(1, Math.min(height, 100) - 2 - (footer === undefined ? 0 : 2));
+			const start = Math.min(offset, Math.max(0, all.length - room));
+			return { lines: all.slice(start, start + room), offset: start };
+		};
 
 		if (this.#sourceView && !modal) {
+			boxWidth = width;
 			const view = this.#sourceView;
 			if (view.error) {
-				this.#modalTitle = `source: ${view.title} — Esc returns`;
-				content.push(...wrapTextWithAnsi(view.error, Math.max(10, width - 6)).map(line => theme.fg("error", line)));
+				title = `source: ${view.title}`;
+				content = wrapTextWithAnsi(view.error, Math.max(10, boxWidth - 4)).map(line => theme.fg("error", line));
 			} else {
 				const visible = Math.max(1, Math.min(height, 100) - 2);
 				view.offset = Math.min(view.offset, Math.max(0, view.lines.length - visible));
 				const last = Math.min(view.lines.length, view.offset + visible);
-				this.#modalTitle = `source: ${view.title} · ${view.offset + 1}-${last}/${view.lines.length} — j/k PgUp/PgDn g/G Esc`;
+				title = `source: ${view.title} · ${view.offset + 1}-${last}/${view.lines.length}`;
 				const code = view.lines.slice(view.offset, last).join("\n");
-				content.push(...renderSourceLines(theme, code, view.path ?? view.source.path, view.offset + 1, Math.max(10, Math.min(width, 120) - 4)));
+				content = renderSourceLines(theme, code, view.path ?? view.source.path, view.offset + 1, Math.max(10, boxWidth - 4));
 			}
 		} else if (modal?.kind === "edit") {
-			this.#modalTitle = modal.title;
-			content.push(...modal.editor.render(Math.max(10, Math.min(width, 100) - 4)));
+			title = modal.title;
+			content = [...modal.editor.render(Math.max(10, boxWidth - 4))];
 		} else if (modal?.kind === "text") {
-			this.#modalTitle = modal.title;
-			const visible = Math.max(1, Math.min(height, 100) - 2);
-			const start = Math.min(modal.offset, Math.max(0, modal.lines.length - visible));
-			for (let index = start; index < Math.min(modal.lines.length, start + visible); index += 1) {
-				content.push(modal.lines[index] ?? "");
-			}
+			boxWidth = Math.min(width, 110);
+			title = modal.title;
+			footer = this.#preview
+				? "Enter submit  c copy to the prompt editor  w export markdown  j/k PgUp/PgDn scroll  Esc back"
+				: "j/k scroll  Esc close";
+			const wrapped = modal.lines.flatMap(line => (line.length === 0 ? [""] : wrapTextWithAnsi(line, Math.max(10, boxWidth - 4))));
+			const shown = scroll(wrapped, modal.offset);
+			modal.offset = shown.offset;
+			content = shown.lines;
 		} else if (modal?.kind === "list") {
-			this.#modalTitle = modal.title;
-			for (let index = 0; index < modal.items.length; index += 1) {
-				const marker = index === modal.index ? ">" : " ";
-				content.push(theme.fg(index === modal.index ? "accent" : "text", `${marker} ${modal.items[index]}`));
-			}
-			content.push("");
-			content.push(theme.fg("muted", modal.footer));
+			title = modal.title;
+			footer = modal.footer;
+			content = modal.items.map((item, index) => theme.fg(index === modal.index ? "accent" : "text", `${index === modal.index ? "›" : " "} ${item}`));
 		} else if (modal?.kind === "review") {
-			this.#modalTitle = "review proposal";
-			content.push(...this.#diffLines(modal, Math.max(10, width - 6)));
+			boxWidth = Math.min(width, 110);
+			title = "review proposal";
+			footer =
+				modal.error === undefined
+					? "Enter accept  r reject  j/k scroll  Esc later — an accepted proposal stays unsaved until s"
+					: "r reject  Esc later";
+			const shown = scroll(this.#diffLines(modal, Math.max(10, boxWidth - 4)), modal.offset);
+			modal.offset = shown.offset;
+			content = shown.lines;
 		} else if (modal?.kind === "confirm") {
-			this.#modalTitle = modal.title;
-			content.push(...wrapTextWithAnsi(modal.message, Math.max(10, width - 6)));
-			content.push("");
-			content.push(theme.fg("accent", `Enter / ${modal.confirmLabel}      Esc cancel`));
+			title = modal.title;
+			footer = `Enter ${modal.confirmLabel}  Esc cancel`;
+			content = wrapTextWithAnsi(modal.message, Math.max(10, boxWidth - 4));
 		} else if (modal?.kind === "close") {
-			this.#modalTitle = "unsaved changes";
-			content.push("The authored document has unsaved changes.");
-			content.push("");
-			const choices = ["Save", "Discard", "Cancel"];
-			for (let index = 0; index < choices.length; index += 1) {
-				const marker = index === modal.index ? ">" : " ";
-				content.push(theme.fg(index === modal.index ? "accent" : "text", `${marker} ${choices[index]}`));
-			}
+			title = "unsaved changes";
+			footer = "j/k choose  Enter confirm  Esc cancel";
+			content = [
+				"The authored document has unsaved changes.",
+				"",
+				...["Save", "Discard", "Cancel"].map((choice, index) =>
+					theme.fg(index === modal.index ? "accent" : "text", `${index === modal.index ? "›" : " "} ${choice}`),
+				),
+			];
 		}
 
-		const boxWidth = Math.min(width, 100);
-		const boxHeight = Math.max(3, Math.min(height, content.length + 2, 100));
+		const body = footer === undefined ? content : [...content, "", theme.fg("muted", footer)];
+		const boxHeight = Math.max(3, Math.min(height, body.length + 2, 100));
 		const top = Math.max(0, Math.floor((height - boxHeight) / 2));
 		const left = Math.max(0, Math.floor((width - boxWidth) / 2));
-		const box: string[] = [panelTop(theme, boxWidth, this.#modalTitle ?? "", "borderAccent")];
-		for (let index = 0; index < boxHeight - 2; index += 1) {
-			box.push(panelRow(theme, content[index] ?? "", boxWidth));
-		}
+		const box: string[] = [panelTop(theme, boxWidth, title, "borderAccent")];
+		for (let index = 0; index < boxHeight - 2; index += 1) box.push(panelRow(theme, body[index] ?? "", boxWidth));
 		box.push(panelBottom(theme, boxWidth));
 		for (let index = 0; index < box.length; index += 1) {
 			const row = top + index;
@@ -3078,27 +3192,67 @@ export class DiagramScreen implements Component {
 		return lines.slice(0, height);
 	}
 
+	/** The review: what the proposal rewrites, adds and removes, with the text before and after. */
 	#diffLines(modal: ReviewModal, width: number): string[] {
 		const theme = this.#options.theme;
-		const lines: string[] = [theme.bold(modal.entry.label), `proposal: ${modal.entry.proposal?.summary ?? ""}`, ""];
-		if (modal.error) {
-			lines.push(theme.fg("error", modal.error));
-			lines.push("");
-			lines.push(theme.fg("muted", "r reject      Esc later"));
-			return lines.map(line => truncateToWidth(line, width));
-		}
-		const diff = modal.diff;
-		if (diffIsEmpty(diff)) lines.push(theme.fg("muted", "the replacement is structurally identical to the document"));
-		if (diff.titleChanged) lines.push(`title: ${diff.titleChanged.from} -> ${diff.titleChanged.to}`);
-		if (diff.goalChanged) lines.push(`goal: ${diff.goalChanged.from} -> ${diff.goalChanged.to}`);
-		for (const entry of diff.added) lines.push(theme.fg("success", `+ block ${entry.title} [${entry.id}] in ${entry.path}`));
-		for (const entry of diff.removed) lines.push(theme.fg("error", `- block ${entry.title} [${entry.id}] in ${entry.path}`));
-		for (const entry of diff.modified) lines.push(theme.fg("warning", `~ block ${entry.title} [${entry.id}]: ${entry.fields.join(", ")}`));
-		for (const entry of diff.edgesAdded) lines.push(theme.fg("success", `+ ${entry}`));
-		for (const entry of diff.edgesRemoved) lines.push(theme.fg("error", `- ${entry}`));
-		for (const entry of diff.edgesModified) lines.push(theme.fg("warning", `~ ${entry}`));
+		const purpose = this.#document.purpose;
+		const muted = (text: string): string => theme.fg("muted", text);
+		const lines: string[] = [theme.bold(modal.entry.label)];
+		const summary = modal.entry.proposal?.summary ?? "";
+		if (summary.length > 0) lines.push(...wrapTextWithAnsi(summary, width));
 		lines.push("");
-		lines.push(theme.fg("muted", "Enter accept   r reject   Esc later   accepted edits stay unsaved until you press s"));
+		if (modal.error) return [...lines, ...wrapTextWithAnsi(theme.fg("error", modal.error), width)];
+		const diff = modal.diff;
+		if (diffIsEmpty(diff)) return [...lines, muted("no change: the proposal matches the document")];
+		const where = (path: string): string => (path === "root" ? "" : muted(`  in ${path.replace(/^root > /, "").replaceAll(" > ", " › ")}`));
+		/** Lines only before are removed, lines only after are added; unchanged lines are counted, not repeated. */
+		const change = (label: string, from: string, to: string): string[] => {
+			const before = from.split("\n").filter(line => line.trim().length > 0);
+			const after = to.split("\n").filter(line => line.trim().length > 0);
+			const wrap = (sign: string, line: string): string[] => wrapTextWithAnsi(`${sign} ${line}`, Math.max(10, width - 6)).map(part => `      ${part}`);
+			const out = [`    ${muted(label)}`];
+			for (const line of before.filter(line => !after.includes(line))) out.push(...wrap("-", line).map(part => theme.fg("error", part)));
+			for (const line of after.filter(line => !before.includes(line))) out.push(...wrap("+", line).map(part => theme.fg("success", part)));
+			const kept = after.filter(line => before.includes(line)).length;
+			if (kept > 0) out.push(`      ${muted(`${kept} unchanged`)}`);
+			if (before.length === 0) out.splice(1, 0, `      ${muted("was empty")}`);
+			if (after.length === 0) out.push(`      ${muted("now empty")}`);
+			return out;
+		};
+		const labels: Record<DiffField, string> = {
+			title: "title",
+			description: fieldLabel(purpose, "description"),
+			expectedOutput: fieldLabel(purpose, "expectedOutput"),
+			acceptanceCriteria: fieldLabel(purpose, "criteria"),
+			sources: fieldLabel(purpose, "sources"),
+			evidence: "evidence",
+			actions: "agent notes",
+			position: "position on the map",
+		};
+		if (diff.titleChanged || diff.goalChanged) {
+			lines.push(theme.bold("document"));
+			if (diff.titleChanged) lines.push(...change("title", diff.titleChanged.from, diff.titleChanged.to));
+			if (diff.goalChanged) lines.push(...change("goal", diff.goalChanged.from, diff.goalChanged.to));
+			lines.push("");
+		}
+		for (const entry of diff.modified) {
+			lines.push(`${theme.fg("warning", "~")} ${theme.bold(entry.title)}${where(entry.path)}`);
+			for (const item of entry.changes) lines.push(...change(labels[item.field], item.from, item.to));
+			lines.push("");
+		}
+		if (diff.added.length > 0) {
+			lines.push(theme.bold(`added (${diff.added.length})`), ...diff.added.map(entry => `  ${theme.fg("success", `+ ${entry.title}`)}${where(entry.path)}`), "");
+		}
+		if (diff.removed.length > 0) {
+			lines.push(theme.bold(`removed (${diff.removed.length})`), ...diff.removed.map(entry => `  ${theme.fg("error", `- ${entry.title}`)}${where(entry.path)}`), "");
+		}
+		const links = [
+			...diff.edgesAdded.map(edge => theme.fg("success", `+ ${edge}`)),
+			...diff.edgesRemoved.map(edge => theme.fg("error", `- ${edge}`)),
+			...diff.edgesModified.map(edge => theme.fg("warning", `~ ${edge}`)),
+		];
+		if (links.length > 0) lines.push(theme.bold("links"), ...links.map(line => `  ${line}`), "");
+		while (lines.at(-1) === "") lines.pop();
 		return lines.map(line => truncateToWidth(line, width));
 	}
 }
@@ -3120,10 +3274,6 @@ function spinnerFrame(now = Date.now()): string {
 function elapsedClock(since: string, now = Date.now()): string {
 	const seconds = Math.max(0, Math.floor((now - Date.parse(since)) / 1000));
 	return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-}
-
-function firstLine(text: string): string {
-	return text.split("\n")[0] ?? "";
 }
 
 function pad(text: string, width: number): string {

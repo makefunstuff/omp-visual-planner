@@ -671,31 +671,7 @@
                 "enhance": "",
                 "execute": ""
               },
-              "children": {
-                "id": "b086907e-2542-4339-80af-9b1256a68cfd",
-                "blocks": [
-                  {
-                    "id": "74b40a5d-43e4-44ce-b00d-33b9b05de4d2",
-                    "title": "New block",
-                    "description": "",
-                    "expectedOutput": "",
-                    "acceptanceCriteria": [],
-                    "position": {
-                      "x": 2,
-                      "y": 2
-                    },
-                    "sources": [],
-                    "evidence": "inferred",
-                    "status": "open",
-                    "actions": {
-                      "enhance": "",
-                      "execute": ""
-                    },
-                    "children": null
-                  }
-                ],
-                "edges": []
-              }
+              "children": null
             },
             {
               "id": "ui-screen",

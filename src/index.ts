@@ -308,8 +308,8 @@ function submitRequest(
 		ok: true,
 		message:
 			request.kind === "execute"
-				? `execution request ${request.requestId} submitted (${request.label}); the diagram will not change by itself`
-				: `request ${request.requestId} submitted (${request.label}); it is not complete until a proposal is reviewed`,
+				? `sent to the agent: ${request.label}. The plan does not change by itself; mark the block done once you have checked the work.`
+				: `sent to the agent: ${request.label}. Its proposal comes back for your review; nothing changes until you accept it.`,
 	};
 }
 
