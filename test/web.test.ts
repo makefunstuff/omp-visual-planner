@@ -110,6 +110,21 @@ describe("web mode access", () => {
 });
 
 describe("web mode editing", () => {
+	test("surface is set and cleared from the page, and nothing else is accepted", async () => {
+		const { op, store } = await harness();
+		expect((await op({ op: "patchBlock", id: "api", fields: { surface: "page" } })).status).toBe(200);
+		expect(findBlockLocation(store.require().root, "api")!.block.surface).toBe("page");
+
+		const bad = await op({ op: "patchBlock", id: "api", fields: { surface: "modal" } });
+		expect(bad.status).toBe(400);
+		/** Our own server's error envelope; `{ error: string }` is the op API's shape. */
+		const refusal = (await bad.json()) as { error: string };
+		expect(refusal.error).toContain("surface must be one of");
+
+		expect((await op({ op: "patchBlock", id: "api", fields: { surface: "none" } })).status).toBe(200);
+		expect(findBlockLocation(store.require().root, "api")!.block.surface).toBeUndefined();
+	});
+
 	test("edits are store transactions: validated, undoable, persisted, saved through the guard", async () => {
 		const { op, store, session, path, changes } = await harness();
 

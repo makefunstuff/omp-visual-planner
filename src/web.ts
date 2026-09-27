@@ -50,9 +50,11 @@ import {
 	type ExtractResult,
 	type Intent,
 	type Scope,
+	type Surface,
 	type Venue,
 	EVIDENCE_VALUES,
 	PURPOSES,
+	SURFACES,
 	VENUES,
 	type Purpose,
 	addBlock,
@@ -741,7 +743,8 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 						(BLOCK_ACTION_FIELDS as readonly string[]).includes(key) ||
 						key === "evidence" ||
 						key === "acceptanceCriteria" ||
-						key === "venue";
+						key === "venue" ||
+						key === "surface";
 					if (!editable) throw new OpError(`field ${key} cannot be edited here`);
 				}
 				if (patch.evidence !== undefined && !EVIDENCE_VALUES.includes(patch.evidence as Evidence)) {
@@ -749,6 +752,9 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 				}
 				if (patch.venue !== undefined && !VENUES.includes(patch.venue as Venue)) {
 					throw new OpError(`venue must be one of ${VENUES.join(", ")}`);
+				}
+				if (patch.surface !== undefined && patch.surface !== "none" && !SURFACES.includes(patch.surface as Surface)) {
+					throw new OpError(`surface must be one of none, ${SURFACES.join(", ")}`);
 				}
 				const criteria =
 					patch.acceptanceCriteria === undefined
@@ -773,6 +779,10 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					if (patch.venue !== undefined) {
 						if (patch.venue === "here") delete target.block.venue;
 						else target.block.venue = patch.venue as Venue;
+					}
+					if (patch.surface !== undefined) {
+						if (patch.surface === "none") delete target.block.surface;
+						else target.block.surface = patch.surface as Surface;
 					}
 					if (criteria !== undefined) target.block.acceptanceCriteria = criteria;
 				});

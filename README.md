@@ -11,6 +11,7 @@ An OMP extension for planning systems and mapping codebases as nested blocks. It
 - **Reviewed proposals.** A model can only stage through `visual_planner_propose`, with every changed field shown before and after; only a person accepts, and acceptance is one undoable, unsaved edit. Replan and prune cannot drop work the human already settled.
 - **Reuse that survives a move.** Extract lifts a block to share it, its former sibling links become `uses`, and Execute reads a use as a dependency. See [Reuse](#reuse).
 - **Execute as dispatch.** Only written leaves with acceptance criteria run, in the venue the block states (`here`, `subagent`, `worktree`); the plugin hands the work to OMP and never marks it done.
+- **Visual design as a block facet.** A block a person looks at is marked `surface` (`page` or `component`). A surface with no wireframe points at **Sketch**, which draws one as a fenced `wireframe` block in its description; Execute over a surface builds what it shows. See [Design a page or component](#design-a-page-or-component).
 - **Two surfaces.** The terminal TUI and a loopback web view of the same session, sharing focus, undo and the store.
 - **Evidence over confidence.** Every block is `observed`, `inferred` or `unknown`; `observed` needs a source, and explore can hide what is not grounded.
 - **A skill for when no document is open.** [`skills/decompose`](skills/decompose/SKILL.md): the same decomposition as nested bullets in one markdown file, with `/tree` as the history.
@@ -133,6 +134,16 @@ Accept, then `s`. Acceptance is unsaved until you save. Undo is still available 
 Execute is not refine. On the block you clicked, a written leaf runs even while it is still todo. A parent does not run: `X` dispatches only the ready leaves under it, and a leaf in that sweep still has to be planned and have acceptance criteria. Set venue on the block page, or Enter on the venue row in the terminal: `here`, `subagent`, or `worktree`. Unset means here. Execute ready leaves, from `a` or the project page, is that sweep for the whole plan. The prompt names the venue. This plugin does not spawn the subagent or the worktree, and it does not mark the leaf done. You do, after you have looked at the result.
 
 Two parts of the plan needing the same subsystem is not a reason to write it twice. `M` moves the one definition up to a level that holds both, the block that held it starts using it, and each of its former sibling links becomes a use. See [Reuse](#reuse).
+
+### Design a page or component
+
+Some blocks are things a person looks at, not code. Mark one `surface`: `page` for a whole screen, `component` for a reusable piece of UI inside pages. Set it on the block page in the browser, or Enter on the surface row in the terminal; unset, the default, is every block nobody looks at. It is a facet, not a fourth purpose: the rest of the model already carries the structure. A page's components nest as its children, a shared component is defined once and linked through `uses`, and navigation between pages is a labelled edge. A seed, expand or replan request may tag new blocks; the review shows the tags, and accepting never changes or removes one the human already set.
+
+A surface with no wireframe points at **Sketch**: Refine with a design brief. The model puts one `wireframe` fence in the block's description — at most 12 lines of 60 columns, regions top to bottom, the primary action, real labels, never lorem ipsum — then one line per state it needs, and draws a contained or used component as a labelled box, since each component is designed on its own block. Sketched, the step falls through to the usual ones: Implement for a brainstorm, Refine/Execute/Open inside for a plan.
+
+The design system is `DESIGN.md` at the workspace root — the open DESIGN.md spec from Google, also used by Stitch and Open Design. Sketch and Execute read it when it exists and use its tokens (colors, typography, spacing, components) by name. The planner never creates or edits it, and when it is missing it does not invent a palette.
+
+Execute over a surface builds what the wireframe shows: its regions, primary action, labels and listed states. The wireframe fixes layout and content, not pixels.
 
 ## Reuse
 

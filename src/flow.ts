@@ -323,6 +323,18 @@ export interface NextStep {
 	act: "verb" | "status" | "implement" | "enter" | "add";
 }
 
+/** The fence Refine draws for a page or component. */
+const WIREFRAME = /^\s*(```|~~~)\s*wireframe\b/m;
+
+function sketchStep(block: Block): NextStep {
+	return {
+		label: "Sketch",
+		detail: `This ${block.surface} has no wireframe yet. Refine draws one: layout, primary action and states.`,
+		verb: "refine",
+		act: "verb",
+	};
+}
+
 /** What to do with the focused block. Both surfaces show this instead of a key list. */
 export function nextStep(document: DiagramDocument, block: Block | undefined): NextStep {
 	const purpose = document.purpose;
@@ -333,7 +345,9 @@ export function nextStep(document: DiagramDocument, block: Block | undefined): N
 	}
 	const children = block.children?.blocks ?? [];
 	const written = block.description.trim().length > 0 || block.acceptanceCriteria.length > 0;
+	const unsketched = block.surface !== undefined && !WIREFRAME.test(block.description);
 	if (purpose === "brainstorm") {
+		if (unsketched) return sketchStep(block);
 		return written
 			? { label: "Implement", detail: "The idea is written. Implement turns this into a plan and opens Execute on this block.", act: "implement" }
 			: { label: "Expand", detail: "This is still a title. Expand it, or dump a line onto it.", verb: "breakdown", act: "verb" };
@@ -347,6 +361,7 @@ export function nextStep(document: DiagramDocument, block: Block | undefined): N
 			? { label: "Map inside", detail: "Explored, and nothing is nested yet. Map inside only if this block still hides structure.", verb: "breakdown", act: "verb" }
 			: { label: "Open inside", detail: "The internals are mapped. Open them.", act: "enter" };
 	}
+	if (unsketched && block.status !== "done") return sketchStep(block);
 	if (children.length > 0) {
 		const open = children.find(child => child.status !== "done");
 		return open
@@ -372,14 +387,26 @@ export type PageField =
 	| "evidence"
 	| "enhance"
 	| "execute"
+	| "surface"
 	| "venue"
 	| "sources";
 
 /** Fields a block's page shows, in order. */
 export function pageFields(purpose: Purpose): PageField[] {
-	if (purpose === "brainstorm") return ["title", "description"];
+	if (purpose === "brainstorm") return ["title", "description", "surface"];
 	if (purpose === "explore") return ["title", "description", "evidence", "sources", "enhance"];
-	return ["title", "description", "expectedOutput", "criteria", "evidence", "venue", "enhance", "execute", "sources"];
+	return [
+		"title",
+		"description",
+		"expectedOutput",
+		"criteria",
+		"evidence",
+		"surface",
+		"venue",
+		"enhance",
+		"execute",
+		"sources",
+	];
 }
 
 export function fieldLabel(purpose: Purpose, field: PageField): string {
@@ -398,6 +425,8 @@ export function fieldLabel(purpose: Purpose, field: PageField): string {
 			return purpose === "explore" ? "investigate notes" : "refine notes";
 		case "execute":
 			return "execute notes";
+		case "surface":
+			return "surface";
 		case "venue":
 			return "venue";
 		case "sources":

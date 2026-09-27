@@ -98,6 +98,26 @@ describe("next step", () => {
 		document.root.blocks.push(block);
 		expect(nextStep(document, block).act).toBe("implement");
 	});
+
+	test("a surface without a wireframe points at Sketch", () => {
+		const document = createDocument({ title: "Tool", purpose: "brainstorm" });
+		const block = createBlock({ id: "home", title: "Home", surface: "page", description: "landing" });
+		document.root.blocks.push(block);
+		expect(nextStep(document, block)).toMatchObject({ label: "Sketch", verb: "refine", act: "verb" });
+		block.description = "```wireframe\n[ Sign up ]\n```";
+		expect(nextStep(document, block).act).toBe("implement");
+
+		const plan = createDocument({ title: "Plan", purpose: "plan" });
+		const card = createBlock({
+			id: "card",
+			title: "Card",
+			surface: "component",
+			description: "card",
+			acceptanceCriteria: ["x"],
+		});
+		plan.root.blocks.push(card);
+		expect(nextStep(plan, card).label).toBe("Sketch");
+	});
 });
 
 describe("focus diagram", () => {

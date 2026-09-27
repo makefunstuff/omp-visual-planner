@@ -387,6 +387,32 @@ describe("proposal application", () => {
 		]);
 	});
 
+	test("a proposal may add a surface but never changes or removes the human's", () => {
+		const store = new DocumentStore(type);
+		const document = sample();
+		document.root.blocks[0]!.children!.blocks[0]!.surface = "page";
+		store.adopt(document, "/tmp/architecture.json");
+		const replacement = createBlock({
+			id: "api",
+			title: "API",
+			surface: "component",
+			children: createDiagram({
+				id: "api-inner",
+				blocks: [
+					createBlock({ id: "auth", title: "Auth" }),
+					createBlock({ id: "card", title: "Card", surface: "component" }),
+				],
+			}),
+		});
+		store.transact(current => applyReplacement(current, replacement, "api"));
+		const api = store.require().root.blocks[0]!;
+		expect(api.surface).toBe("component");
+		expect(api.children!.blocks.map(b => [b.id, b.surface])).toEqual([
+			["auth", "page"],
+			["card", "component"],
+		]);
+	});
+
 	test("a document replacement keeps the purpose", () => {
 		const store = new DocumentStore(type);
 		store.adopt(sample(), "/tmp/architecture.json");

@@ -10,7 +10,7 @@
 import { type PageField, fieldLabel, pageFields } from "./flow.ts";
 import { type Block, PURPOSES, type Purpose, type SourceRef, formatSourceRef, parseSourceRef } from "./model.ts";
 
-type SectionField = Exclude<PageField, "title" | "description" | "evidence" | "venue">;
+type SectionField = Exclude<PageField, "title" | "description" | "evidence" | "venue" | "surface">;
 const SECTIONS: readonly SectionField[] = ["expectedOutput", "criteria", "sources", "enhance", "execute"];
 
 export interface BlockText {
