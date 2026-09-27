@@ -98,6 +98,30 @@ describe("composed payloads", () => {
 		expect(prompt.size).toBe(prompt.text.length);
 	});
 
+	test("a structure prompt teaches reuse and lists what is outside the scope", () => {
+		const document = fixture();
+		document.root.blocks[1]!.uses = ["auth"];
+		document.root.blocks[0]!.uses = ["db"];
+		const text = composePrompt(document, { kind: "block", id: "api" }, "decompose").text;
+		expect(text).toContain("## Reuse");
+		expect(text).toContain("### Blocks outside this scope you can reuse");
+		expect(text).toContain("- [db] Service > Database");
+		expect(text).toContain("uses: Database [db] (outside scope)");
+		expect(text).toContain("used by (outside scope, keep this block): Database [db]");
+	});
+
+	test("enhance does not restate the reuse rules", () => {
+		const document = fixture();
+		document.root.blocks[1]!.uses = ["auth"];
+		expect(composePrompt(document, { kind: "block", id: "api" }, "enhance").text).not.toContain("## Reuse");
+	});
+
+	test("a project scope gets the rules without a catalogue of itself", () => {
+		const text = composePrompt(fixture(), { kind: "project" }, "plan").text;
+		expect(text).toContain("## Reuse");
+		expect(text).not.toContain("### Blocks outside this scope you can reuse");
+	});
+
 	test("ordering follows stored block and edge order", () => {
 		const document = fixture();
 		const prompt = composePrompt(document, { kind: "project" }, "plan");

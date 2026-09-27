@@ -71,6 +71,26 @@ describe("execute dispatch", () => {
 		expect(dispatch.held.find(item => item.id === "waiting")?.kind).toBe("blocked");
 	});
 
+	test("a leaf waits for what its parent uses, and the library runs first", () => {
+		const { document, parent } = plan();
+		addBlock(
+			document.root,
+			document.root.id,
+			createBlock({ id: "lib", title: "Lib", status: "settled", acceptanceCriteria: ["builds"] }),
+		);
+		parent.uses = ["lib"];
+
+		const scoped = planDispatch(document, { kind: "block", id: "parent" });
+		expect(scoped.held).toContainEqual(
+			expect.objectContaining({ id: "ready", kind: "blocked", reason: "blocked on Lib" }),
+		);
+		expect(scoped.run.map(leaf => leaf.id)).toEqual([]);
+
+		// A project execute sees the library too, so the leaf is ordered after it.
+		const whole = planDispatch(document, { kind: "project" });
+		expect(whole.run.map(leaf => leaf.id)).toEqual(["lib", "ready"]);
+	});
+
 	test("nothing ready is an error, not a prompt", () => {
 		const document = createDocument({ title: "Tool", purpose: "plan" });
 		addBlock(document.root, document.root.id, createBlock({ id: "idea", title: "Idea" }));

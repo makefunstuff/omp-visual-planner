@@ -102,6 +102,25 @@ describe("save and reload", () => {
 		expect(reopened.dirty).toBe(false);
 	});
 
+	test("keeps uses across save and reload, and never writes an empty list", async () => {
+		const dir = await workspace();
+		const path = defaultDocumentPath(dir);
+		const store = new DocumentStore(type);
+		const document = sample();
+		document.root.blocks[1]!.uses = ["api"];
+		document.root.blocks[0]!.uses = [];
+		store.adopt(document, path);
+		expect((await store.save()).ok).toBe(true);
+
+		const text = await readFile(path, "utf8");
+		expect(text).toContain('"uses": [');
+		expect(text).not.toContain('"uses": []');
+		const reopened = new DocumentStore(type);
+		expect((await reopened.open(path)).ok).toBe(true);
+		expect(reopened.require().root.blocks[1]!.uses).toEqual(["api"]);
+		expect(reopened.require().root.blocks[0]!.uses).toBeUndefined();
+	});
+
 	test("leaves no temporary file behind", async () => {
 		const dir = await workspace();
 		const store = new DocumentStore(type);

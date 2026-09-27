@@ -49,6 +49,8 @@ export interface Block {
 	status: BlockStatus;
 	/** Omitted means `here`. A proposal never changes it; acceptance keeps the human's choice. */
 	venue?: Venue;
+	/** Ids of blocks this block reuses: a shared block is defined once and linked from anywhere. Omitted when empty. */
+	uses?: string[];
 	actions: BlockActions;
 	children: Diagram | null;
 }
@@ -123,6 +125,7 @@ const DEFINITIONS = {
 		evidence: "Evidence",
 		"status?": "Status",
 		"venue?": "Venue",
+		"uses?": "string[]",
 		actions: "BlockActions",
 	},
 	Edge: {
@@ -258,6 +261,7 @@ export function createBlock(
 		evidence: init.evidence ?? "inferred",
 		status: init.status ?? "open",
 		...(init.venue !== undefined && init.venue !== "here" ? { venue: init.venue } : {}),
+		...(init.uses !== undefined && init.uses.length > 0 ? { uses: [...init.uses] } : {}),
 		actions: init.actions ? { ...init.actions } : { enhance: "", execute: "" },
 		children: init.children === undefined ? null : init.children,
 	};
@@ -366,7 +370,7 @@ export function descendantIds(block: Block): string[] {
 // Mutation
 // ---------------------------------------------------------------------------
 
-/** Remove the block and its whole subtree, dropping every incident edge. */
+/** Remove the block and its whole subtree, dropping every incident edge and every use of it. */
 export function removeBlock(root: Diagram, blockId: string): boolean {
 	for (const diagram of eachDiagram(root)) {
 		const index = diagram.blocks.findIndex(b => b.id === blockId);
@@ -374,9 +378,138 @@ export function removeBlock(root: Diagram, blockId: string): boolean {
 		const doomed = new Set(descendantIds(diagram.blocks[index]!));
 		diagram.blocks.splice(index, 1);
 		diagram.edges = diagram.edges.filter(e => !doomed.has(e.from) && !doomed.has(e.to));
+		for (const { block } of eachBlock(root)) dropUses(block, doomed);
 		return true;
 	}
 	return false;
+}
+
+/** Delete every id in `doomed` from `block.uses`, removing the key when it empties. */
+function dropUses(block: Block, doomed: ReadonlySet<string>): void {
+	if (block.uses === undefined) return;
+	block.uses = block.uses.filter(id => !doomed.has(id));
+	if (block.uses.length === 0) delete block.uses;
+}
+
+/** Append `targetId` to `userId`'s uses. Returns why it may not, or undefined on success. */
+export function addUse(root: Diagram, userId: string, targetId: string): string | undefined {
+	const user = findBlockLocation(root, userId);
+	if (!user) return `no block ${userId}`;
+	const target = findBlockLocation(root, targetId);
+	if (user.block.uses?.includes(targetId)) {
+		return `"${blockName(user.block)}" already uses "${target ? blockName(target.block) : targetId}"`;
+	}
+	const refusal = usesRefusal(user, targetId, target);
+	if (refusal) return `"${blockName(user.block)}" ${refusal}`;
+	(user.block.uses ??= []).push(targetId);
+	return undefined;
+}
+
+/** Drop `targetId` from `userId`'s uses. False when the user is unknown or does not use the target. */
+export function removeUse(root: Diagram, userId: string, targetId: string): boolean {
+	const user = findBlockLocation(root, userId);
+	if (!user?.block.uses?.includes(targetId)) return false;
+	user.block.uses = user.block.uses.filter(id => id !== targetId);
+	if (user.block.uses.length === 0) delete user.block.uses;
+	return true;
+}
+
+/**
+ * The blocks outside `blockId`'s subtree that use anything inside it — the links
+ * a deletion would cut. Empty for an unknown id.
+ */
+export function usersOutside(root: Diagram, blockId: string): Block[] {
+	const location = findBlockLocation(root, blockId);
+	if (!location) return [];
+	const inside = new Set(descendantIds(location.block));
+	const users: Block[] = [];
+	for (const { block } of eachBlock(root)) {
+		if (inside.has(block.id)) continue;
+		if (block.uses?.some(id => inside.has(id))) users.push(block);
+	}
+	return users;
+}
+
+export interface ExtractTarget {
+	diagramId: string;
+	/** The ancestor the block will sit right after. */
+	anchorId: string;
+	label: string;
+}
+
+/** Levels `blockId` can move up to, nearest first: every diagram above it that holds one of its ancestors. */
+export function extractTargets(root: Diagram, blockId: string): ExtractTarget[] {
+	const location = findBlockLocation(root, blockId);
+	if (!location) return [];
+	const path = findDiagramPath(root, location.diagram.id);
+	if (!path) return [];
+	const targets: ExtractTarget[] = [];
+	for (let level = path.length - 2; level >= 0; level -= 1) {
+		const anchor = location.ancestors[level];
+		if (!anchor) continue;
+		const label =
+			level === 0
+				? `top level, next to "${blockName(anchor)}"`
+				: `inside "${blockName(location.ancestors[level - 1]!)}", next to "${blockName(anchor)}"`;
+		targets.push({ diagramId: path[level]!.id, anchorId: anchor.id, label });
+	}
+	return targets;
+}
+
+export interface ExtractResult {
+	/** The block that held it; it now uses it. */
+	formerParentId: string;
+	/** Former sibling links turned into uses: `userId` now uses `usedId`. Uses carry no label, so `label` is gone from the document. */
+	converted: { userId: string; usedId: string; label: string }[];
+}
+
+/** Append `id` to `block.uses`, skipping a duplicate. */
+function pushUse(block: Block, id: string): void {
+	if (block.uses?.includes(id)) return;
+	(block.uses ??= []).push(id);
+}
+
+/**
+ * Move `blockId`, with everything inside it, up into `targetDiagramId`, right after the ancestor that
+ * diagram holds. It keeps its id, status and contents. The block that held it now uses it, and each link
+ * to a former sibling becomes a use: an edge's `to` uses its `from`, the dependency direction execute already reads.
+ */
+export function extractBlock(
+	root: Diagram,
+	blockId: string,
+	targetDiagramId: string,
+	position: BlockPosition,
+): ExtractResult {
+	const location = findBlockLocation(root, blockId);
+	if (!location) throw new Error(`no block ${blockId}`);
+	const block = location.block;
+	const parent = location.ancestors.at(-1);
+	if (!parent) throw new Error(`"${blockName(block)}" is already at the top level`);
+	const path = findDiagramPath(root, location.diagram.id);
+	const level = path?.findIndex(diagram => diagram.id === targetDiagramId) ?? -1;
+	if (!path || level === -1 || level === path.length - 1) {
+		throw new Error(`"${blockName(block)}" can only move up to a level that contains it`);
+	}
+	const from = location.diagram;
+	const converted: ExtractResult["converted"] = [];
+	for (const edge of from.edges) {
+		if (edge.from !== blockId && edge.to !== blockId) continue;
+		converted.push({ userId: edge.to, usedId: edge.from, label: edge.label });
+	}
+	from.edges = from.edges.filter(edge => edge.from !== blockId && edge.to !== blockId);
+	const source = from.blocks.findIndex(candidate => candidate.id === blockId);
+	if (source !== -1) from.blocks.splice(source, 1);
+	block.position = { ...position };
+	const anchor = location.ancestors[level]!;
+	const siblings = path[level]!.blocks;
+	const at = siblings.findIndex(candidate => candidate.id === anchor.id);
+	siblings.splice(at === -1 ? siblings.length : at + 1, 0, block);
+	pushUse(parent, blockId);
+	for (const link of converted) {
+		const user = link.userId === blockId ? block : from.blocks.find(candidate => candidate.id === link.userId);
+		if (user) pushUse(user, link.usedId);
+	}
+	return { formerParentId: parent.id, converted };
 }
 
 /**
@@ -494,6 +627,23 @@ interface IdLedger {
 	seen: Map<string, string>;
 }
 
+function blockName(block: Block): string {
+	return block.title.length > 0 ? block.title : block.id;
+}
+
+/** Why `user` may not use `targetId` — the tail of a sentence — or undefined when it may. */
+function usesRefusal(user: BlockLocation, targetId: string, target: BlockLocation | undefined): string | undefined {
+	if (targetId === user.block.id) return "cannot use itself";
+	if (!target) return `cannot use ${targetId}, which is not in the document`;
+	if (user.ancestors.some(ancestor => ancestor.id === targetId)) {
+		return `cannot use "${blockName(target.block)}", which contains it`;
+	}
+	if (target.ancestors.some(ancestor => ancestor.id === user.block.id)) {
+		return `cannot use "${blockName(target.block)}", which is inside it`;
+	}
+	return undefined;
+}
+
 function claimId(ledger: IdLedger, id: string, what: string): void {
 	if (id.length === 0) {
 		ledger.errors.push(`${what} has an empty id`);
@@ -559,6 +709,31 @@ function checkDiagram(diagram: Diagram, label: string, ledger: IdLedger): void {
 }
 
 /**
+ * The `uses` relation: a shared block is defined once and linked from anywhere.
+ * Cycles stay allowed, the same way sibling edges already allow cycles.
+ */
+function checkUses(root: Diagram, ledger: IdLedger): void {
+	const map = new Map<string, BlockLocation>();
+	for (const location of eachBlock(root)) {
+		if (!map.has(location.block.id)) map.set(location.block.id, location);
+	}
+	for (const location of eachBlock(root)) {
+		const { block } = location;
+		if (block.uses === undefined) continue;
+		const seen = new Set<string>();
+		for (const id of block.uses) {
+			if (seen.has(id)) {
+				ledger.errors.push(`block "${blockName(block)}" uses ${id} twice`);
+				continue;
+			}
+			seen.add(id);
+			const tail = usesRefusal(location, id, map.get(id));
+			if (tail) ledger.errors.push(`block "${blockName(block)}" ${tail}`);
+		}
+	}
+}
+
+/**
  * Structural parse plus graph-level checks. The version check runs first so an
  * unknown schema version is reported as such instead of as a shape mismatch.
  */
@@ -581,6 +756,7 @@ export function validateDocument(value: unknown, arktype: ArkTypeNamespace): Val
 	const ledger: IdLedger = { errors: [], seen: new Map() };
 	claimId(ledger, document.id, "document");
 	checkDiagram(document.root, "root", ledger);
+	checkUses(document.root, ledger);
 	if (ledger.errors.length > 0) return { ok: false, errors: ledger.errors };
 	return { ok: true, document };
 }

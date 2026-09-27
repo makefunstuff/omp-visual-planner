@@ -190,6 +190,39 @@ describe("web mode editing", () => {
 		expect(session.selected).toBe(inner.blocks[0]!.id);
 		expect(session.stack).toEqual([store.require().root.id, inner.id]);
 	});
+
+	test("link, extract and unlink a reusable block from the web", async () => {
+		const { op, state, store, session } = await harness();
+		expect((await op({ op: "addBlock", parentId: "api", title: "Router" })).status).toBe(200);
+		const router = session.selected as string;
+
+		expect((await op({ op: "addUse", id: router, target: "db" })).status).toBe(200);
+		const linked = await state();
+		expect(linked.flow!.focus.inputs).toEqual([{ id: "db", label: "uses", direction: "forward", kind: "uses" }]);
+		expect(linked.flow!.useCandidates.map(candidate => candidate.id)).toEqual(["db"]);
+
+		const rootId = store.require().root.id;
+		expect((await op({ op: "extract", id: router, diagramId: rootId })).status).toBe(200);
+		expect(store.require().root.blocks.map(block => block.id)).toEqual(["api", router, "db"]);
+		expect(findBlockLocation(store.require().root, "api")!.block.uses).toEqual([router]);
+
+		expect((await op({ op: "removeUse", id: "api", target: router })).status).toBe(200);
+		expect(findBlockLocation(store.require().root, "api")!.block.uses).toBeUndefined();
+	});
+
+	test("the walk's focus diagram projects the block's parent, links and children", async () => {
+		const { op, state } = await harness();
+		expect((await op({ op: "addEdge", from: "api", to: "db", label: "reads" })).status).toBe(200);
+		expect((await op({ op: "focus", id: "db" })).status).toBe(200);
+		expect((await state()).flow!.focus).toEqual({
+			parent: null,
+			inputs: [{ id: "api", label: "reads", direction: "forward", kind: "edge" }],
+			outputs: [],
+			children: [],
+		});
+		expect((await op({ op: "focus", id: null })).status).toBe(200);
+		expect((await state()).flow!.focus).toEqual({ parent: null, inputs: [], outputs: [], children: ["api", "db"] });
+	});
 });
 
 describe("web mode requests", () => {

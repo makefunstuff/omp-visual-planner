@@ -19,6 +19,7 @@ import {
 	validateDiagram,
 	validateDocument,
 } from "./model.ts";
+import { applyReplacement } from "./store.ts";
 
 export type ActionKind =
 	| "draft"
@@ -354,6 +355,23 @@ export class ActionRegistry {
 		if (context.document) {
 			const retained = retentionErrors(entry, context.document, validated.replacement);
 			if (retained.length > 0) return { ok: false, errors: retained };
+			// Validate the document this change would produce: `validateBlock` and
+			// `validateDiagram` see one scope in isolation, so a dangling `uses` or an
+			// id clash with a block outside the scope would otherwise surface only at
+			// accept, inside `store.transact`, where the agent can no longer see it.
+			const projected = structuredClone(context.document);
+			try {
+				applyReplacement(projected, validated.replacement, entry.scope.id);
+			} catch (error) {
+				return { ok: false, errors: [error instanceof Error ? error.message : String(error)] };
+			}
+			const whole = validateDocument(projected, context.arktype);
+			if (!whole.ok) {
+				return {
+					ok: false,
+					errors: whole.errors.map(error => `after this change the document would be invalid: ${error}`),
+				};
+			}
 		}
 		const proposal: StagedProposal = {
 			summary: summary.trim(),

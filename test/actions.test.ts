@@ -451,3 +451,48 @@ describe("settled work survives a replan or a prune", () => {
 		expect(registry.stage("req-1", "refined", rewritten, contextFor({ document })).ok).toBe(true);
 	});
 });
+
+describe("reuse survives proposals", () => {
+	/** `db` uses the nested `auth`, so a proposal that drops it leaves a dangling link. */
+	function linked(): DiagramDocument {
+		const document = sampleDocument();
+		document.root.blocks[1]!.uses = ["auth"];
+		return document;
+	}
+
+	function begin(registry: ActionRegistry, document: DiagramDocument): void {
+		const began = registry.begin({
+			requestId: "req-1",
+			kind: "replan",
+			intent: "replan",
+			scope: { kind: "block", id: "api" },
+			label: 'block "API"',
+			branchKey: BRANCH,
+			documentId: document.id,
+			baseRevision: 3,
+			baseDigest: "digest-a",
+			prompt: "payload",
+		});
+		expect(began.ok).toBe(true);
+	}
+
+	test("a proposal that would leave a dangling use is refused at stage time", () => {
+		const registry = new ActionRegistry(BRANCH);
+		const document = linked();
+		begin(registry, document);
+		const context = contextFor({ document });
+
+		const dropped = structuredClone(document.root.blocks[0]!);
+		dropped.children = createDiagram({ id: "api-inner", blocks: [] });
+		const refused = registry.stage("req-1", "replanned", dropped, context);
+		expect(refused.ok).toBe(false);
+		if (refused.ok) throw new Error("unreachable");
+		expect(refused.errors[0]).toContain("cannot use auth, which is not in the document");
+		expect(registry.entryFor("req-1")!.state).toBe("pending");
+
+		// Keeping `auth` and letting it use `db` in return is a cycle, and cycles are allowed.
+		const kept = structuredClone(document.root.blocks[0]!);
+		kept.children!.blocks[0]!.uses = ["db"];
+		expect(registry.stage("req-1", "replanned", kept, context).ok).toBe(true);
+	});
+});

@@ -247,8 +247,8 @@ describe("canvas rendering", () => {
 		h.screen.handleInput("o");
 		h.screen.handleInput("a");
 		h.screen.render(120);
-		// Refine, Break down, Replan, Execute, Draft…, then Discover…
-		for (let step = 0; step < 5; step += 1) h.screen.handleInput("j");
+		// Refine, Break down, Replan, Execute, Uses…, Draft…, then Discover…
+		for (let step = 0; step < 6; step += 1) h.screen.handleInput("j");
 		h.screen.handleInput("\r");
 		h.screen.render(120);
 		h.screen.handleInput("\r");
@@ -320,6 +320,87 @@ describe("canvas rendering", () => {
 			(await harness({ width: 120, rows: 24, document: createDocument({ id: "doc-3" }), view: "canvas" })).screen.render(120),
 		).join("\n");
 		expect(canvasEmpty).toContain("No blocks in this subsystem yet.");
+	});
+
+	test("a walk draws the focused block with inputs left, outputs right and children below; arrows walk it", async () => {
+		const map = fixture();
+		map.purpose = "explore";
+		const h = await harness({ width: 140, rows: 30, document: map });
+		const lines = plain(h.screen.render(140));
+		const row = lines.find(line => line.includes("───▶") && line.includes("Database"));
+		expect(row).toBeDefined();
+		// The wire sits between the card and the block the card links to; the
+		// outline pane lists "Database" too, so compare against its last occurrence.
+		expect(row!.indexOf("───▶")).toBeLessThan(row!.lastIndexOf("Database"));
+		const joined = lines.join("\n");
+		expect(joined).toContain("inside · 1");
+		expect(joined).toContain("Auth");
+
+		h.screen.handleInput("\x1b[C");
+		h.screen.handleInput("\r");
+		expect(h.shared.selected).toBe("db");
+		h.screen.handleInput("\x1b[D");
+		h.screen.handleInput("\r");
+		expect(h.shared.selected).toBe("api");
+		h.screen.handleInput("\x1b[B");
+		h.screen.handleInput("\r");
+		expect(h.shared.selected).toBe("auth");
+		h.screen.handleInput("\x1b[A");
+		h.screen.handleInput("\r");
+		expect(h.shared.selected).toBe("api");
+		h.screen.handleInput("\x1b[C");
+		h.screen.handleInput("\x1b");
+		expect(h.result()).toBeUndefined();
+		h.screen.handleInput("\r");
+		expect(h.shared.selected).toBe("api");
+		expect(plain(h.screen.render(140)).join("\n")).toContain("› ");
+	});
+
+	test("U links the focused block to a reusable one and the walk draws a dashed wire", async () => {
+		const map = fixture();
+		map.purpose = "explore";
+		const h = await harness({ width: 140, rows: 30, document: map });
+		h.screen.handleInput("j");
+		expect(h.shared.selected).toBe("auth");
+		h.screen.handleInput("U");
+		h.screen.render(140);
+		h.screen.handleInput("\r");
+		expect(h.store.require().root.blocks[0]!.children!.blocks[0]!.uses).toEqual(["db"]);
+
+		h.screen.handleInput("\x1b");
+		const lines = plain(h.screen.render(140));
+		expect(lines.join("\n")).toContain("×1");
+		const wire = lines.find(line => line.includes("┄┄┄▶"));
+		expect(wire).toBeDefined();
+		// The wire sits between the card and what it uses; the outline lists the
+		// same title, so compare against its last occurrence.
+		expect(wire!.lastIndexOf("Database")).toBeLessThan(wire!.indexOf("┄┄┄▶"));
+	});
+
+	test("M lifts the focused block to a shared level and its former parent starts using it", async () => {
+		const map = fixture();
+		map.purpose = "explore";
+		const h = await harness({ width: 140, rows: 30, document: map });
+		h.screen.handleInput("j");
+		h.screen.handleInput("M");
+		h.screen.render(140);
+		h.screen.handleInput("\r");
+		const root = h.store.require().root;
+		expect(root.blocks.map(block => block.id)).toEqual(["api", "auth", "db", "worker"]);
+		expect(root.blocks[0]!.uses).toEqual(["auth"]);
+		expect(h.shared.selected).toBe("auth");
+	});
+
+	test("the walk is exactly the terminal width at every size", async () => {
+		for (const width of [60, 80, 100, 120, 160]) {
+			for (const rows of [16, 30]) {
+				const map = fixture();
+				map.purpose = "explore";
+				map.root.blocks[0]!.children!.blocks[0]!.uses = ["db"];
+				const screen = (await harness({ width, rows, document: map })).screen;
+				for (const line of screen.render(width)) expect(visibleWidth(line)).toBe(width);
+			}
+		}
 	});
 
 	test("brainstorm and unexplored blocks walk; a settled explore block keeps the page", async () => {
@@ -864,8 +945,8 @@ describe("outline", () => {
 
 	test("the action menu offers project replan and prune against the whole document", async () => {
 		for (const [steps, label, kind] of [
-			[6, "Replan the document…", "replan"],
-			[7, "Prune unnecessary blocks…", "prune"],
+			[7, "Replan the document…", "replan"],
+			[8, "Prune unnecessary blocks…", "prune"],
 		] as const) {
 			const h = await harness();
 			const before = serializeDocument(h.store.require());

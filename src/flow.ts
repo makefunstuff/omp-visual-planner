@@ -10,11 +10,14 @@ import {
 	type Block,
 	type BlockStatus,
 	type DiagramDocument,
+	type EdgeDirection,
+	type ExtractResult,
 	type Intent,
 	type Purpose,
 	type Scope,
 	type Venue,
 	VENUES,
+	descendantIds,
 	eachBlock,
 	findBlockLocation,
 } from "./model.ts";
@@ -107,6 +110,183 @@ export function outlineRows(document: DiagramDocument, collapsed: ReadonlySet<st
 		});
 	}
 	return rows;
+}
+
+// ---------------------------------------------------------------------------
+// The focus diagram: one block read as a card, with its graph drawn around it
+// ---------------------------------------------------------------------------
+
+export interface FocusLink {
+	block: Block;
+	label: string;
+	direction: EdgeDirection;
+	/** `edge` is a sibling relationship; `uses` is a cross-level reuse link. */
+	kind: FocusLinkKind;
+}
+
+/** Sibling edges keep their authored direction; a `uses` link always reads forward. */
+export type FocusLinkKind = "edge" | "uses";
+
+/** What surrounds the focused block: its parent, the links into and out of it, and its children. */
+export interface FocusNeighborhood {
+	parent: Block | undefined;
+	inputs: FocusLink[];
+	outputs: FocusLink[];
+	children: Block[];
+}
+
+/** Where the highlight sits in the diagram. `center` is the focused block itself. */
+export type FocusSlot = "center" | "up" | "in" | "out" | "down";
+
+export interface FocusCursor {
+	slot: FocusSlot;
+	index: number;
+}
+
+export type FocusCounts = Record<Exclude<FocusSlot, "center">, number>;
+
+export type FocusMove = "up" | "down" | "left" | "right";
+
+export const FOCUS_CENTER: FocusCursor = { slot: "center", index: 0 };
+
+/**
+ * The graph around `blockId`. No id, or an id this document does not know, reads
+ * as the whole document: its top-level blocks hang below the centre. `shown`
+ * filters what the reader wants to see (grounded mode); the parent is structural,
+ * so it is never filtered.
+ */
+export function focusNeighborhood(
+	document: DiagramDocument,
+	blockId: string | undefined,
+	shown: (block: Block) => boolean = () => true,
+): FocusNeighborhood {
+	const location = blockId === undefined ? undefined : findBlockLocation(document.root, blockId);
+	if (!location) {
+		return { parent: undefined, inputs: [], outputs: [], children: document.root.blocks.filter(shown) };
+	}
+	const { block, diagram } = location;
+	const id = block.id;
+	const inputs: FocusLink[] = [];
+	const outputs: FocusLink[] = [];
+	for (const edge of diagram.edges) {
+		const inbound = edge.to === id && edge.from !== id;
+		if (!inbound && edge.from !== id) continue;
+		const otherId = inbound ? edge.from : edge.to;
+		const other = diagram.blocks.find(candidate => candidate.id === otherId);
+		if (!other || !shown(other)) continue;
+		if (inbound) inputs.push({ block: other, label: edge.label, direction: edge.direction, kind: "edge" });
+		else outputs.push({ block: other, label: edge.label, direction: edge.direction, kind: "edge" });
+	}
+	// Reuse links read the way the edges do: the left side is what the block
+	// needs, the right side is what needs it.
+	for (const usedId of block.uses ?? []) {
+		const used = findBlockLocation(document.root, usedId)?.block;
+		if (used && shown(used)) inputs.push({ block: used, label: "uses", direction: "forward", kind: "uses" });
+	}
+	for (const { block: user } of eachBlock(document.root)) {
+		if (!user.uses?.includes(id) || !shown(user)) continue;
+		outputs.push({ block: user, label: "used by", direction: "forward", kind: "uses" });
+	}
+	return { parent: location.ancestors.at(-1), inputs, outputs, children: (block.children?.blocks ?? []).filter(shown) };
+}
+
+export function focusCounts(hood: FocusNeighborhood): FocusCounts {
+	return { up: hood.parent ? 1 : 0, in: hood.inputs.length, out: hood.outputs.length, down: hood.children.length };
+}
+
+/** A cursor that no longer fits its neighbourhood falls back to the centre. */
+export function normalizeFocusCursor(cursor: FocusCursor, counts: FocusCounts): FocusCursor {
+	if (cursor.slot !== "center" && cursor.index >= counts[cursor.slot]) return FOCUS_CENTER;
+	return cursor;
+}
+
+/**
+ * The cursor after moving one step. Movement is spatial: `up` reaches the parent,
+ * `left`/`right` the inputs and the outputs, `down` the children, and every slot
+ * reaches back to the centre. A move with no target leaves the cursor where it is.
+ */
+export function moveFocusCursor(cursor: FocusCursor, move: FocusMove, counts: FocusCounts): FocusCursor {
+	const current = normalizeFocusCursor(cursor, counts);
+	const step = (slot: Exclude<FocusSlot, "center">, delta: -1 | 1): FocusCursor => {
+		const index = current.slot === slot ? current.index + delta : 0;
+		if (index < 0 || index >= counts[slot]) return current;
+		return { slot, index };
+	};
+	switch (current.slot) {
+		case "center":
+			if (move === "up") return step("up", 1);
+			if (move === "down") return step("down", 1);
+			if (move === "left") return step("in", 1);
+			return step("out", 1);
+		case "in":
+			if (move === "left") return current;
+			if (move === "right") return FOCUS_CENTER;
+			if (move === "up") return step("in", -1);
+			return step("in", 1);
+		case "out":
+			if (move === "right") return current;
+			if (move === "left") return FOCUS_CENTER;
+			if (move === "up") return step("out", -1);
+			return step("out", 1);
+		case "down":
+			if (move === "down") return current;
+			if (move === "up") return FOCUS_CENTER;
+			if (move === "left") return step("down", -1);
+			return step("down", 1);
+		case "up":
+			if (move === "down") return FOCUS_CENTER;
+			return current;
+	}
+}
+
+/** The block the cursor points at, or none when it rests on the centre or out of range. */
+export function focusTarget(hood: FocusNeighborhood, cursor: FocusCursor): Block | undefined {
+	switch (cursor.slot) {
+		case "center":
+			return undefined;
+		case "up":
+			return cursor.index === 0 ? hood.parent : undefined;
+		case "in":
+			return hood.inputs[cursor.index]?.block;
+		case "out":
+			return hood.outputs[cursor.index]?.block;
+		case "down":
+			return hood.children[cursor.index];
+	}
+}
+
+export interface UseCandidate {
+	block: Block;
+	depth: number;
+	used: boolean;
+}
+
+/** Blocks `blockId` may use, in document order: everything except itself, what contains it and what it contains. */
+export function useCandidates(document: DiagramDocument, blockId: string): UseCandidate[] {
+	const location = findBlockLocation(document.root, blockId);
+	if (!location) return [];
+	const excluded = new Set([blockId, ...location.ancestors.map(ancestor => ancestor.id), ...descendantIds(location.block)]);
+	const candidates: UseCandidate[] = [];
+	for (const entry of eachBlock(document.root)) {
+		if (excluded.has(entry.block.id)) continue;
+		candidates.push({
+			block: entry.block,
+			depth: entry.ancestors.length,
+			used: location.block.uses?.includes(entry.block.id) ?? false,
+		});
+	}
+	return candidates;
+}
+
+/** What just happened, in words: the moved block and the links extract turned into uses. */
+export function extractedMessage(document: DiagramDocument, blockId: string, result: ExtractResult): string {
+	const title = (id: string): string => {
+		const block = findBlockLocation(document.root, id)?.block;
+		return block === undefined ? id : block.title.length > 0 ? block.title : block.id;
+	};
+	const links = result.converted.length;
+	const tail = links > 0 ? `; ${links} link${links === 1 ? "" : "s"} became uses` : "";
+	return `extracted "${title(blockId)}" — "${title(result.formerParentId)}" now uses it${tail}`;
 }
 
 /**
@@ -393,6 +573,25 @@ function inboundOpen(document: DiagramDocument, block: Block, running: ReadonlyS
 }
 
 /**
+ * What a leaf waits for through `uses`: its own and every ancestor's — a
+ * subsystem's needs are its parts' needs.
+ */
+function usesOf(document: DiagramDocument, block: Block): string[] {
+	const location = findBlockLocation(document.root, block.id);
+	if (!location) return [];
+	return [...location.ancestors, block].flatMap(holder => holder.uses ?? []);
+}
+
+function usesOpen(document: DiagramDocument, block: Block, running: ReadonlySet<string>): string | undefined {
+	for (const id of usesOf(document, block)) {
+		const used = findBlockLocation(document.root, id)?.block;
+		if (!used || used.status === "done" || running.has(used.id)) continue;
+		return used.title.length > 0 ? used.title : used.id;
+	}
+	return undefined;
+}
+
+/**
  * What an execute may run. Only a settled plan leaf with acceptance criteria runs.
  * Open ideas stay on the proposal path. A parent is never one job.
  */
@@ -436,7 +635,7 @@ export function planDispatch(document: DiagramDocument, scope: Scope): DispatchP
 	const running = new Set(ready.map(block => block.id));
 	const runnable: Block[] = [];
 	for (const block of ready) {
-		const waiting = inboundOpen(document, block, running);
+		const waiting = inboundOpen(document, block, running) ?? usesOpen(document, block, running);
 		if (waiting) {
 			held.push({
 				id: block.id,
@@ -454,6 +653,7 @@ export function planDispatch(document: DiagramDocument, scope: Scope): DispatchP
 	const rest = [...runnable];
 	while (rest.length > 0) {
 		const index = rest.findIndex(block => {
+			if (usesOf(document, block).some(id => pending.has(id))) return false;
 			const location = findBlockLocation(document.root, block.id);
 			if (!location) return true;
 			return !location.diagram.edges.some(edge => edge.to === block.id && pending.has(edge.from));

@@ -85,6 +85,7 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 			evidence: block.evidence,
 			status: block.status,
 			...(block.venue !== undefined && block.venue !== "here" ? { venue: block.venue } : {}),
+			...(block.uses !== undefined && block.uses.length > 0 ? { uses: [...block.uses] } : {}),
 			actions: { enhance: block.actions.enhance, execute: block.actions.execute },
 			children: block.children ? normalizeDiagram(block.children) : null,
 		})),
@@ -380,6 +381,7 @@ export function applyReplacement(
 	replaceStructure(document, replacement, targetId);
 	const added: string[] = [];
 	for (const { block } of eachBlock(document.root)) {
+		if (block.uses !== undefined && block.uses.length === 0) delete block.uses;
 		const prior = kept.get(block.id);
 		if (prior) {
 			block.status = prior.status;

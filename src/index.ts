@@ -469,7 +469,11 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 			];
 			for (const location of resolved.locations) {
 				const indent = "  ".repeat(Math.max(0, location.ancestors.length));
-				lines.push(`${indent}- [${location.block.id}] ${location.block.title} (${location.block.evidence})`);
+				const uses = location.block.uses;
+				const usesPart = uses?.length ? ` uses ${uses.map(id => `[${id}]`).join(" ")}` : "";
+				lines.push(
+					`${indent}- [${location.block.id}] ${location.block.title} (${location.block.evidence})${usesPart}`,
+				);
 			}
 			return {
 				content: [{ type: "text" as const, text: lines.join("\n") }],

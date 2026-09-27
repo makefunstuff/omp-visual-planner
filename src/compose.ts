@@ -206,6 +206,15 @@ function renderScope(resolution: ScopeResolution, document: DiagramDocument): st
 			lines.push(`  - ${inside.title || inside.id}${label} -> ${outside.title || outside.id} (outside scope)`);
 		}
 	}
+	const inScope = new Set(resolution.locations.map(location => location.block.id));
+	const users = new Map<string, Block[]>();
+	for (const { block } of eachBlock(document.root)) {
+		for (const id of block.uses ?? []) {
+			const list = users.get(id);
+			if (list) list.push(block);
+			else users.set(id, [block]);
+		}
+	}
 	lines.push("");
 	lines.push("### Blocks in scope");
 	const baseDepth = resolution.locations[0]?.ancestors.length ?? 0;
@@ -232,6 +241,18 @@ function renderScope(resolution: ScopeResolution, document: DiagramDocument): st
 			const target = diagram.blocks.find(candidate => candidate.id === edge.to);
 			const label = edge.label.length > 0 ? ` "${edge.label}"` : "";
 			lines.push(`${sub}relationship:${label} -> ${target?.title || edge.to} [${edge.to}] (${edge.direction})`);
+		}
+		const describe = (id: string): string => {
+			const outside = inScope.has(id) ? "" : " (outside scope)";
+			const used = findBlockLocation(document.root, id)?.block;
+			return `${used?.title || "(untitled)"} [${id}]${outside}`;
+		};
+		if (block.uses?.length) lines.push(`${sub}uses: ${block.uses.map(describe).join(", ")}`);
+		const usedBy = (users.get(block.id) ?? []).filter(user => !inScope.has(user.id));
+		if (usedBy.length > 0) {
+			lines.push(
+				`${sub}used by (outside scope, keep this block): ${usedBy.map(user => `${user.title || "(untitled)"} [${user.id}]`).join(", ")}`,
+			);
 		}
 	}
 	if (resolution.edges.length === 0) lines.push("(no relationships inside this scope)");
@@ -280,6 +301,36 @@ function whereToLook(root: string): string {
 		"  needs it as evidence, and read the relevant range rather than the whole file when it is large.",
 		"- Do not read a file twice. Stop reading once every block you propose is justified.",
 	].join("\n");
+}
+
+/** Structure-producing intents explain reuse; `enhance` and `execute` do not restructure. */
+const REUSE_INTENTS: ReadonlySet<Intent> = new Set(["plan", "discover", "decompose", "investigate", "replan", "prune"]);
+
+/** Outside blocks are listed up to this many; beyond it the prompt points at a project read. */
+const CATALOG_LIMIT = 150;
+
+const REUSE_RULES = [
+	"## Reuse",
+	"A block that more than one part of the document needs is defined once and referenced, never duplicated.",
+	"- To reuse a block, put its id in the `uses` array of every block that needs it. `uses` may name any block in the document except the block itself, a block that contains it, or a block inside it.",
+	"- Define a shared block at the level that contains all of its users, not inside one of them.",
+	"- Every id in `uses` must exist once your change is applied: do not remove a block another block uses. The planner refuses such a proposal.",
+	"- Keep the `uses` of the blocks you keep unless that dependency is really gone.",
+].join("\n");
+
+/** The reuse rules, plus what outside this scope is available to link to. */
+function reuseSection(document: DiagramDocument, resolution: ScopeResolution): string {
+	if (resolution.scope.kind === "project") return REUSE_RULES;
+	const inside = new Set(resolution.locations.map(location => location.block.id));
+	const outside = [...eachBlock(document.root)].filter(location => !inside.has(location.block.id));
+	if (outside.length === 0) return REUSE_RULES;
+	const lines = ["### Blocks outside this scope you can reuse"];
+	for (const location of outside.slice(0, CATALOG_LIMIT)) {
+		lines.push(`- [${location.block.id}] ${pathLabel(location, document)}`);
+	}
+	const rest = outside.length - CATALOG_LIMIT;
+	if (rest > 0) lines.push(`- … ${rest} more: read them with visual_planner_read (scope project)`);
+	return `${REUSE_RULES}\n\n<planner-data>\n${lines.join("\n")}\n</planner-data>`;
 }
 
 const PURPOSE_LINE: Record<Purpose, string> = {
@@ -386,6 +437,7 @@ export function composePrompt(
 		if (options.codeRoot) sections.push(whereToLook(options.codeRoot));
 	}
 	sections.push(`## Scope\n\n<planner-data>\n${renderScope(resolution, document)}\n</planner-data>`);
+	if (REUSE_INTENTS.has(intent)) sections.push(reuseSection(document, resolution));
 	sections.push(
 		[
 			"## Boundaries",

@@ -68,9 +68,10 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
 .rail .row .name { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; flex: 1; }
 .rail .row .mark { flex: none; color: var(--accent); font-size: 12px; }
 .rail .actions { display: flex; gap: 6px; margin: 14px 8px; flex-wrap: wrap; }
-.block-page { overflow: auto; padding: 28px clamp(22px, 5vw, 88px) 60px; }
+.block-page { overflow: auto; padding: 28px clamp(22px, 5vw, 88px) 60px; container-type: inline-size; }
 .block-page h1 .text { font-size: 24px; font-weight: 700; line-height: 1.3; background: transparent; border: 0; padding: 0; color: var(--text); }
-.block-page .content, .walk { max-width: 820px; margin: 0 auto; }
+.block-page .content { max-width: 820px; margin: 0 auto; }
+.walk { max-width: 1120px; margin: 0 auto; }
 .block-page h1 { font-size: 24px; line-height: 1.3; margin: 6px 0 4px; }
 .block-page section { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 14px; }
 .block-page .subtle { color: var(--muted); }
@@ -105,14 +106,54 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
 .move.dim .name { color: var(--faint); }
 .walk-head { display: flex; align-items: center; gap: 8px; }
 .walk-head .label { margin-right: auto; }
+/* Focus diagram: the walked block as a readable card, its links and nesting drawn around it. */
+.focus { display: grid; grid-template-columns: minmax(140px, 1fr) minmax(320px, 2.4fr) minmax(140px, 1fr); grid-template-areas: ". up ." "in card out" ". down ."; margin-top: 12px; }
+.f-up { grid-area: up; display: flex; flex-direction: column; align-items: center; }
+.f-up .top { border: 0; background: transparent; color: var(--muted); padding: 0; }
+.f-in, .f-out { display: flex; flex-direction: column; justify-content: center; gap: 12px; min-width: 0; }
+.f-in { grid-area: in; } .f-out { grid-area: out; }
+.f-item { display: flex; align-items: center; min-width: 0; }
+.f-wire { flex: 1 0 32px; position: relative; height: 1px; background: var(--line-strong); }
+.f-wire.forward::after, .f-wire.both::after { content: "▶"; position: absolute; right: -3px; top: -8px; font-size: 10px; color: var(--line-strong); }
+.f-wire.both::before { content: "◀"; position: absolute; left: -3px; top: -8px; font-size: 10px; color: var(--line-strong); }
+.f-wire .f-label { position: absolute; left: 4px; right: 8px; bottom: 3px; text-align: center; font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.f-wire.uses { background: none; height: 0; border-top: 1px dashed var(--line-strong); }
+.rail .row .reuse { flex: none; color: var(--muted); font-size: 12px; }
+.picker .rows { display: flex; flex-direction: column; overflow: auto; max-height: 50vh; }
+.picker .rows button { text-align: left; border: 0; background: transparent; padding: 2px 6px; }
+.picker .rows button:hover { background: var(--soft); }
+.picker .rows button.on { color: var(--accent); }
+.f-dir { display: none; }
+.f-node { max-width: 100%; min-width: 0; text-align: left; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--bg); padding: 5px 10px; line-height: 1.4; }
+.f-node:hover { background: var(--soft); }
+.f-node .glyph { color: var(--muted); margin-right: 6px; }
+.f-node .name { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.f-node .cite { display: block; font-size: 11px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.f-node.dim .name { color: var(--faint); }
+.f-node.cursor, .f-card.cursor { border-color: var(--accent); outline: 1px solid var(--accent); }
+.f-card { grid-area: card; min-width: 0; border: 1px solid var(--line-strong); border-radius: 4px; padding: 14px 18px 16px; background: var(--bg); }
+.f-card h1 { margin: 0 0 4px; }
+.f-card .f-status { display: block; color: var(--accent); font-size: 12px; }
+.f-card .cite { display: block; text-align: left; border: 0; background: transparent; padding: 0; color: var(--accent); }
+.f-card .md, .f-card .text { margin-top: 10px; }
+.f-card .uncited { color: var(--muted); margin: 0; }
+.f-card .note { color: var(--body); margin: 10px 0 0; }
+.f-vwire { width: 1px; height: 16px; background: var(--line-strong); align-self: center; }
+.f-down { grid-area: down; display: flex; flex-direction: column; align-items: stretch; }
+.f-kids-head { text-align: center; margin: 4px 0 8px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+.f-kids { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+@container (max-width: 700px) {
+  .focus { grid-template-columns: 1fr; grid-template-areas: "up" "card" "in" "out" "down"; row-gap: 10px; }
+  .f-wire { flex: 0 0 auto; height: auto; background: none; order: -1; margin-right: 8px; }
+  .f-wire.uses { border-top: 0; }
+  .f-wire::before, .f-wire::after { content: none !important; }
+  .f-wire .f-label { position: static; }
+  .f-dir { display: inline; margin-right: 6px; color: var(--faint); }
+  .f-vwire { display: none; }
+}
 .crumbline a { cursor: pointer; }
 .crumbline a:hover { color: var(--text); text-decoration: underline; }
-.walk h1 { margin-bottom: 4px; }
-.walk > .cite { border: 0; background: transparent; padding: 0; color: var(--accent); }
 @media (min-width: 1100px) { body.reviewing .workspace { right: 540px; } }
-.walk > .uncited { color: var(--muted); margin: 0; }
-.walk .note { color: var(--body); margin: 10px 0 0; }
-.walk.dim h1 .text { color: var(--muted); }
 .dump { margin-top: 22px; }
 
 .node { position: absolute; background: var(--bg); border: 1px solid var(--line-strong); user-select: none; }
@@ -537,41 +578,78 @@ function citationOf(block) {
 }
 function shown(block) { return !grounded || block.evidence === "observed"; }
 function uncited(block) { return state.document.purpose === "explore" && block.evidence !== "observed"; }
-function parentBlock(id) {
-  let parent = null;
-  const walk = (diagram, owner) => {
-    for (const block of diagram.blocks) {
-      if (block.id === id) parent = owner;
-      if (block.children) walk(block.children, block);
-    }
-  };
-  if (state.document) walk(state.document.root, null);
-  return parent;
-}
-function owningDiagram(id) {
+/** The block with this id anywhere in the tree, or null. */
+function findBlock(id) {
   let found = null;
-  const walk = diagram => {
-    for (const block of diagram.blocks) {
-      if (block.id === id) found = diagram;
-      else if (block.children) walk(block.children);
-    }
-  };
-  if (state.document) walk(state.document.root);
+  if (!state.document) return null;
+  const walk = diagram => { for (const block of diagram.blocks) { if (block.id === id) found = block; if (block.children) walk(block.children); } };
+  walk(state.document.root);
   return found;
 }
-function walkMoves(block) {
-  const inside = (block ? block.children?.blocks ?? [] : state.document.root.blocks).filter(shown);
-  const next = [];
-  const diagram = block ? owningDiagram(block.id) : null;
-  if (block && diagram) {
-    for (const edge of diagram.edges) {
-      const otherId = edge.from === block.id ? edge.to : edge.to === block.id ? edge.from : null;
-      if (!otherId) continue;
-      const other = diagram.blocks.find(candidate => candidate.id === otherId);
-      if (other && shown(other)) next.push({ block: other, label: edge.label, inbound: edge.to === block.id });
-    }
+/**
+ * The focused block's neighbourhood: the parent, the links into and out of it,
+ * and its children, resolved against the document and the grounded filter. The
+ * parent is structural, so it is never filtered.
+ */
+function focusLists() {
+  const focus = state.flow.focus;
+  const shownBlock = id => { const found = findBlock(id); return found && shown(found) ? found : null; };
+  const link = entry => ({ block: shownBlock(entry.id), label: entry.label, direction: entry.direction, kind: entry.kind });
+  return {
+    parent: focus.parent ? findBlock(focus.parent) : null,
+    inputs: focus.inputs.map(link).filter(candidate => candidate.block),
+    outputs: focus.outputs.map(link).filter(candidate => candidate.block),
+    children: focus.children.map(shownBlock).filter(Boolean),
+  };
+}
+function focusCounts(lists) { return { up: lists.parent ? 1 : 0, in: lists.inputs.length, out: lists.outputs.length, down: lists.children.length }; }
+const FOCUS_CENTER = { slot: "center", index: 0 };
+let focusCursor = { for: undefined, slot: "center", index: 0 };
+/** Same as normalizeFocusCursor in flow.ts; the static page cannot import it. */
+function normalizeFocusCursor(cursor, counts) {
+  if (cursor.slot !== "center" && cursor.index >= counts[cursor.slot]) return FOCUS_CENTER;
+  return cursor;
+}
+/** Same as moveFocusCursor in flow.ts; the static page cannot import it. */
+function moveFocusCursor(cursor, move, counts) {
+  const current = normalizeFocusCursor(cursor, counts);
+  const step = (slot, delta) => {
+    const index = current.slot === slot ? current.index + delta : 0;
+    if (index < 0 || index >= counts[slot]) return current;
+    return { slot, index };
+  };
+  if (current.slot === "center") {
+    if (move === "up") return step("up", 1);
+    if (move === "down") return step("down", 1);
+    if (move === "left") return step("in", 1);
+    return step("out", 1);
   }
-  return { inside, next };
+  if (current.slot === "in") {
+    if (move === "left") return current;
+    if (move === "right") return FOCUS_CENTER;
+    return step("in", move === "up" ? -1 : 1);
+  }
+  if (current.slot === "out") {
+    if (move === "right") return current;
+    if (move === "left") return FOCUS_CENTER;
+    return step("out", move === "up" ? -1 : 1);
+  }
+  if (current.slot === "down") {
+    if (move === "down") return current;
+    if (move === "up") return FOCUS_CENTER;
+    return step("down", move === "left" ? -1 : 1);
+  }
+  return move === "down" ? FOCUS_CENTER : current;
+}
+/** The cursor to draw, reset to the centre whenever focus moved. */
+function cursorNow(lists) { return focusCursor.for !== state.selected ? FOCUS_CENTER : normalizeFocusCursor(focusCursor, focusCounts(lists)); }
+/** The block the cursor points at, or null on the centre. */
+function cursorTarget(cursor, lists) {
+  if (cursor.slot === "up") return cursor.index === 0 ? lists.parent : null;
+  if (cursor.slot === "in") return (lists.inputs[cursor.index] || { block: null }).block;
+  if (cursor.slot === "out") return (lists.outputs[cursor.index] || { block: null }).block;
+  if (cursor.slot === "down") return lists.children[cursor.index] || null;
+  return null;
 }
 /** One clickable row for a block: an arrow for direction, its status, title, the link's label, and in explore its citation. */
 function blockRow(block, arrow, edgeLabel) {
@@ -585,23 +663,62 @@ function blockRow(block, arrow, edgeLabel) {
     cite ? el("span", { class: "cite", text: cite }) : null);
 }
 /**
- * Up (the walk only: the page has its breadcrumb), inside and linked, as sections of rows.
+ * Inside and linked, as sections of rows. The page reads through this; the walk
+ * draws its own focus diagram from the same lists.
  * An empty "inside" shows only when `emptyText` says what to do about it.
  */
-function neighbourSections(block, emptyText, withParent) {
-  const moves = walkMoves(block);
-  const parent = withParent && block ? parentBlock(block.id) : null;
+function neighbourSections(block, emptyText) {
+  const lists = focusLists();
   const out = [];
-  if (parent) out.push(el("section", null, el("div", { class: "section-head", text: "Up" }), blockRow(parent, "↑", "")));
-  if (moves.inside.length || emptyText) {
-    const inside = el("section", null, el("div", { class: "section-head", text: (block ? "Inside" : "Top level") + " · " + moves.inside.length }));
-    for (const child of moves.inside) inside.append(blockRow(child, "", ""));
-    if (!moves.inside.length) inside.append(el("p", { class: "subtle", text: grounded ? "Nothing cited inside. Turn grounded off to see the guesses." : emptyText }));
+  if (lists.children.length || emptyText) {
+    const inside = el("section", null, el("div", { class: "section-head", text: (block ? "Inside" : "Top level") + " · " + lists.children.length }));
+    for (const child of lists.children) inside.append(blockRow(child, "", ""));
+    if (!lists.children.length) inside.append(el("p", { class: "subtle", text: grounded ? "Nothing cited inside. Turn grounded off to see the guesses." : emptyText }));
     out.push(inside);
   }
-  if (moves.next.length) out.push(el("section", null, el("div", { class: "section-head", text: "Linked · " + moves.next.length }),
-    ...moves.next.map(step => blockRow(step.block, step.inbound ? "←" : "→", step.label))));
+  const linked = [
+    ...lists.inputs.filter(link => link.kind === "edge").map(link => ({ link, arrow: "←" })),
+    ...lists.outputs.filter(link => link.kind === "edge").map(link => ({ link, arrow: "→" })),
+  ];
+  if (linked.length) out.push(el("section", null, el("div", { class: "section-head", text: "Linked · " + linked.length }),
+    ...linked.map(({ link, arrow }) => blockRow(link.block, arrow, link.label))));
+  // Reuse carries no arrow and no label: it points at a block defined elsewhere.
+  const uses = lists.inputs.filter(link => link.kind === "uses");
+  if (uses.length) out.push(el("section", null, el("div", { class: "section-head", text: "Uses · " + uses.length }),
+    ...uses.map(link => blockRow(link.block, "", ""))));
+  const usedBy = lists.outputs.filter(link => link.kind === "uses");
+  if (usedBy.length) out.push(el("section", null, el("div", { class: "section-head", text: "Used by · " + usedBy.length }),
+    ...usedBy.map(link => blockRow(link.block, "", ""))));
   return out;
+}
+/** How many blocks reuse each block id: the outline's ×N mark. */
+function usedCounts() {
+  const counts = new Map();
+  const walk = diagram => {
+    for (const block of diagram.blocks) {
+      for (const id of block.uses || []) counts.set(id, (counts.get(id) || 0) + 1);
+      if (block.children) walk(block.children);
+    }
+  };
+  if (state.document) walk(state.document.root);
+  return counts;
+}
+/** One block as a node of the focus diagram: its status, title and, in explore, its citation. */
+function nodeButton(block, isCursor) {
+  const status = state.flow.status;
+  const cite = state.document.purpose === "explore" ? citationOf(block) : "";
+  return el("button", {
+    class: "f-node" + (uncited(block) ? " dim" : "") + (isCursor ? " cursor" : ""),
+    title: status ? status.labels[block.status] : null,
+    onclick: () => op({ op: "focus", id: block.id }),
+  }, status ? el("span", { class: "glyph", text: status.glyphs[block.status] }) : null,
+    el("span", { class: "name", text: block.title || "(untitled)" }),
+    cite ? el("span", { class: "cite", text: cite }) : null);
+}
+/** A link drawn as a wire carrying its label; the arrowhead shows the direction of travel. */
+function wire(link, arrow) {
+  return el("span", { class: "f-wire " + link.direction + (link.kind === "uses" ? " uses" : "") },
+    el("span", { class: "f-label", text: link.label }), el("span", { class: "f-dir", text: arrow }));
 }
 /** The breadcrumb above a block: each ancestor is a way back up; the first is the overview. */
 function breadcrumbLinks() {
@@ -630,6 +747,10 @@ function actionRow(block, structure) {
     doc.purpose === "brainstorm" && !(step && step.act === "implement") ? implementButton(block) : null,
     doc.purpose === "explore" && block.status === "open" && !(step && step.act === "status")
       ? el("button", { text: "Mark explored", title: "space", onclick: () => op({ op: "setStatus", id: block.id, status: "settled" }) }) : null);
+  row.append(el("button", { text: "Uses…", title: "Link this block to a reusable block anywhere (U)", onclick: () => openUsesPicker(block) }));
+  if (state.flow.extractTargets.length) {
+    row.append(el("button", { text: "Extract…", title: "Move it up a level to share it; the block that held it uses it (M)", onclick: () => openExtract(block) }));
+  }
   if (structure) row.append(
     el("button", { text: "+ inside", title: "Add a block inside this one (O)", onclick: () => op({ op: "addBlock", parentId: block.id }) }),
     el("button", { class: "danger ghost push", text: "Delete", title: "Delete this block and everything inside it (⌫)", onclick: () => removeBlock(block) }));
@@ -649,17 +770,22 @@ function renderRail() {
   rail.append(el("div", { class: "label", text: "Outline" }));
   const status = state.flow.status;
   const pending = state.pending;
+  const counts = usedCounts();
   const walk = (diagram, depth) => {
     for (const block of diagram.blocks) {
       const mark = pending && pending.blockId === block.id
         ? (pending.state === "pending" ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner()) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" }))
         : null;
+      const reused = counts.get(block.id) || 0;
       rail.append(el("button", {
         class: "row" + (block.id === state.selected ? " current" : "") + (uncited(block) ? " dim" : ""),
         style: "padding-left:" + (8 + depth * 16) + "px",
         title: status ? status.labels[block.status] : null,
         onclick: () => op({ op: "focus", id: block.id }),
-      }, status ? el("span", { class: "glyph", text: status.glyphs[block.status] }) : null, el("span", { class: "name", text: block.title || "(untitled)" }), mark));
+      }, status ? el("span", { class: "glyph", text: status.glyphs[block.status] }) : null,
+        el("span", { class: "name", text: block.title || "(untitled)" }),
+        reused > 0 ? el("span", { class: "reuse", text: "×" + reused, title: "used by " + reused + (reused === 1 ? " block" : " blocks") }) : null,
+        mark));
       if (block.children) walk(block.children, depth + 1);
     }
   };
@@ -676,31 +802,82 @@ function renderRail() {
     if (current) current.scrollIntoView({ block: "nearest" });
   }
 }
-/** The walk: the focused block, its citation and note, the next step, then what is inside and linked. */
+/** The walk: the focused block as a readable card, its graph drawn around it. */
 function renderWalk() {
   const doc = state.document, page = $("blockPage");
   const active = document.activeElement;
   if (active && page.contains(active) && (active.tagName === "INPUT" || active.tagName === "TEXTAREA") && !(active.id === "dump" && active.value === "")) return;
   page.replaceChildren();
   const block = selectedBlock();
-  const card = el("div", { class: "walk" + (block && uncited(block) ? " dim" : "") });
+  const lists = focusLists();
+  const cursor = cursorNow(lists);
+  const card = el("div", { class: "walk" });
   const head = el("div", { class: "walk-head" }, el("div", { class: "label", text: doc.purpose + " · walk" }));
   if (doc.purpose === "explore") head.append(el("button", { class: grounded ? "primary" : "", text: grounded ? "grounded" : "all claims", title: "g: hide blocks without a citation", onclick: () => { grounded = !grounded; render(); } }));
   card.append(head);
+
+  const focus = el("div", { class: "focus" });
+  // Up: the parent block, or the document it sits in.
+  if (block) {
+    const up = el("div", { class: "f-up" });
+    up.append(lists.parent
+      ? nodeButton(lists.parent, cursor.slot === "up")
+      : el("button", { class: "top", text: doc.title, title: "Overview", onclick: () => op({ op: "focus", id: null }) }));
+    up.append(el("div", { class: "f-vwire" }));
+    focus.append(up);
+  }
+  // In: what this block reads from.
+  const incoming = el("div", { class: "f-in" });
+  lists.inputs.forEach((link, index) => incoming.append(el("div", { class: "f-item" },
+    nodeButton(link.block, cursor.slot === "in" && cursor.index === index),
+    wire(link, "←"))));
+  focus.append(incoming);
+
+  const centre = el("div", { class: "f-card" + (cursor.slot === "center" ? " cursor" : "") });
   if (!block) {
-    card.append(el("h1", { text: doc.title }));
-    if (doc.goal) card.append(el("p", { class: "note", text: doc.goal }));
-    card.append(el("div", { class: "actions" }, stepButton(null)), stepDetail());
+    centre.append(el("h1", { text: doc.title }));
+    if (doc.goal) centre.append(el("p", { class: "note", text: doc.goal }));
+    centre.append(el("div", { class: "actions" }, stepButton(null)), stepDetail());
   } else {
     const patch = fields => op({ op: "patchBlock", id: block.id, fields });
-    card.append(el("h1", null, inlineText(block.title, "Name this idea", value => { if (value.trim()) patch({ title: value.trim() }); })));
+    centre.append(el("h1", null, inlineText(block.title, "Name this idea", value => { if (value.trim()) patch({ title: value.trim() }); })));
+    if (state.flow.status) centre.append(el("span", { class: "f-status", text: state.flow.status.glyphs[block.status] + " " + state.flow.status.labels[block.status] }));
     const cite = citationOf(block);
-    if (cite) card.append(el("button", { class: "cite", text: cite, title: "Open the cited range", onclick: () => openFile(block.sources[0].path, block.sources[0].startLine) }));
-    else if (doc.purpose === "explore") card.append(el("p", { class: "uncited", text: "not cited · " + block.evidence }));
-    card.append(el("div", { class: "note" }, inlineText(block.description, doc.purpose === "brainstorm" ? "One line about it" : "Notes", value => patch({ description: value }))));
-    card.append(actionRow(block, false), stepDetail());
+    if (cite) centre.append(el("button", { class: "cite", text: cite, title: "Open the cited range", onclick: () => openFile(block.sources[0].path, block.sources[0].startLine) }));
+    else if (doc.purpose === "explore") centre.append(el("p", { class: "uncited", text: "not cited · " + block.evidence }));
+    if (block.description.trim() && editBodyOf !== block.id) {
+      const view = markdown(block.description);
+      view.addEventListener("click", () => { editBodyOf = block.id; renderWalk(); });
+      centre.append(view);
+    } else {
+      const input = inlineText(block.description, doc.purpose === "brainstorm" ? "One line about it" : "Notes", value => patch({ description: value }), () => { editBodyOf = null; });
+      centre.append(input);
+      if (editBodyOf === block.id) requestAnimationFrame(() => input.focus());
+    }
+    centre.append(actionRow(block, false), stepDetail());
   }
-  card.append(...neighbourSections(block, doc.purpose === "brainstorm" ? "Nothing inside yet. Dump a line below." : "Nothing mapped inside yet.", true));
+  focus.append(centre);
+
+  // Out: what this block feeds.
+  const outgoing = el("div", { class: "f-out" });
+  lists.outputs.forEach((link, index) => outgoing.append(el("div", { class: "f-item" },
+    wire(link, "→"),
+    nodeButton(link.block, cursor.slot === "out" && cursor.index === index))));
+  focus.append(outgoing);
+
+  // Down: what is inside.
+  const down = el("div", { class: "f-down" });
+  if (block) down.append(el("div", { class: "f-vwire" }));
+  down.append(el("div", { class: "f-kids-head", text: (block ? "Inside" : "Top level") + " · " + lists.children.length }));
+  if (lists.children.length) {
+    const kids = el("div", { class: "f-kids" });
+    lists.children.forEach((child, index) => kids.append(nodeButton(child, cursor.slot === "down" && cursor.index === index)));
+    down.append(kids);
+  } else {
+    down.append(el("p", { class: "subtle", text: doc.purpose === "brainstorm"
+      ? "Nothing inside yet. Dump a line below."
+      : grounded ? "Nothing cited inside. Turn grounded off to see the guesses." : "Nothing mapped inside yet." }));
+  }
   if (doc.purpose === "brainstorm") {
     const input = el("input", { id: "dump", class: "dump", placeholder: block ? "Dump a line onto “" + (block.title || "this idea") + "” and press Enter" : "Dump the first idea and press Enter", spellcheck: "false" });
     input.addEventListener("keydown", event => {
@@ -711,8 +888,11 @@ function renderWalk() {
       input.value = "";
       op(block ? { op: "addBlock", parentId: block.id, title } : { op: "addBlock", title }).then(() => { const again = $("dump"); if (again) again.focus(); });
     });
-    card.append(input);
+    down.append(input);
   }
+  focus.append(down);
+
+  card.append(focus);
   page.append(card);
 }
 /** The document is authored as decisions and outcomes; the map only visualizes them. */
@@ -735,7 +915,7 @@ function renderWorkspace() {
         ...project.map(action => el("button", { title: "Previews the request first", onclick: () => openPreview(action.kind) }, action.label + "…")),
         el("button", { text: "+ block", onclick: () => op({ op: "addBlock" }) })),
       stepDetail(),
-      ...neighbourSections(null, "Nothing here yet. Add the first block.", false));
+      ...neighbourSections(null, "Nothing here yet. Add the first block."));
     page.scrollTop = pageScroll;
     return;
   }
@@ -765,7 +945,7 @@ function renderWorkspace() {
     else if (field === "expectedOutput") cell.append(inlineText(block.expectedOutput, "What does it produce?", value => patch({ expectedOutput: value })));
     fields.append(cell);
   }
-  content.append(el("section", null, fields), actionRow(block, true), stepDetail(), ...neighbourSections(block, "", false));
+  content.append(el("section", null, fields), actionRow(block, true), stepDetail(), ...neighbourSections(block, ""));
   const diagram = currentDiagram();
   if (!diagram.edges.some(edge => edge.from === block.id || edge.to === block.id)) {
     content.append(el("section", null, el("div", { class: "section-head", text: "Linked · 0" }),
@@ -1023,6 +1203,11 @@ function keyHints() {
     return [["drag", "move"], ["dbl-click", "add"], ["Enter", "inside"], ["Esc", "up"], ["v", "page"], ["F", "fit"], ["T", "tidy"]];
   }
   const hints = [["j k", "move"]];
+  if (surface === "page" && walking()) {
+    hints.push(["arrows", "walk"]);
+    const lists = focusLists();
+    if (cursorTarget(cursorNow(lists), lists)) hints.push(["Enter", "go"], ["Esc", "back"]);
+  }
   if (block) {
     if (flow.status) hints.push(["space", doc.purpose === "explore" ? "explored" : "status"]);
     if (doc.purpose === "explore") hints.push(["g", grounded ? "all claims" : "grounded"]);
@@ -1537,8 +1722,8 @@ function openKeys() {
   host.replaceChildren(el("div", { class: "modal", role: "dialog", "aria-label": "keyboard shortcuts" },
     el("h3", { text: "Keyboard shortcuts" }),
     el("div", { class: "keys" },
-      group("Move", [["j / k", "next / previous block"], ["n", "next open block"], ["Esc", "back out: block → overview"], ["v", "switch page ⇄ map"], ["/", "find a file"]]),
-      group("Edit", [["space", "step the status"], ["o / O", "add a block after / inside"], ["⌫", "delete the focused block"], ["⌘Z / ⇧⌘Z", "undo / redo"], ["⌘S", "save"], ["g", "grounded: hide uncited blocks (explore)"]]),
+      group("Move", [["j / k", "next / previous block"], ["← ↑ → ↓", "walk the focus diagram (brainstorm, explore)"], ["Enter", "go to the highlighted block"], ["n", "next open block"], ["Esc", "back out: block → overview"], ["v", "switch page ⇄ map"], ["/", "find a file"]]),
+      group("Edit", [["space", "step the status"], ["o / O", "add a block after / inside"], ["U", "uses: link to a reusable block anywhere"], ["M", "extract: move up a level to share it"], ["⌫", "delete the focused block"], ["⌘Z / ⇧⌘Z", "undo / redo"], ["⌘S", "save"], ["g", "grounded: hide uncited blocks (explore)"]]),
       group("Ask the agent", [...verbs, ["Enter", "submit an open preview"]]),
       group("Map", [["drag", "move a block, or pan"], ["dbl-click", "add a block there"], ["Enter", "go inside the focused block"], ["F2", "rename"], ["F / T", "fit / tidy"]])),
     el("div", { class: "row" }, el("button", { class: "primary", text: "Close", onclick: close }), el("span", { class: "hint", text: "? toggles this sheet" }))));
@@ -1577,7 +1762,86 @@ async function addAt(world) {
   if (result.ok) { editTitleOf = state.selected; renderCanvas(); }
 }
 function removeBlock(block) {
-  ask("Delete " + (block.title || "this block") + " and everything inside it?", "Delete", () => op({ op: "removeBlock", id: block.id }));
+  const doomed = new Set();
+  const collect = candidate => { doomed.add(candidate.id); if (candidate.children) candidate.children.blocks.forEach(collect); };
+  collect(block);
+  let users = 0;
+  const walk = diagram => {
+    for (const candidate of diagram.blocks) {
+      if (!doomed.has(candidate.id) && (candidate.uses || []).some(id => doomed.has(id))) users += 1;
+      if (candidate.children) walk(candidate.children);
+    }
+  };
+  if (state.document) walk(state.document.root);
+  const loses = users > 0 ? " " + users + " block" + (users === 1 ? " that uses it loses" : "s that use it lose") + " that link." : "";
+  ask("Delete " + (block.title || "this block") + " and everything inside it?" + loses, "Delete", () => op({ op: "removeBlock", id: block.id }));
+}
+
+// ---------------------------------------------------------------- reuse
+let pickerOpen = null, pickerFilter = "";
+function closePicker() {
+  pickerOpen = null;
+  pickerFilter = "";
+  const host = $("modal");
+  host.hidden = true;
+  host.replaceChildren();
+}
+function openUsesPicker(block) { pickerOpen = "uses"; pickerFilter = ""; renderUsesPicker(block.id, true); }
+/** The Uses dialog: every block this one may link to, its current links ticked. */
+function renderUsesPicker(id, focusInput) {
+  if (pickerOpen !== "uses" || !state || state.selected !== id) { closePicker(); return; }
+  const block = findBlock(id);
+  if (!block) { closePicker(); return; }
+  const needle = pickerFilter.trim().toLowerCase();
+  const rows = state.flow.useCandidates.filter(candidate => candidate.title.toLowerCase().includes(needle));
+  const host = $("modal");
+  host.hidden = false;
+  const input = el("input", { type: "text", placeholder: "filter blocks", value: pickerFilter });
+  input.addEventListener("input", () => { pickerFilter = input.value; renderUsesPicker(id, true); });
+  input.addEventListener("keydown", event => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    if (rows.length) toggleUse(id, rows[0]);
+  });
+  const list = el("div", { class: "rows" });
+  for (const candidate of rows) {
+    list.append(el("button", {
+      class: candidate.used ? "on" : "",
+      style: "padding-left:" + (6 + candidate.depth * 16) + "px",
+      text: (candidate.used ? "✓ " : "  ") + (candidate.title || "(untitled)"),
+      onclick: () => toggleUse(id, candidate),
+    }));
+  }
+  host.replaceChildren(el("div", { class: "modal picker", role: "dialog", "aria-label": "uses" },
+    el("h3", { text: "“" + (block.title || "this block") + "” uses" }),
+    input,
+    rows.length ? list : el("p", { class: "subtle", text: "No block matches." }),
+    el("div", { class: "row" },
+      el("button", { class: "primary", text: "Done", onclick: closePicker }),
+      el("span", { class: "hint", text: "Click or Enter to use a block; click a ✓ block to stop using it." }))));
+  if (focusInput) requestAnimationFrame(() => { input.focus(); input.setSelectionRange(input.value.length, input.value.length); });
+}
+async function toggleUse(id, candidate) {
+  await op({ op: candidate.used ? "removeUse" : "addUse", id, target: candidate.id });
+  renderUsesPicker(id, false);
+}
+/** Lift the block, and everything inside it, to a level that can share it. */
+function openExtract(block) {
+  pickerOpen = "extract";
+  const host = $("modal");
+  host.hidden = false;
+  const rows = el("div", { class: "rows" });
+  for (const target of state.flow.extractTargets) {
+    rows.append(el("button", {
+      text: target.label,
+      onclick: () => { closePicker(); op({ op: "extract", id: block.id, diagramId: target.diagramId }); },
+    }));
+  }
+  host.replaceChildren(el("div", { class: "modal picker", role: "dialog", "aria-label": "extract" },
+    el("h3", { text: "Extract “" + (block.title || "this block") + "” to a shared level" }),
+    el("p", { class: "subtle", text: "It keeps its id, status and everything inside it. The block that held it will use it; its links to former siblings become uses." }),
+    rows,
+    el("div", { class: "row" }, el("button", { text: "Cancel", onclick: closePicker }))));
 }
 function stepStatus(block) {
   const flow = state.flow;
@@ -1737,6 +2001,7 @@ document.addEventListener("keydown", event => {
   const typing = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT");
   const mod = event.metaKey || event.ctrlKey;
   if (mod && event.key.toLowerCase() === "s") { event.preventDefault(); op({ op: "save" }); return; }
+  if (event.key === "Escape" && pickerOpen) { closePicker(); return; }
   if (event.key === "Escape" && keysOpen) { keysOpen = false; $("modal").hidden = true; return; }
   if (event.key === "Escape" && (preview || confirming)) { if (confirming) { confirming = false; } closeModal(); return; }
   if (event.key === "Escape" && purposeOpen) { purposeOpen = false; render(); return; }
@@ -1744,20 +2009,42 @@ document.addEventListener("keydown", event => {
   if (event.key === "Enter" && preview && !typing && !confirming) { event.preventDefault(); submitVerb(preview.verb, preview.id); return; }
   if (event.key === "/" && !typing) { event.preventDefault(); filesOpen = true; loadFiles(); render(); requestAnimationFrame(() => { const input = document.querySelector("#files input"); if (input) input.focus(); }); return; }
   if (event.key === "?" && !typing) { event.preventDefault(); if (keysOpen) { keysOpen = false; $("modal").hidden = true; } else if (state) openKeys(); return; }
-  if (typing || preview || keysOpen) return;
+  if (typing || preview || keysOpen || pickerOpen) return;
   if (mod && event.key.toLowerCase() === "z") { event.preventDefault(); op({ op: event.shiftKey ? "redo" : "undo" }); return; }
   if (mod || !state || !state.document) return;
   const block = selectedBlock();
   const verb = state.flow.verbs.find(candidate => candidate.key === event.key);
   if (verb) { event.preventDefault(); if (block) openPreview(verb.id, block.id); return; }
   switch (event.key) {
+    case "ArrowLeft": case "ArrowRight": case "ArrowUp": case "ArrowDown": {
+      if (surface !== "page" || !walking()) return;
+      event.preventDefault();
+      const lists = focusLists();
+      focusCursor = { for: state.selected, ...moveFocusCursor(cursorNow(lists), event.key.slice(5).toLowerCase(), focusCounts(lists)) };
+      renderWalk();
+      return;
+    }
     case "Escape":
+      if (surface === "page" && walking() && cursorNow(focusLists()).slot !== "center") {
+        focusCursor = { for: state.selected, ...FOCUS_CENTER };
+        renderWalk();
+        return;
+      }
       if (surface === "map") { surface = "page"; render(); return; }
       if (selectedEdge) { selectedEdge = null; render(); return; }
       if (block) { op({ op: "focus", id: null }); return; }
       if (state.stack.length > 1) op({ op: "navigate", diagramId: state.stack[state.stack.length - 2] });
       return;
-    case "Enter": if (surface === "map" && block) op({ op: "enter", id: block.id }); return;
+    case "Enter":
+      if (surface === "map" && block) { op({ op: "enter", id: block.id }); return; }
+      if (surface === "page" && walking()) {
+        const lists = focusLists();
+        const target = cursorTarget(cursorNow(lists), lists);
+        if (target) { op({ op: "focus", id: target.id }); return; }
+        if (block && block.sources && block.sources[0]) { openFile(block.sources[0].path, block.sources[0].startLine); return; }
+        if (block) { editBodyOf = block.id; renderWalk(); }
+      }
+      return;
     case " ": event.preventDefault(); if (block) stepStatus(block); return;
     case "n": if (state.flow.nextOpen) { centerOn = state.flow.nextOpen; op({ op: "focus", id: state.flow.nextOpen }); } return;
     case "j": case "k": {
@@ -1774,6 +2061,8 @@ document.addEventListener("keydown", event => {
       return;
     }
     case "v": toggleMap(); return;
+    case "U": if (block) openUsesPicker(block); return;
+    case "M": if (block && state.flow.extractTargets.length) openExtract(block); return;
     case "g": if (state.document.purpose === "explore") { grounded = !grounded; render(); } return;
     case "o": if (walking() && state.document.purpose === "brainstorm") { const dump = document.querySelector("#dump"); if (dump) dump.focus(); return; } op(block ? { op: "addBlock", afterId: block.id } : { op: "addBlock" }).then(r => { if (r.ok && surface === "map") { editTitleOf = state.selected; renderCanvas(); } }); return;
     case "O": if (block) op({ op: "addBlock", parentId: block.id }).then(r => { if (r.ok && surface === "map") { editTitleOf = state.selected; renderCanvas(); } }); return;

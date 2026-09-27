@@ -72,7 +72,13 @@ def record(cast: Path) -> None:
 
             driver.keys([b"a"])
             expect("Prune unnecessary blocks")
-            driver.keys([DOWN] * 5 + [ENTER], gap=0.12)
+            # The menu grew with reuse entries; walk to the prune row by its marker
+            # instead of counting, so adding an action again does not break the tour.
+            for _ in range(12):
+                if "› Prune unnecessary blocks" in "".join(data for _, data in driver.frames):
+                    break
+                driver.keys([DOWN], gap=0.12)
+            driver.keys([ENTER], gap=0.12)
             expect("Prune this map")
             show(1.5)  # composed, scoped prompt; do not submit
             driver.keys([ESC])

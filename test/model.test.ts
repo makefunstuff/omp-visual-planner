@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
+import type { DiagramDocument } from "../src/model.ts";
 import {
 	SCHEMA_VERSION,
 	addBlock,
 	addEdge,
+	addUse,
 	createBlock,
 	createDiagram,
 	createDocument,
@@ -11,11 +13,14 @@ import {
 	cycleBlock,
 	descendantIds,
 	eachBlock,
+	extractBlock,
+	extractTargets,
 	importLegacyBoard,
 	incidentEdges,
 	moveBlockInOrder,
 	nearestBlock,
 	removeBlock,
+	removeUse,
 	toolSchemasFor,
 	validateDiagram,
 	validateDocument,
@@ -174,6 +179,127 @@ describe("graph operations", () => {
 		expect(addBlock(document.root, document.root.id, createBlock({ id: "mid" }), "api")).toBe(true);
 		expect(addBlock(document.root, document.root.id, createBlock({ id: "end" }))).toBe(true);
 		expect(document.root.blocks.map(b => b.id)).toEqual(["api", "mid", "db", "end"]);
+	});
+});
+
+describe("reuse", () => {
+	const errors = (document: DiagramDocument): string[] => {
+		const result = validateDocument(document, type);
+		if (result.ok) throw new Error("expected the document to be invalid");
+		return result.errors;
+	};
+
+	describe("validation", () => {
+		test("a link to another block validates", () => {
+			const document = fixture();
+			document.root.blocks[1]!.uses = ["api"];
+			expect(validateDocument(document, type).ok).toBe(true);
+		});
+
+		test("rejects an id that is not in the document", () => {
+			const document = fixture();
+			document.root.blocks[1]!.uses = ["nope"];
+			expect(errors(document)).toContain('block "Database" cannot use nope, which is not in the document');
+		});
+
+		test("rejects using a block that contains it", () => {
+			const document = fixture();
+			document.root.blocks[0]!.children!.blocks[0]!.uses = ["api"];
+			expect(errors(document)).toContain('block "Auth" cannot use "API", which contains it');
+		});
+
+		test("rejects using a block inside it", () => {
+			const document = fixture();
+			document.root.blocks[0]!.uses = ["auth"];
+			expect(errors(document)).toContain('block "API" cannot use "Auth", which is inside it');
+		});
+
+		test("rejects using itself", () => {
+			const document = fixture();
+			document.root.blocks[1]!.uses = ["db"];
+			expect(errors(document)).toContain('block "Database" cannot use itself');
+		});
+
+		test("rejects a repeated id", () => {
+			const document = fixture();
+			document.root.blocks[1]!.uses = ["api", "api"];
+			expect(errors(document)).toContain("block \"Database\" uses api twice");
+		});
+	});
+
+	describe("mutation helpers", () => {
+		test("addUse links once and refuses the second time", () => {
+			const document = fixture();
+			expect(addUse(document.root, "db", "tokens")).toBeUndefined();
+			expect(document.root.blocks[1]!.uses).toEqual(["tokens"]);
+			expect(addUse(document.root, "db", "tokens")).toBe('"Database" already uses "Tokens"');
+		});
+
+		test("removeUse drops the id and the emptied key", () => {
+			const document = fixture();
+			document.root.blocks[1]!.uses = ["tokens"];
+			expect(removeUse(document.root, "db", "tokens")).toBe(true);
+			expect(removeUse(document.root, "db", "tokens")).toBe(false);
+			expect(document.root.blocks[1]!.uses).toBeUndefined();
+		});
+	});
+
+	test("deletion strips every use of a doomed id", () => {
+		const document = fixture();
+		document.root.blocks[1]!.uses = ["auth"];
+		expect(removeBlock(document.root, "api")).toBe(true);
+		expect(document.root.blocks[0]!.uses).toBeUndefined();
+	});
+
+	describe("extract", () => {
+		function nested() {
+			const document = createDocument({ title: "App" });
+			const tokens = createBlock({ id: "tokens", title: "Tokens", x: 2, y: 2 });
+			const invoices = createBlock({ id: "invoices", title: "Invoices", x: 2, y: 8 });
+			const billing = createBlock({
+				id: "billing",
+				title: "Billing",
+				x: 4,
+				y: 4,
+				children: createDiagram({
+					id: "billing-inner",
+					blocks: [tokens, invoices],
+					edges: [createEdge({ id: "signs", from: "tokens", to: "invoices", label: "signs" })],
+				}),
+			});
+			const app = createBlock({ id: "app", title: "App", x: 2, y: 2, children: createDiagram({ id: "app-inner", blocks: [billing] }) });
+			const admin = createBlock({ id: "admin", title: "Admin", x: 40, y: 2 });
+			document.root.blocks.push(app, admin);
+			return document;
+		}
+
+		test("targets run from the nearest level outward", () => {
+			const document = nested();
+			expect(extractTargets(document.root, "tokens").map(t => t.label)).toEqual([
+				'inside "App", next to "Billing"',
+				'top level, next to "App"',
+			]);
+		});
+
+		test("moving a block up keeps its id and turns sibling links into uses", () => {
+			const document = nested();
+			const result = extractBlock(document.root, "tokens", document.root.id, { x: 40, y: 2 });
+			expect(document.root.blocks.map(b => b.id)).toEqual(["app", "tokens", "admin"]);
+			const billing = document.root.blocks[0]!.children!.blocks[0]!;
+			expect(billing.uses).toEqual(["tokens"]);
+			expect(billing.children!.blocks.map(b => b.id)).toEqual(["invoices"]);
+			expect(billing.children!.blocks[0]!.uses).toEqual(["tokens"]);
+			expect(billing.children!.edges).toEqual([]);
+			expect(result.converted).toEqual([{ userId: "invoices", usedId: "tokens", label: "signs" }]);
+			expect(validateDocument(document, type).ok).toBe(true);
+		});
+
+		test("a top-level block cannot move up", () => {
+			const document = nested();
+			expect(() => extractBlock(document.root, "app", document.root.id, { x: 2, y: 2 })).toThrow(
+				'"App" is already at the top level',
+			);
+		});
 	});
 });
 

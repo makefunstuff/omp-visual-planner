@@ -37,22 +37,34 @@ import { ScopeError } from "./compose.ts";
 import {
 	type ComposedRequest,
 	type DocumentStart,
+	type FocusCursor,
+	type FocusNeighborhood,
+	type FocusSlot,
 	type PageField,
 	type ProjectAction,
+	FOCUS_CENTER,
 	codeRootFor,
 	composeRequest,
 	fieldLabel,
+	focusCounts,
+	focusNeighborhood,
+	focusTarget,
+	moveFocusCursor,
 	nextOpenBlock,
 	nextStep,
 	nextStatus,
+	normalizeFocusCursor,
 	outlineRows,
 	pageFields,
 	progressLabel,
 	projectActions,
+	extractedMessage,
 	startDocument,
 	statusCycle,
 	statusGlyph,
 	statusLabel,
+	type FocusLink,
+	useCandidates,
 	venueOf,
 	verbsFor,
 } from "./flow.ts";
@@ -66,6 +78,7 @@ import type {
 	EdgeDirection,
 	EdgePort,
 	EdgeRouting,
+	ExtractResult,
 	Intent,
 	Scope,
 	SourceRef,
@@ -79,11 +92,15 @@ import {
 	VENUES,
 	addBlock,
 	addEdge,
+	addUse,
 	createBlock,
 	createEdge,
 	cycleBlock,
 	descendantIds,
+	eachBlock,
 	eachDiagram,
+	extractBlock,
+	extractTargets,
 	findBlockLocation,
 	findDiagramPath,
 	findOwnedDiagram,
@@ -92,6 +109,8 @@ import {
 	nearestBlock,
 	parseSourceRef,
 	removeBlock,
+	removeUse,
+	usersOutside,
 } from "./model.ts";
 import type { DocumentStore } from "./store.ts";
 import { MAX_VIEWER_FILE_BYTES, PROJECT_DIR, applyReplacement, displayPath } from "./store.ts";
@@ -381,11 +400,24 @@ export interface DocumentDiff {
  * Fields a proposal can change on a block it keeps. Children are not one of
  * them: the nested walk already reports every block added or removed inside.
  */
-const BLOCK_FIELDS = ["title", "description", "expectedOutput", "acceptanceCriteria", "sources", "evidence", "actions", "position"] as const;
+const BLOCK_FIELDS = [
+	"title",
+	"description",
+	"expectedOutput",
+	"acceptanceCriteria",
+	"sources",
+	"evidence",
+	"actions",
+	"position",
+	"uses",
+] as const;
 export type DiffField = (typeof BLOCK_FIELDS)[number];
 
-/** A field as lines of text: one criterion or reference per line, so a reviewer compares line by line. */
-function fieldText(block: Block, field: DiffField): string {
+/**
+ * A field as lines of text: one criterion, reference or reused block per line,
+ * so a reviewer compares line by line. `name` turns a block id into a title.
+ */
+function fieldText(block: Block, field: DiffField, name: (id: string) => string): string {
 	switch (field) {
 		case "acceptanceCriteria":
 			return block.acceptanceCriteria.join("\n");
@@ -395,6 +427,8 @@ function fieldText(block: Block, field: DiffField): string {
 			return [block.actions.enhance, block.actions.execute].filter(text => text.trim().length > 0).join("\n");
 		case "position":
 			return `${block.position.x},${block.position.y}`;
+		case "uses":
+			return (block.uses ?? []).map(name).join("\n");
 		default:
 			return block[field];
 	}
@@ -413,6 +447,13 @@ export function diffDocuments(before: DiagramDocument, after: DiagramDocument): 
 	const diff = emptyDiff();
 	if (before.title !== after.title) diff.titleChanged = { from: before.title, to: after.title };
 	if (before.goal !== after.goal) diff.goalChanged = { from: before.goal, to: after.goal };
+	/** A `uses` list reads as titles; the id stays the fallback for a block this side no longer has. */
+	const nameIn = (document: DiagramDocument) => (id: string): string => {
+		const found = findBlockLocation(document.root, id)?.block;
+		return found && found.title.length > 0 ? found.title : id;
+	};
+	const nameBefore = nameIn(before);
+	const nameAfter = nameIn(after);
 
 	const walk = (a: Diagram, b: Diagram, path: string): void => {
 		const beforeBlocks = new Map(a.blocks.map(block => [block.id, block]));
@@ -428,7 +469,11 @@ export function diffDocuments(before: DiagramDocument, after: DiagramDocument): 
 			}
 			const fields = BLOCK_FIELDS.filter(field => JSON.stringify(previous[field]) !== JSON.stringify(block[field]));
 			if (fields.length === 0) continue;
-			const changes = fields.map(field => ({ field, from: fieldText(previous, field), to: fieldText(block, field) }));
+			const changes = fields.map(field => ({
+				field,
+				from: fieldText(previous, field, nameBefore),
+				to: fieldText(block, field, nameAfter),
+			}));
 			diff.modified.push({ id, title: block.title, changes, path });
 		}
 		const beforeEdges = new Map(a.edges.map(edge => [edge.id, edge]));
@@ -770,6 +815,8 @@ export class DiagramScreen implements Component {
 	#view: "outline" | "canvas" = "outline";
 	#collapsed = new Set<string>();
 	#grounded = false;
+	/** Where the highlight rests in the walk's focus diagram; `for` is the block it was left on. */
+	#focusCursor: FocusCursor & { for: string | undefined } = { for: undefined, ...FOCUS_CENTER };
 	#outlineTop = 0;
 	#modal: Modal | undefined;
 	#linkFrom: string | undefined;
@@ -1042,6 +1089,12 @@ export class DiagramScreen implements Component {
 			return;
 		}
 		if (key === "escape") {
+			// A highlight away from the centre recentres the focus diagram before anything backs out.
+			if (this.#view === "outline" && this.#pane === "canvas" && this.#walking(this.#block) && this.#walkFocus().cursor.slot !== "center") {
+				this.#focusCursor = { for: this.#selected, ...FOCUS_CENTER };
+				this.#options.tui.requestRender();
+				return;
+			}
 			// Escape backs out of the page (or inspector) first; only then does it close.
 			if (this.#pane === "inspector") {
 				this.#pane = "canvas";
@@ -1112,6 +1165,12 @@ export class DiagramScreen implements Component {
 			case "R":
 				this.#openReview();
 				return true;
+			case "U":
+				this.#openUsesPicker();
+				return true;
+			case "M":
+				this.#openExtract();
+				return true;
 			case "T":
 				this.#tidy();
 				return true;
@@ -1130,6 +1189,21 @@ export class DiagramScreen implements Component {
 		const rows = outlineRows(this.#document, this.#collapsed);
 		const index = rows.findIndex(row => row.block.id === this.#selected);
 		const row = rows[index];
+		// Arrows walk the focus diagram while it is on screen; j/k/h/l always move the outline.
+		if (this.#pane === "canvas" && this.#walking(this.#block) && (key === "up" || key === "down" || key === "left" || key === "right" || key === "enter")) {
+			const { hood, cursor } = this.#walkFocus();
+			if (key !== "enter") {
+				this.#focusCursor = { for: this.#selected, ...moveFocusCursor(cursor, key, focusCounts(hood)) };
+				return;
+			}
+			const target = focusTarget(hood, cursor);
+			if (target) {
+				for (const ancestor of findBlockLocation(this.#document.root, target.id)?.ancestors ?? []) this.#collapsed.delete(ancestor.id);
+				this.#focus(target.id);
+				return;
+			}
+			// The centre: fall through to the usual Enter — the cited source, else the page.
+		}
 		switch (key) {
 			case "j":
 			case "down": {
@@ -1411,6 +1485,82 @@ export class DiagramScreen implements Component {
 		};
 	}
 
+	/**
+	 * Reuse links, one list for the focused block. Toggling keeps the picker open
+	 * so a block can be linked to several others in one visit.
+	 */
+	#openUsesPicker(index = 0): void {
+		const block = this.#block;
+		if (!block) {
+			this.#message = "select a block first";
+			return;
+		}
+		const candidates = useCandidates(this.#document, block.id);
+		if (candidates.length === 0) {
+			this.#message = "nothing else in the document to use";
+			return;
+		}
+		this.#modal = {
+			kind: "list",
+			title: `"${block.title}" uses…`,
+			items: candidates.map(
+				candidate => `${candidate.used ? "[x]" : "[ ]"} ${"  ".repeat(candidate.depth)}${candidate.block.title || "(untitled)"}`,
+			),
+			index: Math.max(0, Math.min(index, candidates.length - 1)),
+			footer: "j/k select   Enter use / stop using   Esc close",
+			onEnter: i => {
+				const candidate = candidates[i];
+				if (!candidate) return;
+				if (candidate.used) {
+					this.#transact(document => {
+						if (!removeUse(document.root, block.id, candidate.block.id)) throw new Error("that use is already gone");
+					}, `"${block.title}" no longer uses "${candidate.block.title}"`);
+				} else {
+					this.#transact(document => {
+						const refusal = addUse(document.root, block.id, candidate.block.id);
+						if (refusal) throw new Error(refusal);
+					}, `"${block.title}" now uses "${candidate.block.title}"`);
+				}
+				this.#openUsesPicker(i);
+			},
+		};
+	}
+
+	/** Move the focused block, with its subtree, up to a level that can share it. */
+	#openExtract(): void {
+		const block = this.#block;
+		if (!block) {
+			this.#message = "select a block first";
+			return;
+		}
+		const targets = extractTargets(this.#document.root, block.id);
+		if (targets.length === 0) {
+			this.#message = `"${block.title}" is already at the top level`;
+			return;
+		}
+		this.#modal = {
+			kind: "list",
+			title: `extract "${block.title}" to…`,
+			items: targets.map(target => target.label),
+			index: 0,
+			footer: "j/k select   Enter extract   Esc close",
+			onEnter: i => {
+				this.#modal = undefined;
+				const target = targets[i];
+				if (!target) return;
+				const position = placeNewBlock(findDiagramPath(this.#document.root, target.diagramId)!.at(-1)!, target.anchorId);
+				let result: ExtractResult | undefined;
+				this.#transact(document => {
+					result = extractBlock(document.root, block.id, target.diagramId, position);
+				}, "extracted");
+				if (result) {
+					this.#focus(block.id);
+					this.#message = extractedMessage(this.#document, block.id, result);
+				}
+			},
+		};
+	}
+
 	#handleCanvasKey(key: string): void {
 		switch (key) {
 			case "h":
@@ -1671,15 +1821,17 @@ export class DiagramScreen implements Component {
 		const block = this.#block;
 		if (!block) return;
 		const count = descendantIds(block).length;
-		const diagramId = this.#diagram.id;
+		const users = usersOutside(this.#document.root, block.id).length;
+		const loses = users > 0 ? ` ${users} block${users === 1 ? " that uses it loses" : "s that use it lose"} that link.` : "";
 		this.#modal = {
 			kind: "confirm",
 			title: "delete block",
-			message: `Delete "${block.title}"${count > 1 ? ` and its ${count - 1} nested block(s)` : ""}? Its relationships go too.`,
+			message: `Delete "${block.title}"${count > 1 ? ` and its ${count - 1} nested block(s)` : ""}? Its relationships go too.${loses}`,
 			confirmLabel: "Delete",
 			onConfirm: () => {
+				// The document root, not this diagram: a use may point here from anywhere.
 				this.#transact(document => {
-					removeBlock(this.#diagramOf(document, diagramId), block.id);
+					removeBlock(document.root, block.id);
 				}, `deleted ${block.title}`);
 				if (this.#selected === block.id) {
 					this.#selected = this.#diagram.blocks[0]?.id;
@@ -2001,6 +2153,10 @@ export class DiagramScreen implements Component {
 					run: () => this.#openPreview(verb.intent, { kind: verb.kind, scope: { kind: "block", id: block.id } }),
 				});
 			}
+			choices.push({ label: "Uses…   U", run: () => this.#openUsesPicker() });
+			if (extractTargets(this.#document.root, block.id).length > 0) {
+				choices.push({ label: "Extract to a shared level…   M", run: () => this.#openExtract() });
+			}
 		}
 		for (const action of projectActions(purpose)) {
 			choices.push({ label: `${action.label}…`, run: () => this.#runProjectAction(action) });
@@ -2279,6 +2435,12 @@ export class DiagramScreen implements Component {
 				? section("Move", [
 						row("j / k", "next / previous block"),
 						row("h / l", "collapse or go to the parent / expand or go inside"),
+						...(purpose === "plan"
+							? []
+							: [
+									row("arrows", "walk: move to the parent, an input, an output or a child"),
+									row("Enter / Esc", "walk: go to the highlighted block / back to the centre"),
+								]),
 						row("n", purpose === "brainstorm" ? "next idea" : "next open block"),
 						row("v", "switch to the map"),
 					])
@@ -2300,6 +2462,8 @@ export class DiagramScreen implements Component {
 			...(cycle.length > 0 ? [row("space", `step the status: ${cycle}`)] : []),
 			...(purpose === "explore" ? [row("g", "grounded: hide blocks without a citation")] : []),
 			row("e / x", "link to a sibling / list and edit its links"),
+			row("U", "uses: link this block to a reusable block anywhere; ×N in the outline counts its users"),
+			row("M", "extract: move the block up a level to share it; the block that held it now uses it"),
 			row("E", "edit the whole block as markdown in $VISUAL or $EDITOR"),
 			row("d", "delete the block and everything inside it"),
 			row("u / Ctrl+R", "undo / redo"),
@@ -2641,6 +2805,10 @@ export class DiagramScreen implements Component {
 			if (focusIndex >= this.#outlineTop + height) this.#outlineTop = focusIndex - height + 1;
 		}
 		this.#outlineTop = Math.max(0, Math.min(this.#outlineTop, Math.max(0, rows.length - height)));
+		const usedBy = new Map<string, number>();
+		for (const { block } of eachBlock(document.root)) {
+			for (const id of block.uses ?? []) usedBy.set(id, (usedBy.get(id) ?? 0) + 1);
+		}
 		const pending = this.#options.registry.pending();
 		const pendingBlock = pending?.scope.kind === "block" ? pending.scope.id : undefined;
 		const lines: string[] = [];
@@ -2668,8 +2836,10 @@ export class DiagramScreen implements Component {
 					: "";
 			const title = block.title.length > 0 ? block.title : "(untitled)";
 			const name = focused ? theme.bold(title) : uncited ? theme.fg("muted", title) : title;
+			const reuse = usedBy.get(block.id) ?? 0;
+			const reuseMark = reuse > 0 ? theme.fg("muted", ` ×${reuse}`) : "";
 			const prefix = focused ? theme.fg("accent", "›") : " ";
-			const text = truncateToWidth(`${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${name}${badge}${marker}`, width, Ellipsis.Unicode);
+			const text = truncateToWidth(`${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${name}${badge}${reuseMark}${marker}`, width, Ellipsis.Unicode);
 			lines.push(focused ? theme.bg("selectedBg", pad(text, width)) : text);
 		}
 		return lines;
@@ -2781,7 +2951,7 @@ export class DiagramScreen implements Component {
 			lines.push(...(body.length > 0 ? body : [muted("—")]).map(line => `    ${line}`));
 		}
 		if (missing.length > 0) lines.push("", `  ${muted(`not written yet: ${missing.join(" · ")}`)}`);
-		lines.push(...this.#neighbourLines(block, false));
+		lines.push(...this.#neighbourLines(focusNeighborhood(this.#document, block.id, this.#isShown), false));
 		return this.#withFooter(lines, this.#stepLines(block, width), width, height, focusLine);
 	}
 
@@ -2819,12 +2989,17 @@ export class DiagramScreen implements Component {
 		return this.#document.purpose === "explore" ? `not cited · ${block.evidence}` : "";
 	}
 
-	/** What is inside the block and what it is linked to; grounded mode drops uncited blocks. */
-	#neighbourLines(block: Block, cite: boolean): string[] {
+	/**
+	 * What is inside the focused block and what it is linked to; grounded mode drops
+	 * uncited blocks. One renderer serves the page's neighbour list and the walk's,
+	 * so a cursor sitting in the list marks the same block the diagram would.
+	 */
+	#neighbourLines(hood: FocusNeighborhood, cite: boolean, cursor?: FocusCursor): string[] {
 		const theme = this.#options.theme;
 		const purpose = this.#document.purpose;
 		const muted = (text: string): string => theme.fg("muted", text);
-		const shown = (candidate: Block): boolean => !this.#grounded || candidate.evidence === "observed";
+		const target = cursor ? focusTarget(hood, cursor) : undefined;
+		const prefix = (id: string): string => (target?.id === id ? `${theme.fg("accent", "›")} ` : "    ");
 		const name = (candidate: Block): string => {
 			const title = candidate.title.length > 0 ? candidate.title : "(untitled)";
 			const glyph = statusGlyph(purpose, candidate.status);
@@ -2833,19 +3008,29 @@ export class DiagramScreen implements Component {
 			return `${glyph.length > 0 ? `${glyph} ` : ""}${text}${reference.length > 0 ? `  ${muted(reference)}` : ""}`;
 		};
 		const lines: string[] = [];
-		const inside = (block.children?.blocks ?? []).filter(shown);
+		const inside = hood.children;
 		if (inside.length > 0) {
-			lines.push("", `  ${muted(`inside (${inside.length})`)}`, ...inside.slice(0, 12).map(child => `    ${name(child)}`));
-			if (inside.length > 12) lines.push(`    ${muted(`… ${inside.length - 12} more`)}`);
+			lines.push("", `  ${muted(`inside (${inside.length})`)}`);
+			// The diagram renders every child; the capped list only belongs to the page.
+			for (const child of cursor ? inside : inside.slice(0, 12)) lines.push(`${prefix(child.id)}${name(child)}`);
+			if (!cursor && inside.length > 12) lines.push(`    ${muted(`… ${inside.length - 12} more`)}`);
 		}
-		const linked = this.#diagram.edges.flatMap(edge => {
-			const inbound = edge.to === block.id;
-			const otherId = edge.from === block.id ? edge.to : inbound ? edge.from : undefined;
-			const other = otherId === undefined ? undefined : this.#diagram.blocks.find(candidate => candidate.id === otherId);
-			if (!other || !shown(other)) return [];
-			return [`    ${inbound ? "←" : "→"} ${name(other)}${edge.label.length > 0 ? muted(` · ${edge.label}`) : ""}`];
-		});
+		const linked = [
+			...hood.inputs.filter(link => link.kind === "edge").map(link => ({ link, arrow: "←" })),
+			...hood.outputs.filter(link => link.kind === "edge").map(link => ({ link, arrow: "→" })),
+		].map(({ link, arrow }) => `${prefix(link.block.id)}${arrow} ${name(link.block)}${link.label.length > 0 ? muted(` · ${link.label}`) : ""}`);
 		if (linked.length > 0) lines.push("", `  ${muted("linked")}`, ...linked);
+		// Reuse reads as its own pair of lists: a use carries no label and no arrow.
+		const uses = hood.inputs.filter(link => link.kind === "uses");
+		if (uses.length > 0) {
+			lines.push("", `  ${muted(`uses (${uses.length})`)}`);
+			for (const link of uses) lines.push(`${prefix(link.block.id)}${name(link.block)}`);
+		}
+		const usedBy = hood.outputs.filter(link => link.kind === "uses");
+		if (usedBy.length > 0) {
+			lines.push("", `  ${muted(`used by (${usedBy.length})`)}`);
+			for (const link of usedBy) lines.push(`${prefix(link.block.id)}${name(link.block)}`);
+		}
 		return lines;
 	}
 
@@ -2884,34 +3069,225 @@ export class DiagramScreen implements Component {
 		return purpose === "explore" && (block === undefined || block.status === "open");
 	}
 
-	/** The walk: the focused block, its citation and note, then what is inside and linked. */
-	#walkLines(width: number, height: number): string[] {
+	/** Grounded mode drops uncited blocks; both the diagram and its cursor read through this. */
+	#isShown = (block: Block): boolean => !this.#grounded || block.evidence === "observed";
+
+	/**
+	 * The focus diagram around the current selection and the cursor on it. Keying
+	 * the cursor on the selected block means every path that changes the selection
+	 * — j/k, `n`, the web surface, an accepted proposal — resets it, with no hooks.
+	 */
+	#walkFocus(): { hood: FocusNeighborhood; cursor: FocusCursor } {
+		const hood = focusNeighborhood(this.#document, this.#selected, this.#isShown);
+		const cursor =
+			this.#focusCursor.for !== this.#selected ? FOCUS_CENTER : normalizeFocusCursor(this.#focusCursor, focusCounts(hood));
+		return { hood, cursor };
+	}
+
+	/** The walk as a stacked list: the narrow-pane fallback, in the diagram's own reading order. */
+	#focusListLines(block: Block | undefined, hood: FocusNeighborhood, cursor: FocusCursor, width: number): string[] {
 		const theme = this.#options.theme;
 		const document = this.#document;
 		const purpose = document.purpose;
-		const block = this.#block;
 		const muted = (text: string): string => theme.fg("muted", text);
+		const mark = (isCursor: boolean): string => (isCursor ? `${theme.fg("accent", "›")} ` : "  ");
+		const titleOf = (candidate: Block): string => (candidate.title.length > 0 ? candidate.title : "(untitled)");
 		const lines: string[] = [];
 		if (!block) {
 			lines.push(`  ${theme.bold(document.title)}`);
-			if (document.goal.trim().length > 0) lines.push(...wrapTextWithAnsi(muted(document.goal.trim()), Math.max(1, width - 2)).slice(0, 4).map(line => `  ${line}`));
-			lines.push("", `  ${muted(purpose === "brainstorm" ? "o dumps an idea; j moves onto one" : "j moves onto the first block")}`);
-			return this.#withFooter(lines, this.#stepLines(undefined, width), width, height, 0);
+			if (document.goal.trim().length > 0) {
+				lines.push(...wrapTextWithAnsi(muted(document.goal.trim()), Math.max(1, width - 2)).slice(0, 4).map(line => `  ${line}`));
+			}
+			lines.push(...this.#neighbourLines(hood, false, cursor));
+			return lines;
+		}
+		const parent = hood.parent;
+		if (parent) {
+			const glyph = statusGlyph(purpose, parent.status);
+			const name = cursor.slot === "up" ? theme.bold(titleOf(parent)) : titleOf(parent);
+			lines.push(`${mark(cursor.slot === "up")}↑ ${glyph.length > 0 ? `${glyph} ` : ""}${name}`);
+		} else {
+			lines.push(`${mark(false)}↑ ${muted(document.title)}`);
 		}
 		const status = statusLabel(purpose, block.status);
 		const badge = status === undefined ? "" : `  ${theme.fg("accent", `${statusGlyph(purpose, block.status)} ${status}`)}`;
-		lines.push(`  ${theme.bold(block.title.length > 0 ? block.title : "(untitled)")}${badge}`);
+		lines.push(`  ${theme.bold(titleOf(block))}${badge}`);
 		const reference = this.#citeLabel(block);
 		if (reference.length > 0) lines.push(`  ${theme.fg(block.sources.length > 0 ? "accent" : "muted", reference)}`);
 		lines.push(...this.#citationLines(block, Math.max(12, width - 2)).map(line => `  ${line}`));
 		if (block.description.trim().length > 0) {
 			lines.push("", ...this.#markdownLines(block.description.trim(), Math.max(1, width - 2), 6).map(line => `  ${line}`));
 		}
-		lines.push(...this.#neighbourLines(block, purpose === "explore"));
-		if (purpose === "brainstorm" && (block.children?.blocks.length ?? 0) === 0) {
+		lines.push(...this.#neighbourLines(hood, purpose === "explore", cursor));
+		if (purpose === "brainstorm" && hood.children.length === 0) {
 			lines.push("", `  ${muted("nothing inside yet — O dumps a line onto it")}`);
 		}
-		return this.#withFooter(lines, this.#stepLines(block, width), width, height, 0);
+		return lines;
+	}
+
+	/**
+	 * The walk as a focus diagram: the focused block read as a card, its parent
+	 * above, the links into it on the left and out of it on the right, and its
+	 * children below. A pane too narrow or too short falls back to the list, which
+	 * carries the same cursor.
+	 */
+	#walkLines(width: number, height: number): string[] {
+		const theme = this.#options.theme;
+		const document = this.#document;
+		const purpose = document.purpose;
+		const block = this.#block;
+		const { hood, cursor } = this.#walkFocus();
+		const footer = this.#stepLines(block, width);
+		const available = height - footer.length - 1;
+		const side = Math.min(22, Math.max(14, Math.floor((width - 8) / 4)));
+		const wire = 4;
+		const center = width - 2 * side - 2 * wire;
+		const inner = center - 4;
+		const listMode = (): string[] => this.#withFooter(this.#focusListLines(block, hood, cursor, width), footer, width, height, 0);
+		if (width < 66 || available < 9) return listMode();
+
+		const muted = (text: string): string => theme.fg("muted", text);
+		const accent = (text: string): string => theme.fg("accent", text);
+		const titleOf = (candidate: Block): string => (candidate.title.length > 0 ? candidate.title : "(untitled)");
+		const spotted = (candidate: Block): string => {
+			const glyph = statusGlyph(purpose, candidate.status);
+			const name = purpose === "explore" && candidate.evidence !== "observed" ? muted(titleOf(candidate)) : titleOf(candidate);
+			return `${glyph.length > 0 ? `${glyph} ` : ""}${name}`;
+		};
+		const markOf = (isCursor: boolean): string => (isCursor ? `${accent("›")} ` : "  ");
+		const padTo = (text: string, size: number): string => pad(text, size);
+		const rpadTo = (text: string, size: number): string => {
+			const clipped = truncateToWidth(text, size, Ellipsis.Unicode);
+			const space = size - visibleWidth(clipped);
+			return space > 0 ? " ".repeat(space) + clipped : clipped;
+		};
+		const centerIn = (text: string, size: number): string => {
+			const clipped = truncateToWidth(text, size, Ellipsis.Unicode);
+			const space = size - visibleWidth(clipped);
+			const lead = Math.max(0, Math.floor(space / 2));
+			return " ".repeat(lead) + clipped + " ".repeat(space - lead);
+		};
+		const place = (left: string, wireL: string, mid: string, wireR: string, right: string): string =>
+			padTo(left, side) + padTo(wireL, wire) + padTo(mid, center) + padTo(wireR, wire) + padTo(right, side);
+		const wireGlyph = (link: FocusLink): string => {
+			if (link.kind === "uses") return "┄┄┄▶";
+			const direction = link.direction;
+			return direction === "forward" ? "───▶" : direction === "both" ? "◀──▶" : "────";
+		};
+
+		// What hangs below the card: a header and the children as chips, wrapped.
+		const down: string[] = [];
+		const children = hood.children;
+		if (children.length > 0) {
+			down.push(`${" ".repeat(side + wire)}${muted(`↓ inside · ${children.length}`)}`);
+			const chipRows: { text: string; index: number }[][] = [];
+			let row: { text: string; index: number }[] = [];
+			let used = 0;
+			const chipRoom = center + 2 * wire;
+			children.forEach((child, index) => {
+				const text = `${markOf(cursor.slot === "down" && cursor.index === index)}${spotted(child)}`;
+				const chipWidth = visibleWidth(text);
+				if (row.length > 0 && used + 3 + chipWidth > chipRoom) {
+					chipRows.push(row);
+					row = [];
+					used = 0;
+				}
+				used += (row.length > 0 ? 3 : 0) + chipWidth;
+				row.push({ text, index });
+			});
+			if (row.length > 0) chipRows.push(row);
+			let start = 0;
+			if (chipRows.length > 3) {
+				const cursorRow =
+					cursor.slot === "down" ? chipRows.findIndex(candidate => candidate.some(chip => chip.index === cursor.index)) : 0;
+				start = Math.max(0, Math.min(cursorRow - 2, chipRows.length - 3));
+			}
+			const visible = chipRows.slice(start, start + 3);
+			const hidden = chipRows.length - visible.length;
+			visible.forEach((chips, index) => {
+				const tail = hidden > 0 && index === visible.length - 1 ? `  ${muted(`+${hidden}`)}` : "";
+				down.push(`${" ".repeat(side)}${chips.map(chip => chip.text).join("   ")}${tail}`);
+			});
+		} else if (purpose === "brainstorm") {
+			down.push(`${" ".repeat(side + wire)}${muted("nothing inside yet — O dumps a line onto it")}`);
+		} else if (this.#grounded && (block ? block.children?.blocks.length ?? 0 : document.root.blocks.length) > 0) {
+			down.push(`${" ".repeat(side + wire)}${muted("nothing cited inside — g shows every claim")}`);
+		}
+
+		const upRows = block ? 1 : 0;
+		const maxCard = available - upRows - down.length;
+		if (maxCard < 5) return listMode();
+
+		const header: string[] = [];
+		if (block) {
+			const status = statusLabel(purpose, block.status);
+			const badge = status === undefined ? "" : `  ${accent(`${statusGlyph(purpose, block.status)} ${status}`)}`;
+			header.push(`${theme.bold(titleOf(block))}${badge}`);
+			const reference = this.#citeLabel(block);
+			if (reference.length > 0) header.push(theme.fg(block.sources.length > 0 ? "accent" : "muted", reference));
+			header.push(...this.#citationLines(block, inner));
+		} else {
+			header.push(theme.bold(document.title));
+			if (document.goal.trim().length > 0) header.push(...wrapTextWithAnsi(muted(document.goal.trim()), Math.max(1, inner)).slice(0, 4));
+		}
+		const limit = Math.max(1, maxCard - 2 - header.length - 1);
+		const content = [...header];
+		if (block && block.description.trim().length > 0) content.push("", ...this.#markdownLines(block.description.trim(), inner, limit));
+		if (!block) content.push("", muted("↓ picks a top-level block, Enter opens it"));
+		const cardH = Math.min(maxCard, Math.max(content.length + 2, 2 * Math.max(hood.inputs.length, hood.outputs.length) + 2, 5));
+		if (content.length > cardH - 2) content.splice(cardH - 3, content.length, muted("… more — i opens the page"));
+
+		const slots = Math.floor((cardH - 2) / 2);
+		const windowStart = (count: number, slot: FocusSlot): number => {
+			if (count <= slots) return 0;
+			const wanted = cursor.slot === slot ? cursor.index - slots + 1 : 0;
+			return Math.max(0, Math.min(wanted, count - slots));
+		};
+		const leftCol: string[] = new Array(cardH).fill("");
+		const rightCol: string[] = new Array(cardH).fill("");
+		const leftWire: string[] = new Array(cardH).fill("");
+		const rightWire: string[] = new Array(cardH).fill("");
+		const inStart = windowStart(hood.inputs.length, "in");
+		for (let j = 0; j < Math.min(slots, hood.inputs.length - inStart); j += 1) {
+			const index = inStart + j;
+			const link = hood.inputs[index]!;
+			leftCol[1 + 2 * j] = `${markOf(cursor.slot === "in" && cursor.index === index)}${spotted(link.block)}`;
+			leftCol[2 + 2 * j] = link.label.length > 0 ? muted(link.label) : "";
+			leftWire[1 + 2 * j] = wireGlyph(link);
+		}
+		if (hood.inputs.length - inStart > slots) {
+			leftCol[2 * slots] = muted(`+${hood.inputs.length - inStart - slots} more`);
+		}
+		const outStart = windowStart(hood.outputs.length, "out");
+		for (let j = 0; j < Math.min(slots, hood.outputs.length - outStart); j += 1) {
+			const index = outStart + j;
+			const link = hood.outputs[index]!;
+			rightCol[1 + 2 * j] = `${markOf(cursor.slot === "out" && cursor.index === index)}${spotted(link.block)}`;
+			rightCol[2 + 2 * j] = link.label.length > 0 ? muted(link.label) : "";
+			rightWire[1 + 2 * j] = wireGlyph(link);
+		}
+		if (hood.outputs.length - outStart > slots) {
+			rightCol[2 * slots] = muted(`+${hood.outputs.length - outStart - slots} more`);
+		}
+
+		const border = (text: string): string => theme.fg(cursor.slot === "center" ? "borderAccent" : "border", text);
+		const card: string[] = [border(`┌${"─".repeat(inner + 2)}┐`)];
+		for (let row = 1; row <= cardH - 2; row += 1) card.push(`${border("│")} ${padTo(content[row - 1] ?? "", inner)} ${border("│")}`);
+		card.push(border(`└${"─".repeat(inner + 2)}┘`));
+
+		const rows: string[] = [];
+		if (block) {
+			const parent = hood.parent;
+			const name = parent ? spotted(parent) : "";
+			const text = parent ? `↑ ${name}` : muted(`↑ ${document.title}`);
+			const marked = cursor.slot === "up" ? `${accent("› ")}${theme.bold(parent ? name : document.title)}` : text;
+			rows.push(place("", "", centerIn(marked, center), "", ""));
+		}
+		for (let row = 0; row < cardH; row += 1) {
+			rows.push(place(rpadTo(leftCol[row]!, side), leftWire[row]!, card[row]!, rightWire[row]!, padTo(rightCol[row]!, side)));
+		}
+		rows.push(...down);
+		return this.#withFooter(rows, footer, width, height, 0);
 	}
 
 	#canvasLines(width: number, height: number): string[] {
@@ -3086,8 +3462,14 @@ export class DiagramScreen implements Component {
 		const block = this.#block;
 		// Most specific first: the status line is cut from the right on narrow terminals.
 		const hints = ["? keys"];
-		if (this.#walking(block) && block?.sources[0]) hints.push("Enter source  i edit");
-		else hints.push("Enter edit");
+		if (this.#walking(block)) {
+			const { hood, cursor } = this.#walkFocus();
+			const target = focusTarget(hood, cursor);
+			hints.push("arrows walk");
+			if (target) hints.push(`Enter go to "${target.title || "(untitled)"}"`, "Esc back");
+			else if (block?.sources[0]) hints.push("Enter source  i edit");
+			else hints.push("Enter edit");
+		} else hints.push("Enter edit");
 		if (purpose === "brainstorm") hints.push("O dump a line");
 		if (purpose === "plan") hints.push("space status");
 		if (purpose === "explore") hints.push("space explored", `g ${this.#grounded ? "all claims" : "grounded"}`);
@@ -3146,7 +3528,11 @@ export class DiagramScreen implements Component {
 		} else if (modal?.kind === "list") {
 			title = modal.title;
 			footer = modal.footer;
-			content = modal.items.map((item, index) => theme.fg(index === modal.index ? "accent" : "text", `${index === modal.index ? "›" : " "} ${item}`));
+			const itemLines = modal.items.map(
+				(item, index) => theme.fg(index === modal.index ? "accent" : "text", `${index === modal.index ? "›" : " "} ${item}`),
+			);
+			// Long pickers scroll so the selected row stays in view.
+			content = scroll(itemLines, Math.max(0, modal.index - (Math.max(1, Math.min(height, 100) - 4)) + 1)).lines;
 		} else if (modal?.kind === "review") {
 			boxWidth = Math.min(width, 110);
 			title = "review proposal";
@@ -3228,6 +3614,7 @@ export class DiagramScreen implements Component {
 			evidence: "evidence",
 			actions: "agent notes",
 			position: "position on the map",
+			uses: "uses",
 		};
 		if (diff.titleChanged || diff.goalChanged) {
 			lines.push(theme.bold("document"));

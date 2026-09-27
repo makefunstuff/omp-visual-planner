@@ -17,12 +17,15 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
 import {
 	type DocumentStart,
+	type FocusLinkKind,
 	type PageField,
 	type ProjectAction,
 	type VerbId,
 	codeRootFor,
 	composeRequest,
+	extractedMessage,
 	fieldLabel,
+	focusNeighborhood,
 	nextOpenBlock,
 	nextStep,
 	pageFields,
@@ -32,6 +35,7 @@ import {
 	statusCycle,
 	statusGlyph,
 	statusLabel,
+	useCandidates,
 	verbsFor,
 } from "./flow.ts";
 import {
@@ -40,7 +44,9 @@ import {
 	type BlockStatus,
 	type Diagram,
 	type DiagramDocument,
+	type EdgeDirection,
 	type Evidence,
+	type ExtractResult,
 	type Intent,
 	type Scope,
 	type Venue,
@@ -50,14 +56,18 @@ import {
 	type Purpose,
 	addBlock,
 	addEdge,
+	addUse,
 	createBlock,
 	createEdge,
+	extractBlock,
+	extractTargets,
 	findBlockLocation,
 	findDiagram,
 	findDiagramPath,
 	formatSourceRef,
 	moveBlockInOrder,
 	removeBlock,
+	removeUse,
 } from "./model.ts";
 import { type DocumentStore, defaultDocumentPath, displayPath } from "./store.ts";
 import { type DocumentDiff, acceptReplacement, diffDocuments, emptyDiff, placeNewBlock, tidyDiagram } from "./ui.ts";
@@ -307,6 +317,13 @@ export interface WebReview {
 	error?: string;
 }
 
+export interface WebFocus {
+	parent: string | null;
+	inputs: { id: string; label: string; direction: EdgeDirection; kind: FocusLinkKind }[];
+	outputs: { id: string; label: string; direction: EdgeDirection; kind: FocusLinkKind }[];
+	children: string[];
+}
+
 export interface WebFlow {
 	verbs: { id: VerbId; label: string; key: string }[];
 	/** Null for a brainstorm, whose ideas carry no status. */
@@ -316,6 +333,12 @@ export interface WebFlow {
 	progress: string;
 	nextOpen: string | undefined;
 	next: { label: string; detail: string; verb?: string; act: "verb" | "status" | "implement" | "enter" | "add" };
+	/** The focused block's parent, links and children, for the walk's focus diagram. */
+	focus: WebFocus;
+	/** Blocks the selected block may use, for the Uses dialog; empty with nothing selected. */
+	useCandidates: { id: string; title: string; depth: number; used: boolean }[];
+	/** Levels the selected block can be extracted to, nearest first; empty at the top level. */
+	extractTargets: { diagramId: string; label: string }[];
 }
 
 export interface WebState {
@@ -342,6 +365,8 @@ export interface WebState {
 function flowOf(document: DiagramDocument, selected: string | undefined): WebFlow {
 	const purpose = document.purpose;
 	const cycle = statusCycle(purpose);
+	// Unfiltered: grounded is client-side state, so the page drops hidden blocks itself.
+	const hood = focusNeighborhood(document, selected);
 	return {
 		verbs: verbsFor(purpose).map(verb => ({ id: verb.id, label: verb.label, key: verb.key })),
 		status:
@@ -357,7 +382,35 @@ function flowOf(document: DiagramDocument, selected: string | undefined): WebFlo
 		progress: progressLabel(document),
 		nextOpen: nextOpenBlock(document, selected),
 		next: nextStep(document, selected ? findBlockLocation(document.root, selected)?.block : undefined),
+		focus: {
+			parent: hood.parent?.id ?? null,
+			inputs: hood.inputs.map(link => ({ id: link.block.id, label: link.label, direction: link.direction, kind: link.kind })),
+			outputs: hood.outputs.map(link => ({ id: link.block.id, label: link.label, direction: link.direction, kind: link.kind })),
+			children: hood.children.map(child => child.id),
+		},
+		useCandidates:
+			selected === undefined
+				? []
+				: useCandidates(document, selected).map(candidate => ({
+						id: candidate.block.id,
+						title: candidate.block.title,
+						depth: candidate.depth,
+						used: candidate.used,
+					})),
+		extractTargets:
+			selected === undefined
+				? []
+				: extractTargets(document.root, selected).map(target => ({ diagramId: target.diagramId, label: target.label })),
 	};
+}
+
+/** `"Auth" now uses "Database"` — the reader needs titles, not ids. */
+function useMessage(root: Diagram, id: string, targetId: string, verb: "now uses" | "no longer uses"): string {
+	const name = (blockId: string): string => {
+		const block = findBlockLocation(root, blockId)?.block;
+		return block === undefined ? blockId : block.title.length > 0 ? block.title : block.id;
+	};
+	return `"${name(id)}" ${verb} "${name(targetId)}"`;
 }
 
 function stagedEntry(session: WebSession): JournalEntry | undefined {
@@ -683,6 +736,37 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					if (criteria !== undefined) target.block.acceptanceCriteria = criteria;
 				});
 				return { ok: true, changed: true, message: "block updated" };
+			}
+			case "addUse": {
+				const id = str(op.id, "id");
+				const targetId = str(op.target, "target");
+				store.transact(draft => {
+					const refusal = addUse(draft.root, id, targetId);
+					if (refusal) throw new OpError(refusal);
+				});
+				return { ok: true, changed: true, message: useMessage(store.require().root, id, targetId, "now uses") };
+			}
+			case "removeUse": {
+				const id = str(op.id, "id");
+				const targetId = str(op.target, "target");
+				store.transact(draft => {
+					if (!removeUse(draft.root, id, targetId)) throw new OpError(`${id} does not use ${targetId}`);
+				});
+				return { ok: true, changed: true, message: useMessage(store.require().root, id, targetId, "no longer uses") };
+			}
+			case "extract": {
+				const id = str(op.id, "id");
+				const diagramId = str(op.diagramId, "diagramId");
+				const level = extractTargets(document.root, id).find(target => target.diagramId === diagramId);
+				if (!level) throw new OpError("pick a level that contains the block");
+				const position = placeNewBlock(findDiagram(document.root, diagramId)!, level.anchorId);
+				let result: ExtractResult | undefined;
+				store.transact(draft => {
+					result = extractBlock(draft.root, id, diagramId, position);
+				});
+				if (!result) throw new OpError("the block was not extracted");
+				focusBlock(session, store.require(), id);
+				return { ok: true, changed: true, message: extractedMessage(store.require(), id, result) };
 			}
 			case "moveBlock": {
 				const id = str(op.id, "id");
