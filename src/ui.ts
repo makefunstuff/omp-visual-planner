@@ -82,6 +82,7 @@ import type {
 	Intent,
 	Scope,
 	SourceRef,
+	Surface,
 } from "./model.ts";
 import {
 	EDGE_DIRECTIONS,
@@ -89,6 +90,7 @@ import {
 	EDGE_ROUTINGS,
 	EVIDENCE_VALUES,
 	PURPOSES,
+	SURFACES,
 	VENUES,
 	addBlock,
 	addEdge,
@@ -389,8 +391,8 @@ export interface FieldChange {
 }
 
 export interface DocumentDiff {
-	added: { id: string; title: string; path: string }[];
-	removed: { id: string; title: string; path: string }[];
+	added: { id: string; title: string; path: string; surface?: Surface }[];
+	removed: { id: string; title: string; path: string; surface?: Surface }[];
 	modified: { id: string; title: string; changes: FieldChange[]; path: string }[];
 	edgesAdded: string[];
 	edgesRemoved: string[];
@@ -413,6 +415,7 @@ const BLOCK_FIELDS = [
 	"actions",
 	"position",
 	"uses",
+	"surface",
 ] as const;
 export type DiffField = (typeof BLOCK_FIELDS)[number];
 
@@ -432,6 +435,8 @@ function fieldText(block: Block, field: DiffField, name: (id: string) => string)
 			return `${block.position.x},${block.position.y}`;
 		case "uses":
 			return (block.uses ?? []).map(name).join("\n");
+		case "surface":
+			return block.surface ?? "";
 		default:
 			return block[field];
 	}
@@ -467,7 +472,7 @@ export function diffDocuments(before: DiagramDocument, after: DiagramDocument): 
 		for (const [id, block] of afterBlocks) {
 			const previous = beforeBlocks.get(id);
 			if (!previous) {
-				diff.added.push({ id, title: block.title, path });
+				diff.added.push({ id, title: block.title, path, ...(block.surface !== undefined ? { surface: block.surface } : {}) });
 				continue;
 			}
 			const fields = BLOCK_FIELDS.filter(field => JSON.stringify(previous[field]) !== JSON.stringify(block[field]));
@@ -498,7 +503,7 @@ export function diffDocuments(before: DiagramDocument, after: DiagramDocument): 
 		}
 		const collect = (diagram: Diagram, label: string, into: DocumentDiff["added"] | DocumentDiff["removed"]): void => {
 			for (const block of diagram.blocks) {
-				into.push({ id: block.id, title: block.title, path: label });
+				into.push({ id: block.id, title: block.title, path: label, ...(block.surface !== undefined ? { surface: block.surface } : {}) });
 				if (block.children) collect(block.children, `${label} > ${block.title}`, into);
 			}
 		};
@@ -717,6 +722,7 @@ type FieldId =
 	| "evidence"
 	| "enhance"
 	| "venue"
+	| "surface"
 	| "execute"
 	| `source:${number}`
 	| "source:add"
@@ -1944,6 +1950,17 @@ export class DiagramScreen implements Component {
 			}, `venue ${next}`);
 			return;
 		}
+		if (field === "surface" && block) {
+			const order: (Surface | undefined)[] = [undefined, ...SURFACES];
+			const next = order[(order.indexOf(block.surface) + 1) % order.length];
+			this.#transact(document => {
+				const target = findBlockLocation(document.root, block.id);
+				if (!target) return;
+				if (next === undefined) delete target.block.surface;
+				else target.block.surface = next;
+			}, `surface ${next ?? "none"}`);
+			return;
+		}
 		if (field === "source:add") {
 			this.#openTextPrompt("add source reference (path or path:10-40)", "", value => {
 				const source = parseSourceRef(value);
@@ -2988,7 +3005,7 @@ export class DiagramScreen implements Component {
 		};
 		const status = statusLabel(purpose, block.status);
 		const badge = status === undefined ? "" : `  ${theme.fg("accent", `${statusGlyph(purpose, block.status)} ${status}`)}`;
-		lines.push(`${cursor(current === "title")}${theme.bold(block.title.length > 0 ? block.title : "(untitled)")}${badge}`);
+		lines.push(`${cursor(current === "title")}${theme.bold(block.title.length > 0 ? block.title : "(untitled)")}${badge}${this.#surfaceBadge(block)}`);
 		if (!editing && purpose !== "brainstorm") {
 			const meta = [`${muted("evidence")} ${block.evidence}`];
 			if (purpose === "plan") meta.push(`${muted("venue")} ${venueOf(block)}`);
@@ -2997,7 +3014,7 @@ export class DiagramScreen implements Component {
 		lines.push("");
 		const missing: string[] = [];
 		for (const field of pageFields(purpose)) {
-			if (field === "title" || (!editing && (field === "evidence" || field === "venue"))) continue;
+			if (field === "title" || (!editing && (field === "evidence" || field === "venue" || field === "surface"))) continue;
 			const name = fieldLabel(purpose, field);
 			if (field === "sources") {
 				if (block.sources.length === 0 && !editing) continue;
@@ -3037,6 +3054,8 @@ export class DiagramScreen implements Component {
 				return choices(EVIDENCE_VALUES, block.evidence);
 			case "venue":
 				return choices(VENUES, venueOf(block));
+			case "surface":
+				return choices(["none", ...SURFACES], block.surface ?? "none");
 			case "enhance":
 				return wrap(block.actions.enhance, 3);
 			case "execute":
@@ -3044,6 +3063,11 @@ export class DiagramScreen implements Component {
 			default:
 				return [];
 		}
+	}
+
+	/** A surface block's kind after its title; nothing for other blocks. */
+	#surfaceBadge(block: Block): string {
+		return block.surface === undefined ? "" : `  ${this.#options.theme.fg("muted", `[${block.surface}]`)}`;
 	}
 
 	/** A block's first citation for one line: `path:10-40 +2`, or why there is none. */
@@ -3175,7 +3199,7 @@ export class DiagramScreen implements Component {
 		}
 		const status = statusLabel(purpose, block.status);
 		const badge = status === undefined ? "" : `  ${theme.fg("accent", `${statusGlyph(purpose, block.status)} ${status}`)}`;
-		lines.push(`  ${theme.bold(titleOf(block))}${badge}`);
+		lines.push(`  ${theme.bold(titleOf(block))}${badge}${this.#surfaceBadge(block)}`);
 		const reference = this.#citeLabel(block);
 		if (reference.length > 0) lines.push(`  ${theme.fg(block.sources.length > 0 ? "accent" : "muted", reference)}`);
 		lines.push(...this.#citationLines(block, Math.max(12, width - 2)).map(line => `  ${line}`));
@@ -3286,7 +3310,7 @@ export class DiagramScreen implements Component {
 		if (block) {
 			const status = statusLabel(purpose, block.status);
 			const badge = status === undefined ? "" : `  ${accent(`${statusGlyph(purpose, block.status)} ${status}`)}`;
-			header.push(`${theme.bold(titleOf(block))}${badge}`);
+			header.push(`${theme.bold(titleOf(block))}${badge}${this.#surfaceBadge(block)}`);
 			const reference = this.#citeLabel(block);
 			if (reference.length > 0) header.push(theme.fg(block.sources.length > 0 ? "accent" : "muted", reference));
 			header.push(...this.#citationLines(block, inner));
@@ -3679,6 +3703,7 @@ export class DiagramScreen implements Component {
 			actions: "agent notes",
 			position: "position on the map",
 			uses: "uses",
+			surface: "surface",
 		};
 		if (diff.titleChanged || diff.goalChanged) {
 			lines.push(theme.bold("document"));
@@ -3692,7 +3717,7 @@ export class DiagramScreen implements Component {
 			lines.push("");
 		}
 		if (diff.added.length > 0) {
-			lines.push(theme.bold(`added (${diff.added.length})`), ...diff.added.map(entry => `  ${theme.fg("success", `+ ${entry.title}`)}${where(entry.path)}`), "");
+			lines.push(theme.bold(`added (${diff.added.length})`), ...diff.added.map(entry => `  ${theme.fg("success", `+ ${entry.title}${entry.surface ? ` [${entry.surface}]` : ""}`)}${where(entry.path)}`), "");
 		}
 		if (diff.removed.length > 0) {
 			lines.push(theme.bold(`removed (${diff.removed.length})`), ...diff.removed.map(entry => `  ${theme.fg("error", `- ${entry.title}`)}${where(entry.path)}`), "");

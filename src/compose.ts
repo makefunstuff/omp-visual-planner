@@ -15,6 +15,7 @@ import {
 	type Purpose,
 	type Scope,
 	type SourceRef,
+	type Surface,
 	eachBlock,
 	eachDiagram,
 	findBlockLocation,
@@ -250,7 +251,10 @@ function renderScope(resolution: ScopeResolution, document: DiagramDocument): st
 		const block = location.block;
 		const status = statusLabel(document.purpose, block.status);
 		const statusPart = status === undefined ? "" : ` — status: ${status}`;
-		lines.push(`${indent}- [${block.id}] ${block.title || "(untitled)"} — evidence: ${block.evidence}${statusPart}`);
+		const surfacePart = block.surface === undefined ? "" : ` — surface: ${block.surface}`;
+		lines.push(
+			`${indent}- [${block.id}] ${block.title || "(untitled)"}${surfacePart} — evidence: ${block.evidence}${statusPart}`,
+		);
 		const sub = indent + "  ";
 		if (block.description.trim().length > 0) {
 			lines.push(`${sub}description: ${block.description.trim().replaceAll("\n", "\n" + sub + "  ")}`);
@@ -357,6 +361,44 @@ function reuseSection(document: DiagramDocument, resolution: ScopeResolution): s
 	const rest = outside.length - CATALOG_LIMIT;
 	if (rest > 0) lines.push(`- … ${rest} more: read them with visual_planner_read (scope project)`);
 	return `${REUSE_RULES}\n\n<planner-data>\n${lines.join("\n")}\n</planner-data>`;
+}
+
+/** Requests that add or regroup blocks may tag the ones a person looks at. */
+const SURFACE_INTENTS: ReadonlySet<Intent> = new Set(["plan", "decompose", "replan"]);
+
+const SURFACE_RULES = [
+	"## Visual surfaces",
+	'`surface` marks a block a person looks at: `"page"` for a whole screen or page, `"component"` for a reusable piece of UI inside pages. Leave it out everywhere else; most blocks are not surfaces.',
+	"- You may add `surface` to a block that has none. Never change or remove one that is set: the planner keeps the human's value.",
+	"- A page's components nest as its `children`. A component that more than one page needs is defined once and linked through `uses`.",
+	"- Keep every ```wireframe block in a description you keep. Wireframes are drawn one block at a time by a refine request, not here.",
+].join("\n");
+
+/** Where the design system lives. The planner points at it; it never writes it. */
+function designSystemLine(codeRoot: string | undefined): string {
+	const where = codeRoot ? `\`DESIGN.md\` at the root of ${codeRoot}` : "`DESIGN.md` at the workspace root";
+	return `- The design system is ${where} when it exists: read it and use its tokens (colors, typography, spacing, components) by name. Reading it is allowed in any document. Never create or edit it; when it is missing, do not invent a palette.`;
+}
+
+/** Refine on a surface block: draw it. */
+function sketchSection(surface: Surface, codeRoot: string | undefined): string {
+	return [
+		"## Visual design",
+		`This block is a ${surface}: design it, do not only describe it.`,
+		"- Put one wireframe in `description`: a fenced block opened with ```wireframe, at most 12 lines of 60 columns, drawn with box-drawing or ASCII characters. Show its regions top to bottom, the primary action, and real labels, never lorem ipsum. Replace an existing wireframe instead of adding a second.",
+		"- Under the wireframe, one line per state it needs: empty, loading, error, and any other the idea has.",
+		"- Draw the components it contains or uses as labelled boxes; each component is designed on its own block.",
+		designSystemLine(codeRoot),
+	].join("\n");
+}
+
+/** Execute over surface blocks: build what the wireframe shows. */
+function buildSection(codeRoot: string | undefined): string {
+	return [
+		"## Visual design",
+		"Blocks marked `surface` carry a ```wireframe in their description. Build what it shows: its regions, primary action, labels and listed states. The wireframe fixes layout and content, not pixels.",
+		designSystemLine(codeRoot),
+	].join("\n");
 }
 
 /** The blocks outside the scope a relevance judge selected, as prompt context. */
@@ -494,6 +536,15 @@ export function composePrompt(
 		if (section) sections.push(section);
 	}
 	if (REUSE_INTENTS.has(intent)) sections.push(reuseSection(document, resolution));
+	if (document.purpose !== "explore") {
+		if (SURFACE_INTENTS.has(intent)) sections.push(SURFACE_RULES);
+		const focus = resolution.scope.kind === "block" ? resolution.locations[0]?.block : undefined;
+		if (intent === "enhance" && focus?.surface !== undefined) sections.push(sketchSection(focus.surface, options.codeRoot));
+		const designed = resolution.locations.some(
+			location => location.block.surface !== undefined || location.ancestors.some(ancestor => ancestor.surface !== undefined),
+		);
+		if (intent === "execute" && designed) sections.push(buildSection(options.codeRoot));
+	}
 	sections.push(
 		[
 			"## Boundaries",

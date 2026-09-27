@@ -341,3 +341,56 @@ describe("judged related context", () => {
 		expect(text.indexOf("## Related context")).toBeLessThan(text.indexOf("## Boundaries"));
 	});
 });
+
+describe("visual design", () => {
+	function design() {
+		const document = createDocument({ title: "Shop", goal: "Launch a store", purpose: "brainstorm" });
+		const home = createBlock({ id: "home", title: "Home", surface: "page", description: "landing" });
+		const idea = createBlock({ id: "idea", title: "Idea" });
+		document.root.blocks.push(home, idea);
+		return document;
+	}
+
+	test("refine on a surface draws it, names the design system and tags the scope line", () => {
+		const text = composePrompt(design(), { kind: "block", id: "home" }, "enhance", { codeRoot: "/work/app" }).text;
+		expect(text).toContain("## Visual design");
+		expect(text).toContain("This block is a page");
+		expect(text).toContain("opened with ```wireframe");
+		expect(text).toContain("`DESIGN.md` at the root of /work/app");
+		expect(text).toContain("— surface: page");
+	});
+
+	test("refine on a block that is not a surface gets neither section", () => {
+		const text = composePrompt(design(), { kind: "block", id: "idea" }, "enhance").text;
+		expect(text).not.toContain("## Visual design");
+		expect(text).not.toContain("## Visual surfaces");
+	});
+
+	test("decompose teaches surface tagging before the boundaries", () => {
+		const text = composePrompt(design(), { kind: "block", id: "idea" }, "decompose").text;
+		expect(text).toContain("## Visual surfaces");
+		expect(text.indexOf("## Visual surfaces")).toBeLessThan(text.indexOf("## Boundaries"));
+	});
+
+	test("explore documents get no surface rules", () => {
+		const document = design();
+		document.purpose = "explore";
+		const text = composePrompt(document, { kind: "block", id: "idea" }, "decompose").text;
+		expect(text).not.toContain("## Visual surfaces");
+	});
+
+	test("execute over a surface says to build what the wireframe shows", () => {
+		const document = createDocument({ title: "Shop", goal: "Launch a store", purpose: "plan" });
+		const home = createBlock({
+			id: "home",
+			title: "Home",
+			surface: "page",
+			status: "settled",
+			description: "```wireframe\n[ Sign up ]\n```",
+			acceptanceCriteria: ["hero renders"],
+		});
+		document.root.blocks.push(home);
+		const text = composePrompt(document, { kind: "block", id: "home" }, "execute").text;
+		expect(text).toContain("Build what it shows");
+	});
+});

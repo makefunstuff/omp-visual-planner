@@ -441,6 +441,20 @@ describe("canvas rendering", () => {
 		expect(h.store.require().root.blocks[0]!.description).toBe("a loose idea");
 	});
 
+	test("a page shows its surface and Enter on the surface row cycles it", async () => {
+		const ideas = createDocument({ id: "ideas", title: "Ideas", purpose: "brainstorm" });
+		ideas.root.blocks.push(createBlock({ id: "home", title: "Home", surface: "page" }));
+		const h = await harness({ width: 120, rows: 24, document: ideas });
+		expect(plain(h.screen.render(120)).join("\n")).toContain("[page]");
+		h.screen.handleInput("\r");
+		h.screen.handleInput("j");
+		h.screen.handleInput("j");
+		h.screen.handleInput("\r");
+		expect(h.store.require().root.blocks[0]!.surface).toBe("component");
+		h.screen.handleInput("\r");
+		expect(h.store.require().root.blocks[0]!.surface).toBeUndefined();
+	});
+
 	test("discovering from the terminal highlights the cited source", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "omp-visual-planner-cite-"));
 		directories.push(directory);

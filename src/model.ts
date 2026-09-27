@@ -19,6 +19,8 @@ export type Purpose = "brainstorm" | "plan" | "explore";
 export type BlockStatus = "open" | "settled" | "done";
 /** Where a ready leaf is executed. Omitted means this session. */
 export type Venue = "here" | "subagent" | "worktree";
+/** What a person looks at: a whole page or screen, or a reusable piece of UI inside pages. Omitted for everything else. */
+export type Surface = "page" | "component";
 
 export interface SourceRef {
 	path: string;
@@ -49,6 +51,8 @@ export interface Block {
 	status: BlockStatus;
 	/** Omitted means `here`. A proposal never changes it; acceptance keeps the human's choice. */
 	venue?: Venue;
+	/** Omitted for blocks nobody looks at. A proposal may add one; acceptance never changes or removes one the block already has. */
+	surface?: Surface;
 	/** Ids of blocks this block reuses: a shared block is defined once and linked from anywhere. Omitted when empty. */
 	uses?: string[];
 	actions: BlockActions;
@@ -97,6 +101,7 @@ export const EVIDENCE_VALUES: readonly Evidence[] = ["observed", "inferred", "un
 export const PURPOSES: readonly Purpose[] = ["brainstorm", "plan", "explore"];
 export const BLOCK_STATUSES: readonly BlockStatus[] = ["open", "settled", "done"];
 export const VENUES: readonly Venue[] = ["here", "subagent", "worktree"];
+export const SURFACES: readonly Surface[] = ["page", "component"];
 export const EDGE_DIRECTIONS: readonly EdgeDirection[] = ["forward", "both", "none"];
 export const EDGE_ROUTINGS: readonly EdgeRouting[] = ["auto", "horizontal-first", "vertical-first"];
 export const EDGE_PORTS: readonly EdgePort[] = ["auto", "north", "east", "south", "west"];
@@ -110,6 +115,7 @@ const DEFINITIONS = {
 	Port: "'auto'|'north'|'east'|'south'|'west'",
 	Status: "'open'|'settled'|'done'",
 	Venue: "'here'|'subagent'|'worktree'",
+	Surface: "'page'|'component'",
 	Purpose: "'brainstorm'|'plan'|'explore'",
 	SourceRef: { path: "string", "startLine?": "number", "endLine?": "number" },
 	BlockPosition: { x: "number", y: "number" },
@@ -125,6 +131,7 @@ const DEFINITIONS = {
 		evidence: "Evidence",
 		"status?": "Status",
 		"venue?": "Venue",
+		"surface?": "Surface",
 		"uses?": "string[]",
 		actions: "BlockActions",
 	},
@@ -261,6 +268,7 @@ export function createBlock(
 		evidence: init.evidence ?? "inferred",
 		status: init.status ?? "open",
 		...(init.venue !== undefined && init.venue !== "here" ? { venue: init.venue } : {}),
+		...(init.surface !== undefined ? { surface: init.surface } : {}),
 		...(init.uses !== undefined && init.uses.length > 0 ? { uses: [...init.uses] } : {}),
 		actions: init.actions ? { ...init.actions } : { enhance: "", execute: "" },
 		children: init.children === undefined ? null : init.children,

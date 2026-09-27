@@ -842,6 +842,7 @@ function renderWalk() {
     const patch = fields => op({ op: "patchBlock", id: block.id, fields });
     centre.append(el("h1", null, inlineText(block.title, "Name this idea", value => { if (value.trim()) patch({ title: value.trim() }); })));
     if (state.flow.status) centre.append(el("span", { class: "f-status", text: state.flow.status.glyphs[block.status] + " " + state.flow.status.labels[block.status] }));
+    if (state.flow.fields.some(entry => entry.field === "surface")) centre.append(choices(["none", "page", "component"], block.surface || "none", value => patch({ surface: value })));
     const cite = citationOf(block);
     if (cite) centre.append(el("button", { class: "cite", text: cite, title: "Open the cited range", onclick: () => openFile(block.sources[0].path, block.sources[0].startLine) }));
     else if (doc.purpose === "explore") centre.append(el("p", { class: "uncited", text: "not cited · " + block.evidence }));
@@ -941,6 +942,7 @@ function renderWorkspace() {
       }
     } else if (field === "criteria") cell.append(checklist(block.acceptanceCriteria, "How you will know it is done", value => patch({ acceptanceCriteria: value })));
     else if (field === "venue") cell.append(choices(["here", "subagent", "worktree"], block.venue || "here", value => patch({ venue: value })));
+    else if (field === "surface") cell.append(choices(["none", "page", "component"], block.surface || "none", value => patch({ surface: value })));
     else if (field === "evidence") cell.append(choices(["unknown", "inferred", "observed"], block.evidence, value => patch({ evidence: value })));
     else if (field === "expectedOutput") cell.append(inlineText(block.expectedOutput, "What does it produce?", value => patch({ expectedOutput: value })));
     fields.append(cell);
@@ -1662,7 +1664,7 @@ function renderReview() {
       for (const change of entry.changes) body.append(el("div", { class: "field" }, el("div", { class: "name", text: changeLabel(change.field) }), ...changeLines(change.from, change.to)));
     }
     if (diff.added.length) body.append(el("h4", { text: "Added · " + diff.added.length }),
-      ...diff.added.map(entry => el("div", { class: "diffline ins" }, entry.title + " ", el("span", { class: "where", text: whereText(entry.path) }))));
+      ...diff.added.map(entry => el("div", { class: "diffline ins" }, entry.title + (entry.surface ? " [" + entry.surface + "]" : "") + " ", el("span", { class: "where", text: whereText(entry.path) }))));
     if (diff.removed.length) body.append(el("h4", { text: "Removed · " + diff.removed.length }),
       ...diff.removed.map(entry => el("div", { class: "diffline del" }, entry.title + " ", el("span", { class: "where", text: whereText(entry.path) }))));
     const links = [...diff.edgesAdded.map(text => ["ins", text]), ...diff.edgesRemoved.map(text => ["del", text]), ...diff.edgesModified.map(text => ["same", "changed: " + text])];

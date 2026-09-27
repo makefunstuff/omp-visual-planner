@@ -85,6 +85,7 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 			evidence: block.evidence,
 			status: block.status,
 			...(block.venue !== undefined && block.venue !== "here" ? { venue: block.venue } : {}),
+			...(block.surface !== undefined ? { surface: block.surface } : {}),
 			...(block.uses !== undefined && block.uses.length > 0 ? { uses: [...block.uses] } : {}),
 			actions: { enhance: block.actions.enhance, execute: block.actions.execute },
 			children: block.children ? normalizeDiagram(block.children) : null,
@@ -371,12 +372,12 @@ export function applyReplacement(
 	replacement: DiagramDocument | Block | Diagram,
 	targetId: string | undefined,
 ): string[] {
-	// Status and position are the human's: a proposal never changes them. Blocks
-	// it introduces start open, and their ids are returned so the caller can
-	// place them — a model's coordinates are never trusted for layout.
-	const kept = new Map<string, { status: BlockStatus; x: number; y: number; venue: Block["venue"] }>();
+	// Status, position, venue and a surface already set are the human's: a proposal
+	// never changes them. Blocks it introduces start open, and their ids are returned
+	// so the caller can place them — a model's coordinates are never trusted for layout.
+	const kept = new Map<string, { status: BlockStatus; x: number; y: number; venue: Block["venue"]; surface: Block["surface"] }>();
 	for (const { block } of eachBlock(document.root)) {
-		kept.set(block.id, { status: block.status, x: block.position.x, y: block.position.y, venue: block.venue });
+		kept.set(block.id, { status: block.status, x: block.position.x, y: block.position.y, venue: block.venue, surface: block.surface });
 	}
 	replaceStructure(document, replacement, targetId);
 	const added: string[] = [];
@@ -388,6 +389,7 @@ export function applyReplacement(
 			block.position = { x: prior.x, y: prior.y };
 			if (prior.venue !== undefined && prior.venue !== "here") block.venue = prior.venue;
 			else delete block.venue;
+			if (prior.surface !== undefined) block.surface = prior.surface;
 		} else {
 			block.status = "open";
 			delete block.venue;
