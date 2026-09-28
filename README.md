@@ -11,7 +11,9 @@ An OMP extension for planning systems and mapping codebases as nested blocks. It
 - **Reviewed proposals.** A model can only stage through `visual_planner_propose`, with every changed field shown before and after; only a person accepts, and acceptance is one undoable, unsaved edit. Replan and prune cannot drop work the human already settled.
 - **Reuse that survives a move.** Extract lifts a block to share it, its former sibling links become `uses`, and Execute reads a use as a dependency. See [Reuse](#reuse).
 - **Execute as dispatch.** Only written leaves with acceptance criteria run, in the venue the block states (`here`, `subagent`, `worktree`); the plugin hands the work to OMP and never marks it done.
-- **Visual design as a block facet.** A block a person looks at is marked `surface` (`page` or `component`). A surface with no wireframe points at **Sketch**, which draws one as a fenced `wireframe` block in its description; Execute over a surface builds what it shows. See [Design a page or component](#design-a-page-or-component).
+- **Visual design as a block facet.** A block a person looks at is marked `surface` (`page` or `component`). A surface without a wireframe and a mockup points at **Sketch**, which draws a fenced `wireframe` in its description and a sandboxed HTML mockup; **Screens** shows every page and component together; Execute over a surface builds what they show. See [Design a page or component](#design-a-page-or-component).
+- **Parallel block requests.** Mark blocks with `m` and run one verb over all of them: the session spawns one subagent per block, and each proposal comes back for its own review. See [Explore several blocks at once](#explore-several-blocks-at-once).
+- **Change plans for an existing repository.** `/diagram change` opens a new plan under `.omp-visual-planner/changes/`, oriented by the codebase map and the blocks marked on it; the model reads the code first and each block cites the files it changes. See [Change an existing codebase](#change-an-existing-codebase).
 - **Two surfaces.** The terminal TUI and a loopback web view of the same session, sharing focus, undo and the store.
 - **Evidence over confidence.** Every block is `observed`, `inferred` or `unknown`; `observed` needs a source, and explore can hide what is not grounded.
 - **A skill for when no document is open.** [`skills/decompose`](skills/decompose/SKILL.md): the same decomposition as nested bullets in one markdown file, with `/tree` as the history.
@@ -64,6 +66,7 @@ In OMP, run `/diagram open architecture.json`. Move through the outline with `j`
 | `/diagram open <path>` | Open a document; legacy boards import automatically |
 | `/diagram draft [brainstorm]` | Ask the model to draft a plan or mind map |
 | `/diagram discover [path]` | Ask the model to map an existing codebase (default: cwd) |
+| `/diagram change [goal]` | Plan a change to this codebase as a new plan; the model reads the code first |
 | `/diagram web` / `/diagram web stop` | Open/stop the browser view of this session |
 
 The terminal opens on a nested outline beside the selected block's page. Browsing, the page shows only what is written, and flags what a plan block still lacks. Its last line is the one next step for that block; `r`, `b`, `t`, and `X` are the other verbs. `Enter` opens every field with a cursor (`j`/`k` picks one, `Enter` edits it, `Esc` returns). `space` advances the status; `n` selects the next open block. `R` reviews a staged proposal. `U` links this block to a reusable one anywhere in the document, and `M` lifts it, with everything inside it, to a shared level. The outline marks a block others use with `×N`. `v` switches to the coordinate map, `E` edits the whole block as Markdown in `$VISUAL`/`$EDITOR`, and `s` saves. The status line lists the keys that work where you are; `?` groups all of them.
@@ -80,7 +83,7 @@ Brainstorm, and an explore block you have not settled, open on a **walk**: one *
 
 ## Use cases
 
-Four sessions. In each one the model may only stage a proposal. You accept it, or you do not. Saving is a separate key.
+Seven sessions. In each one the model may only stage a proposal. You accept it, or you do not. Saving is a separate key.
 
 ### Brainstorm an idea
 
@@ -139,11 +142,34 @@ Two parts of the plan needing the same subsystem is not a reason to write it twi
 
 Some blocks are things a person looks at, not code. Mark one `surface`: `page` for a whole screen, `component` for a reusable piece of UI inside pages. Set it on the block page in the browser, or Enter on the surface row in the terminal; unset, the default, is every block nobody looks at. It is a facet, not a fourth purpose: the rest of the model already carries the structure. A page's components nest as its children, a shared component is defined once and linked through `uses`, and navigation between pages is a labelled edge. A seed, expand or replan request may tag new blocks; the review shows the tags, and accepting never changes or removes one the human already set.
 
-A surface with no wireframe points at **Sketch**: Refine with a design brief. The model puts one `wireframe` fence in the block's description — at most 12 lines of 60 columns, regions top to bottom, the primary action, real labels, never lorem ipsum — then one line per state it needs, and draws a contained or used component as a labelled box, since each component is designed on its own block. Sketched, the step falls through to the usual ones: Implement for a brainstorm, Refine/Execute/Open inside for a plan.
+A surface without a wireframe and a mockup points at **Sketch**: Refine with a design brief. The model puts one `wireframe` fence in the block's description — at most 12 lines of 60 columns, regions top to bottom, the primary action, real labels, never lorem ipsum — then one line per state it needs, and draws a contained or used component as a labelled box, since each component is designed on its own block. It also draws an HTML **mockup** in the block's `mockup` field: one self-contained HTML document with inline CSS, the default state at 1280×800, at most 40 000 characters. Sketched, the step falls through to the usual ones: Implement for a brainstorm, Refine/Execute/Open inside for a plan.
 
-The design system is `DESIGN.md` at the workspace root — the open DESIGN.md spec from Google, also used by Stitch and Open Design. Sketch and Execute read it when it exists and use its tokens (colors, typography, spacing, components) by name. The planner never creates or edits it, and when it is missing it does not invent a palette.
+The browser shows the mockup on the block page (**Full size** opens it at up to 1280×800), and the review shows a changed mockup before and after. The mockup renders in a sandboxed frame: no scripts, no network, no access to the planner page. The terminal never renders HTML; it marks the block `[page · mockup]` and counts the characters in a review. A proposal may replace a mockup, but leaving it out keeps the current one; only you remove one (**Remove** on the block page).
 
-Execute over a surface builds what the wireframe shows: its regions, primary action, labels and listed states. The wireframe fixes layout and content, not pixels.
+**Screens** (`S`, or the button in the top bar) is every page and component on one board: each page with its mockup — its wireframe when it has none, `not sketched` when it has neither — the pages its edges lead to as `→ Cart · checkout` chips, and under each component the pages and components that contain or use it. **Sketch…** on a card previews Sketch for that block.
+
+The design system is `DESIGN.md` at the workspace root — the open DESIGN.md spec from Google, also used by Stitch and Open Design. Sketch and Execute read it when it exists and use its tokens (colors, typography, spacing, components) by name; a mockup declares them as CSS custom properties. The planner never creates or edits it, and when it is missing it does not invent a palette.
+
+Execute over a surface builds what the wireframe shows: its regions, primary action, labels and listed states. A mockup shows the target layout, hierarchy, spacing and copy; the wireframe lists the states.
+
+### Explore several blocks at once
+
+Several blocks need the same request — Refine these four pages, Map inside these three subsystems — and each is independent of the others.
+
+`m` marks the focused block (shift-click a row in the browser outline); a marked row shows `✓`. With two or more marked, `a` offers `<Verb> N marked blocks in parallel` for every verb but Execute (in the browser, the bar above the outline). A marked block inside another marked block is refused: unmark one.
+
+The preview shows the prompt for the session and, under it, each block's own instructions file. Submitting sends the session one request: spawn one subagent per block with the `task` tool, all at once, then stage each answer through `visual_planner_propose`. Each block's proposal is reviewed on its own. `R` opens the oldest; accepting or rejecting it opens the next (`review proposal · 1 of 3`). In the browser, ‹ › step through the queue. Accepting one and saving does not make the others stale; an edit to the file from outside the planner still does.
+
+### Change an existing codebase
+
+You want to change a repository you did not plan in this tool. The plan should cite the files it changes.
+
+1. `/diagram discover .` and walk the map until you know where the change lives.
+2. Mark the blocks where the change starts (`m`, or shift-click in the browser).
+3. `a` → **Plan a change to this codebase** (or `/diagram change add a JSON export`). Type the goal. A new plan opens under `.omp-visual-planner/changes/`; it never overwrites the workspace plan or the map.
+4. The model reads the map and the code from the marked blocks first. Review the proposal: top-level blocks are the parts of the code the change touches, each citing the files it changes; the concrete edits nest under them.
+5. Refine or Break down a block: a plan block that cites code gets the same evidence rules as a map, so the model reads the cited code.
+6. Set each leaf planned with acceptance criteria, choose a venue, then Execute. The dispatch lists each leaf's files.
 
 ## Reuse
 

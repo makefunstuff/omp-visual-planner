@@ -186,7 +186,8 @@ describe("composed payloads", () => {
 			const text = composePrompt(document, { kind: "block", id: "api" }, "decompose").text;
 			expect(text).toContain(briefs[purpose]);
 			expect(text).toContain(`purpose: ${purpose} — `);
-			expect(text.includes("## Evidence rules")).toBe(purpose === "explore");
+			// The api subtree cites src/auth.ts, so a plan reads code too; a brainstorm never does.
+			expect(text.includes("## Evidence rules")).toBe(purpose !== "brainstorm");
 		}
 	});
 
@@ -195,7 +196,7 @@ describe("composed payloads", () => {
 		expect(discover).toContain("## Where to look");
 		expect(discover).toContain("The codebase is /work/app. Read, list and search only inside it");
 		expect(discover).toContain("node_modules");
-		const refine = composePrompt(fixture(), { kind: "block", id: "api" }, "enhance", { codeRoot: "/work/app" }).text;
+		const refine = composePrompt(fixture(), { kind: "block", id: "db" }, "enhance", { codeRoot: "/work/app" }).text;
 		expect(refine).not.toContain("## Where to look");
 	});
 
@@ -242,7 +243,7 @@ describe("composed payloads", () => {
 		expect(subsystem).not.toContain("Return the whole document");
 	});
 
-	test("prune names every removal, keeps settled work, and reads no code for a plan", () => {
+	test("prune names every removal, keeps settled work, and reads no code for a plan that cites none", () => {
 		const briefs = {
 			brainstorm: "Prune this mind map",
 			plan: "Prune this plan",
@@ -259,9 +260,12 @@ describe("composed payloads", () => {
 			expect(prompt.text).toContain("name each removal with its reason in `summary`");
 			expect(prompt.text).toContain("## Proposal token");
 			expect(prompt.text).toContain("`visual_planner_propose`");
-			expect(prompt.text.includes("## Evidence rules")).toBe(purpose === "explore");
+			expect(prompt.text.includes("## Evidence rules")).toBe(purpose !== "brainstorm");
 		}
-		const plan = composePrompt(fixture(), { kind: "project" }, "prune", { codeRoot: "/work/app" }).text;
+		const uncited = fixture();
+		uncited.root.blocks[0]!.children!.blocks[0]!.sources = [];
+		uncited.root.blocks[0]!.children!.blocks[0]!.evidence = "inferred";
+		const plan = composePrompt(uncited, { kind: "project" }, "prune", { codeRoot: "/work/app" }).text;
 		expect(plan).toContain("Change no code in the repository.");
 		expect(plan).not.toContain("## Where to look");
 	});
@@ -358,6 +362,17 @@ describe("visual design", () => {
 		expect(text).toContain("opened with ```wireframe");
 		expect(text).toContain("`DESIGN.md` at the root of /work/app");
 		expect(text).toContain("— surface: page");
+		expect(text).toContain("Put a mockup in `mockup`");
+	});
+
+	test("refine and execute see the mockup itself; other requests only learn it exists", () => {
+		const document = design();
+		document.root.blocks[0]!.mockup = "<main>\n<h1>Deals</h1>\n</main>";
+		const refine = composePrompt(document, { kind: "block", id: "home" }, "enhance").text;
+		expect(refine).toContain("  mockup (html):\n      <main>\n      <h1>Deals</h1>\n      </main>");
+		const decompose = composePrompt(document, { kind: "block", id: "home" }, "decompose").text;
+		expect(decompose).toContain("mockup: present (29 characters, not shown)");
+		expect(decompose).not.toContain("<h1>Deals</h1>");
 	});
 
 	test("refine on a block that is not a surface gets neither section", () => {
@@ -392,5 +407,36 @@ describe("visual design", () => {
 		document.root.blocks.push(home);
 		const text = composePrompt(document, { kind: "block", id: "home" }, "execute").text;
 		expect(text).toContain("Build what it shows");
+	});
+});
+
+describe("change plans", () => {
+	test("a change reads the code first and starts from the marked blocks", () => {
+		const document = createDocument({ title: "Add export", goal: "Add a JSON export", purpose: "plan" });
+		const text = composePrompt(document, { kind: "project" }, "change", {
+			codeRoot: "/work/app",
+			request: { requestId: "req-1", baseRevision: 0 },
+			change: {
+				mapPath: ".omp-visual-planner/discovery/app.json",
+				startingPoints: [{ path: "Discovery: app > Report command", description: "Renders the report", sources: [{ path: "src/report.ts", startLine: 4, endLine: 30 }] }],
+			},
+		}).text;
+		expect(text).toContain("intent: change\nPlan the change described in the goal above against the existing code.");
+		expect(text).toContain("## Evidence rules");
+		expect(text).toContain("## Where to look");
+		expect(text).toContain("A map of this codebase is at .omp-visual-planner/discovery/app.json.");
+		expect(text).toContain(
+			"## Starting points\nThe human marked these blocks on the codebase map as where the change begins. Start reading from their sources.\n\n<planner-data>\n- Discovery: app > Report command\n  notes: Renders the report\n  sources: src/report.ts:4-30\n</planner-data>",
+		);
+	});
+
+	test("a plan block that cites code gets the evidence rules; one that cites none does not", () => {
+		const document = createDocument({ title: "Plan", purpose: "plan" });
+		document.root.blocks.push(
+			createBlock({ id: "cited", title: "Cited", evidence: "observed", sources: [{ path: "src/a.ts" }] }),
+			createBlock({ id: "bare", title: "Bare" }),
+		);
+		expect(composePrompt(document, { kind: "block", id: "cited" }, "enhance").text).toContain("## Evidence rules");
+		expect(composePrompt(document, { kind: "block", id: "bare" }, "enhance").text).not.toContain("## Evidence rules");
 	});
 });

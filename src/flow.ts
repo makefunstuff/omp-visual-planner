@@ -3,9 +3,18 @@
  * prompt composer: which verbs a purpose offers, what a status is called, how
  * the outline is walked, and how a request is composed. Pure — no pi-tui.
  */
-import { basename, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, join, resolve } from "node:path";
 import type { ActionKind, BeginInput } from "./actions.ts";
-import { type RelatedContext, composePrompt } from "./compose.ts";
+import {
+	type BatchMember,
+	type ComposeOptions,
+	type RelatedContext,
+	clip,
+	composeBatchPrompt,
+	composePrompt,
+	pathLabel,
+} from "./compose.ts";
 import {
 	type Block,
 	type BlockStatus,
@@ -15,13 +24,24 @@ import {
 	type Intent,
 	type Purpose,
 	type Scope,
+	type SourceRef,
+	type Surface,
 	type Venue,
 	VENUES,
 	descendantIds,
 	eachBlock,
 	findBlockLocation,
+	formatSourceRef,
 } from "./model.ts";
-import { type DocumentStore, type SaveResult, defaultDiscoveryPath, defaultDocumentPath } from "./store.ts";
+import {
+	type DocumentStore,
+	type SaveResult,
+	codebaseMapPath,
+	defaultDiscoveryPath,
+	defaultDocumentPath,
+	displayPath,
+	freshChangePath,
+} from "./store.ts";
 
 export type VerbId = "refine" | "breakdown" | "execute" | "replan" | "prune";
 
@@ -326,10 +346,24 @@ export interface NextStep {
 /** The fence Refine draws for a page or component. */
 const WIREFRAME = /^\s*(```|~~~)\s*wireframe\b/m;
 
+/** The body of the first wireframe fence in a description, or undefined when there is none. */
+export function wireframeOf(description: string): string | undefined {
+	const lines = description.split("\n");
+	const start = lines.findIndex(line => /^\s*(```|~~~)\s*wireframe\b/.test(line));
+	if (start === -1) return undefined;
+	const marker = lines[start]!.trim().slice(0, 3);
+	const body: string[] = [];
+	for (const line of lines.slice(start + 1)) {
+		if (line.trimStart().startsWith(marker)) break;
+		body.push(line);
+	}
+	return body.join("\n");
+}
+
 function sketchStep(block: Block): NextStep {
 	return {
 		label: "Sketch",
-		detail: `This ${block.surface} has no wireframe yet. Refine draws one: layout, primary action and states.`,
+		detail: `This ${block.surface} has no mockup yet. Sketch draws a wireframe and an HTML mockup: layout, primary action and states.`,
 		verb: "refine",
 		act: "verb",
 	};
@@ -345,7 +379,7 @@ export function nextStep(document: DiagramDocument, block: Block | undefined): N
 	}
 	const children = block.children?.blocks ?? [];
 	const written = block.description.trim().length > 0 || block.acceptanceCriteria.length > 0;
-	const unsketched = block.surface !== undefined && !WIREFRAME.test(block.description);
+	const unsketched = block.surface !== undefined && (block.mockup === undefined || !WIREFRAME.test(block.description));
 	if (purpose === "brainstorm") {
 		if (unsketched) return sketchStep(block);
 		return written
@@ -378,6 +412,63 @@ export function nextStep(document: DiagramDocument, block: Block | undefined): N
 	};
 }
 
+export interface ScreenCard {
+	id: string;
+	title: string;
+	surface: Surface;
+	/** Ancestor titles joined with " › "; empty at top level. */
+	path: string;
+	hasMockup: boolean;
+	wireframe: string | undefined;
+	/** Pages this page navigates to; empty for a component. */
+	links: { id: string; title: string; label: string }[];
+	/** Surfaces that use or contain this component; empty for a page. */
+	usedBy: { id: string; title: string }[];
+}
+
+export interface ScreenBoard {
+	pages: ScreenCard[];
+	components: ScreenCard[];
+}
+
+/** Every page and component in document order, with page navigation and where each component is used. */
+export function screenBoard(document: DiagramDocument): ScreenBoard {
+	const all = [...eachBlock(document.root)];
+	const titleOf = (block: Block): string => (block.title.length > 0 ? block.title : block.id);
+	const board: ScreenBoard = { pages: [], components: [] };
+	for (const { block, diagram, ancestors } of all) {
+		const surface = block.surface;
+		if (surface === undefined) continue;
+		const links: ScreenCard["links"] = [];
+		const usedBy: ScreenCard["usedBy"] = [];
+		if (surface === "page") {
+			for (const edge of diagram.edges) {
+				const otherId = edge.from === block.id ? edge.to : edge.to === block.id && edge.direction === "both" ? edge.from : undefined;
+				if (otherId === undefined || otherId === block.id) continue;
+				const other = diagram.blocks.find(candidate => candidate.id === otherId);
+				if (other?.surface === "page") links.push({ id: other.id, title: titleOf(other), label: edge.label });
+			}
+		} else {
+			const containers = new Set(ancestors.map(ancestor => ancestor.id));
+			for (const { block: user } of all) {
+				if (user.surface === undefined || user.id === block.id) continue;
+				if (containers.has(user.id) || user.uses?.includes(block.id)) usedBy.push({ id: user.id, title: titleOf(user) });
+			}
+		}
+		const card: ScreenCard = {
+			id: block.id,
+			title: titleOf(block),
+			surface,
+			path: ancestors.map(titleOf).join(" › "),
+			hasMockup: block.mockup !== undefined,
+			wireframe: wireframeOf(block.description),
+			links,
+			usedBy,
+		};
+		(surface === "page" ? board.pages : board.components).push(card);
+	}
+	return board;
+}
 
 export type PageField =
 	| "title"
@@ -436,24 +527,26 @@ export function fieldLabel(purpose: Purpose, field: PageField): string {
 
 export interface ProjectAction {
 	/** The request this action submits, or the start flow it opens. */
-	kind: "draft" | "discover" | "replan" | "prune" | "execute";
+	kind: "draft" | "discover" | "change" | "replan" | "prune" | "execute";
 	label: string;
 }
 
 const PROJECT_REPLAN: ProjectAction = { kind: "replan", label: "Replan the document" };
 const PROJECT_PRUNE: ProjectAction = { kind: "prune", label: "Prune unnecessary blocks" };
+const PROJECT_CHANGE: ProjectAction = { kind: "change", label: "Plan a change to this codebase" };
 
 /**
- * Whole-document actions offered when no block is focused. `draft` and
- * `discover` start a new document; `replan` and `prune` submit a project-scope
+ * Whole-document actions offered when no block is focused. `draft`, `discover`
+ * and `change` start a new document; `replan` and `prune` submit a project-scope
  * request against the one that is open.
  */
 export function projectActions(purpose: Purpose): ProjectAction[] {
 	if (purpose === "brainstorm") return [{ kind: "draft", label: "Seed from a prompt" }, PROJECT_REPLAN, PROJECT_PRUNE];
-	if (purpose === "explore") return [{ kind: "discover", label: "Map a codebase" }, PROJECT_REPLAN, PROJECT_PRUNE];
+	if (purpose === "explore") return [{ kind: "discover", label: "Map a codebase" }, PROJECT_CHANGE, PROJECT_REPLAN, PROJECT_PRUNE];
 	return [
 		{ kind: "draft", label: "Draft from a brief" },
 		{ kind: "discover", label: "Discover a codebase" },
+		PROJECT_CHANGE,
 		PROJECT_REPLAN,
 		PROJECT_PRUNE,
 		{ kind: "execute", label: "Execute ready leaves" },
@@ -462,7 +555,8 @@ export function projectActions(purpose: Purpose): ProjectAction[] {
 
 export type DocumentStart =
 	| { kind: "draft"; goal: string; purpose: "brainstorm" | "plan" }
-	| { kind: "discover"; target: string };
+	| { kind: "discover"; target: string }
+	| { kind: "change"; goal: string };
 
 /** Replace the store's document with a fresh, named one and start saving it. */
 export function startDocument(
@@ -478,6 +572,10 @@ export function startDocument(
 			{ title, goal: start.goal.trim(), purpose: start.purpose },
 			store.path ?? defaultDocumentPath(cwd),
 		);
+	} else if (start.kind === "change") {
+		// A change plan gets its own file: it never overwrites the workspace plan or a map.
+		const title = start.goal.split("\n").find(line => line.trim().length > 0)?.trim().slice(0, 60) || "New change";
+		document = store.newDocument({ title, goal: start.goal.trim(), purpose: "plan" }, freshChangePath(cwd, title));
 	} else {
 		const name = basename(resolve(cwd, start.target)) || start.target;
 		document = store.newDocument(
@@ -508,6 +606,8 @@ export function composeRequest(input: {
 	requestId?: string;
 	/** Outside blocks the judge ranked for this request; included at or above the floor. */
 	related?: RelatedContext;
+	/** A change plan's map and starting points. */
+	change?: ComposeOptions["change"];
 }): ComposedRequest {
 	const { document, kind, intent, scope, codeRoot } = input;
 	const requestId = input.requestId ?? crypto.randomUUID();
@@ -517,7 +617,7 @@ export function composeRequest(input: {
 		intent,
 		kind === "execute"
 			? { codeRoot }
-			: { request: { requestId, baseRevision: document.revision }, codeRoot, related: input.related },
+			: { request: { requestId, baseRevision: document.revision }, codeRoot, related: input.related, change: input.change },
 	);
 	return {
 		request: {
@@ -543,6 +643,118 @@ export function codeRootFor(cwd: string, start: DocumentStart | undefined): stri
 	return start?.kind === "discover" ? resolve(cwd, start.target) : resolve(cwd);
 }
 
+/**
+ * Where a change plan starts. The map is the explore document open now, else
+ * the workspace's `discover .` map; starting points are the blocks marked on an
+ * explore document. Read before `startDocument` replaces the document.
+ */
+export function changeContext(
+	document: DiagramDocument | undefined,
+	documentPath: string | undefined,
+	cwd: string,
+	markedIds: readonly string[],
+): NonNullable<ComposeOptions["change"]> {
+	const exploring = document?.purpose === "explore" ? document : undefined;
+	const map = exploring !== undefined && documentPath !== undefined ? documentPath : codebaseMapPath(cwd);
+	const startingPoints: NonNullable<ComposeOptions["change"]>["startingPoints"] = [];
+	if (exploring) {
+		for (const id of markedIds) {
+			const location = findBlockLocation(exploring.root, id);
+			if (!location) continue;
+			startingPoints.push({
+				path: pathLabel(location, exploring),
+				description: clip(location.block.description, 400),
+				sources: [...location.block.sources],
+			});
+		}
+	}
+	return { ...(map !== undefined ? { mapPath: displayPath(map, cwd) } : {}), startingPoints };
+}
+
+/** A batch request the member prompts, the parent prompt and the preview could not be built for. */
+export class BatchError extends Error {}
+
+/** Where a batch's per-member instruction files live. Small, and left to the OS temp cleaner. */
+export function batchDir(batchId: string): string {
+	return join(tmpdir(), "omp-visual-planner", batchId);
+}
+
+export interface ComposedBatch {
+	batchId: string;
+	requests: BeginInput[];
+	/** One instructions file per member, for its subagent to read. */
+	files: { path: string; text: string }[];
+	/** What the parent session is sent. */
+	prompt: string;
+	/** The parent prompt followed by every member's file. */
+	preview: string;
+	label: string;
+	size: number;
+}
+
+/**
+ * One block request per marked block, run in parallel by subagents the parent
+ * session spawns. Throws `BatchError` when the set cannot run as a batch.
+ */
+export function composeBatch(input: {
+	document: DiagramDocument;
+	verb: Verb;
+	ids: readonly string[];
+	branchKey: string;
+	baseDigest: string | undefined;
+	codeRoot: string;
+	batchId?: string;
+	requestIds?: readonly string[];
+	related?: ReadonlyMap<string, RelatedContext>;
+}): ComposedBatch {
+	const { document, verb, ids } = input;
+	if (verb.kind === "execute") throw new BatchError("execute does not run as a batch; use Execute on the parent");
+	if (ids.length < 2) throw new BatchError("mark at least two blocks for a batch");
+	const locations = ids.map(id => {
+		const location = findBlockLocation(document.root, id);
+		if (!location) throw new BatchError(`no block ${id}`);
+		return location;
+	});
+	const marked = new Set(ids);
+	const titleOf = (block: Block): string => (block.title.length > 0 ? block.title : block.id);
+	for (const location of locations) {
+		const outer = location.ancestors.find(ancestor => marked.has(ancestor.id));
+		if (outer) throw new BatchError(`"${titleOf(location.block)}" is inside "${titleOf(outer)}"; unmark one of them`);
+	}
+	const batchId = input.batchId ?? crypto.randomUUID();
+	const requests: BeginInput[] = [];
+	const files: ComposedBatch["files"] = [];
+	const members: BatchMember[] = [];
+	ids.forEach((id, index) => {
+		const requestId = input.requestIds?.[index] ?? crypto.randomUUID();
+		const scope: Scope = { kind: "block", id };
+		const composed = composePrompt(document, scope, verb.intent, {
+			codeRoot: input.codeRoot,
+			related: input.related?.get(id),
+			returnVia: "output",
+		});
+		const path = join(batchDir(batchId), `${requestId}.md`);
+		files.push({ path, text: composed.text });
+		members.push({ requestId, baseRevision: document.revision, label: composed.label, path });
+		requests.push({
+			requestId,
+			kind: verb.kind,
+			intent: verb.intent,
+			scope,
+			label: composed.label,
+			branchKey: input.branchKey,
+			documentId: document.id,
+			baseRevision: document.revision,
+			baseDigest: input.baseDigest,
+			prompt: composed.text,
+			batchId,
+		});
+	});
+	const prompt = composeBatchPrompt(verb.label, members);
+	const preview = `${prompt}\n${files.map(file => `---- ${file.path} ----\n${file.text}`).join("\n")}`;
+	return { batchId, requests, files, prompt, preview, label: `${verb.label} × ${ids.length} blocks`, size: preview.length };
+}
+
 export function venueOf(block: Block): Venue {
 	return block.venue ?? "here";
 }
@@ -555,6 +767,8 @@ export interface DispatchLeaf {
 	venue: Venue;
 	acceptance: string[];
 	notes: string;
+	/** The files this leaf changes, as the plan cites them. */
+	sources: SourceRef[];
 }
 
 export interface DispatchHold {
@@ -702,6 +916,7 @@ export function planDispatch(document: DiagramDocument, scope: Scope): DispatchP
 			venue: venueOf(block),
 			acceptance: [...block.acceptanceCriteria],
 			notes: block.actions.execute.trim(),
+			sources: [...block.sources],
 		})),
 		held,
 	};
@@ -731,6 +946,7 @@ export function renderDispatch(document: DiagramDocument, scope: Scope): string 
 		for (const leaf of leaves) {
 			lines.push(`- [${leaf.id}] ${leaf.title}`);
 			if (leaf.acceptance.length > 0) lines.push(`  acceptance: ${leaf.acceptance.join("; ")}`);
+			if (leaf.sources.length > 0) lines.push(`  files: ${leaf.sources.map(formatSourceRef).join(", ")}`);
 			if (leaf.notes.length > 0) lines.push(`  notes: ${leaf.notes}`);
 		}
 	}

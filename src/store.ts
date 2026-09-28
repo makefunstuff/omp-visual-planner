@@ -6,6 +6,7 @@
  * in-memory undo history so a rejection leaves authored state untouched.
  */
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import {
@@ -26,6 +27,7 @@ import {
 
 export const PROJECT_DIR = ".omp-visual-planner";
 export const DISCOVERY_DIR = "discovery";
+export const CHANGES_DIR = "changes";
 export const DEFAULT_DOCUMENT_NAME = "architecture.json";
 export const SESSION_NAMESPACE = "makefunstuff.omp-visual-planner.state";
 
@@ -57,6 +59,23 @@ export function defaultDiscoveryPath(cwd: string, target: string): string {
 	return join(cwd, PROJECT_DIR, DISCOVERY_DIR, `${slugify(head)}.json`);
 }
 
+/**
+ * A new change plan's file: named after its title, suffixed `-2`, `-3`, … so it
+ * never overwrites an existing plan or map. Synchronous so a start stays synchronous.
+ */
+export function freshChangePath(cwd: string, title: string): string {
+	const base = join(cwd, PROJECT_DIR, CHANGES_DIR, slugify(title));
+	let path = `${base}.json`;
+	for (let suffix = 2; existsSync(path); suffix += 1) path = `${base}-${suffix}.json`;
+	return path;
+}
+
+/** The map `/diagram discover .` writes for this workspace, when there is one. */
+export function codebaseMapPath(cwd: string): string | undefined {
+	const path = defaultDiscoveryPath(cwd, ".");
+	return existsSync(path) ? path : undefined;
+}
+
 export function displayPath(path: string, cwd: string): string {
 	const rel = relative(cwd, path);
 	return rel.length > 0 && !rel.startsWith("..") ? rel : path;
@@ -86,6 +105,7 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 			status: block.status,
 			...(block.venue !== undefined && block.venue !== "here" ? { venue: block.venue } : {}),
 			...(block.surface !== undefined ? { surface: block.surface } : {}),
+			...(block.mockup !== undefined && block.mockup.length > 0 ? { mockup: block.mockup } : {}),
 			...(block.uses !== undefined && block.uses.length > 0 ? { uses: [...block.uses] } : {}),
 			actions: { enhance: block.actions.enhance, execute: block.actions.execute },
 			children: block.children ? normalizeDiagram(block.children) : null,
@@ -144,6 +164,7 @@ export class DocumentStore {
 	#redo: DiagramDocument[] = [];
 	/** Why the document on disk is not a project document, when it was imported. */
 	#importNotice: string | undefined;
+	#saveListeners = new Set<(previous: string, next: string) => void>();
 
 	constructor(arktype: ArkTypeNamespace) {
 		this.#arktype = arktype;
@@ -314,6 +335,7 @@ export class DocumentStore {
 		if (!document) return { ok: false, kind: "no-document", errors: ["no project document is open"] };
 		const text = serializeDocument(document);
 		const digest = digestOfText(text);
+		const previous = this.#diskDigest;
 
 		// Refuse to overwrite a file that changed since *we* last read or wrote it.
 		// With no baseline there is nothing of ours to protect: the path was
@@ -343,7 +365,16 @@ export class DocumentStore {
 		this.#path = path;
 		this.#diskDigest = digest;
 		this.#dirty = false;
+		if (previous !== undefined && previous !== digest) {
+			for (const listener of this.#saveListeners) listener(previous, digest);
+		}
 		return { ok: true, path, digest, replaced };
+	}
+
+	/** Called after the store itself rewrote the file, with the digest it replaced and the new one. */
+	onSave(listener: (previous: string, next: string) => void): () => void {
+		this.#saveListeners.add(listener);
+		return () => this.#saveListeners.delete(listener);
 	}
 
 	/** Digest of the project file as it is on disk right now, or undefined when there is none. */
@@ -373,16 +404,29 @@ export function applyReplacement(
 	targetId: string | undefined,
 ): string[] {
 	// Status, position, venue and a surface already set are the human's: a proposal
-	// never changes them. Blocks it introduces start open, and their ids are returned
-	// so the caller can place them — a model's coordinates are never trusted for layout.
-	const kept = new Map<string, { status: BlockStatus; x: number; y: number; venue: Block["venue"]; surface: Block["surface"] }>();
+	// never changes them. A mockup may be replaced, but leaving it out (or sending
+	// "") keeps the current one — only a human removes a mockup. Blocks a proposal
+	// introduces start open, and their ids are returned so the caller can place
+	// them — a model's coordinates are never trusted for layout.
+	const kept = new Map<
+		string,
+		{ status: BlockStatus; x: number; y: number; venue: Block["venue"]; surface: Block["surface"]; mockup: Block["mockup"] }
+	>();
 	for (const { block } of eachBlock(document.root)) {
-		kept.set(block.id, { status: block.status, x: block.position.x, y: block.position.y, venue: block.venue, surface: block.surface });
+		kept.set(block.id, {
+			status: block.status,
+			x: block.position.x,
+			y: block.position.y,
+			venue: block.venue,
+			surface: block.surface,
+			mockup: block.mockup,
+		});
 	}
 	replaceStructure(document, replacement, targetId);
 	const added: string[] = [];
 	for (const { block } of eachBlock(document.root)) {
 		if (block.uses !== undefined && block.uses.length === 0) delete block.uses;
+		if (block.mockup !== undefined && block.mockup.length === 0) delete block.mockup;
 		const prior = kept.get(block.id);
 		if (prior) {
 			block.status = prior.status;
@@ -390,6 +434,7 @@ export function applyReplacement(
 			if (prior.venue !== undefined && prior.venue !== "here") block.venue = prior.venue;
 			else delete block.venue;
 			if (prior.surface !== undefined) block.surface = prior.surface;
+			if (block.mockup === undefined && prior.mockup !== undefined) block.mockup = prior.mockup;
 		} else {
 			block.status = "open";
 			delete block.venue;

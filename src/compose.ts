@@ -31,6 +31,20 @@ export interface ComposeOptions {
 	codeRoot?: string;
 	/** Outside blocks a relevance judge ranked; the prompt includes those at or above RELATED_FLOOR. */
 	related?: RelatedContext;
+	/**
+	 * How the answer comes back. `propose` (the default) calls `visual_planner_propose`;
+	 * `output` returns it through a subagent's output schema for the parent session to stage.
+	 */
+	returnVia?: "propose" | "output";
+	/** A change plan: the codebase map to orient by and the blocks marked on it as where the change begins. */
+	change?: { mapPath?: string; startingPoints: StartingPoint[] };
+}
+
+/** A block marked on a codebase map as where a change begins. */
+export interface StartingPoint {
+	path: string;
+	description: string;
+	sources: SourceRef[];
 }
 
 export interface BoundaryRelationship {
@@ -222,7 +236,7 @@ export function clip(text: string, max: number): string {
 	return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-function renderScope(resolution: ScopeResolution, document: DiagramDocument): string {
+function renderScope(resolution: ScopeResolution, document: DiagramDocument, intent: Intent): string {
 	const lines: string[] = [];
 	lines.push("- scope: " + resolution.label);
 	lines.push("- blocks in scope: " + String(resolution.locations.length));
@@ -258,6 +272,15 @@ function renderScope(resolution: ScopeResolution, document: DiagramDocument): st
 		const sub = indent + "  ";
 		if (block.description.trim().length > 0) {
 			lines.push(`${sub}description: ${block.description.trim().replaceAll("\n", "\n" + sub + "  ")}`);
+		}
+		if (block.mockup !== undefined) {
+			// Refine and execute work from the drawing itself; every other request only needs to know it exists.
+			if (intent === "enhance" || intent === "execute") {
+				lines.push(`${sub}mockup (html):`);
+				for (const line of block.mockup.split("\n")) lines.push(`${sub}    ${line}`);
+			} else {
+				lines.push(`${sub}mockup: present (${block.mockup.length} characters, not shown)`);
+			}
 		}
 		if (block.expectedOutput.trim().length > 0) lines.push(`${sub}expected output: ${block.expectedOutput.trim()}`);
 		for (const criterion of block.acceptanceCriteria) lines.push(`${sub}acceptance: ${criterion}`);
@@ -306,6 +329,77 @@ const PROPOSAL_PROTOCOL = [
 	"the human accepts or rejects your proposal in the planner UI.",
 ].join("\n");
 
+/** A batch member's return path: its parent session stages the answer, since a subagent sees no planner tools. */
+const OUTPUT_PROTOCOL = [
+	"## How to return this",
+	"You are one of several subagents, each working on its own block in parallel. You cannot call `visual_planner_propose`; the session that started you stages your answer for the human.",
+	"- Return exactly two fields through your output schema: `summary`, one short line describing what changed for the human reviewer, and `replacement`, the target `Block` (same `id`) with the change applied.",
+	"- Do not edit any file, and do not edit the architecture JSON.",
+].join("\n");
+
+/** Where a change plan starts: the codebase map, and the blocks the human marked on it. */
+function changeSections(change: NonNullable<ComposeOptions["change"]>): string[] {
+	const sections: string[] = [];
+	if (change.mapPath !== undefined) {
+		sections.push(
+			`## Codebase map\n- A map of this codebase is at ${change.mapPath}. Read it first to orient; open the code it cites before relying on it.`,
+		);
+	}
+	if (change.startingPoints.length > 0) {
+		const lines: string[] = [];
+		for (const point of change.startingPoints) {
+			lines.push(`- ${point.path}`);
+			if (point.description.length > 0) lines.push(`  notes: ${point.description}`);
+			if (point.sources.length > 0) lines.push(`  sources: ${point.sources.map(formatRange).join(", ")}`);
+		}
+		sections.push(
+			[
+				"## Starting points",
+				"The human marked these blocks on the codebase map as where the change begins. Start reading from their sources.",
+				"",
+				"<planner-data>",
+				...lines,
+				"</planner-data>",
+			].join("\n"),
+		);
+	}
+	return sections;
+}
+
+/** One request of a batch, as the parent session sees it. */
+export interface BatchMember {
+	requestId: string;
+	baseRevision: number;
+	label: string;
+	/** The file holding this member's full prompt, for its subagent to read. */
+	path: string;
+}
+
+const BATCH_OUTPUT_SCHEMA =
+	'{"type":"object","properties":{"summary":{"type":"string"},"replacement":{"type":"object"}},"required":["summary","replacement"]}';
+
+/** The parent session's prompt: spawn one subagent per member, then relay each answer to `visual_planner_propose`. */
+export function composeBatchPrompt(verbLabel: string, members: readonly BatchMember[]): string {
+	const lines = [
+		"# Visual planner batch request",
+		"",
+		"## Task",
+		`Run these ${members.length} visual-planner requests (${verbLabel}) in parallel, one subagent each, then stage every answer for the human's review.`,
+		'1. Call the `task` tool once, with one item per request below, all in the same `tasks` array. Use the `scout` agent for every item; if no `scout` agent is available, use the default agent and add "Do not edit any file." to its task.',
+		`2. Each item's \`task\` is exactly: "Read {path} and do what it says. Return your answer through your output schema." Each item's \`outputSchema\` is ${BATCH_OUTPUT_SCHEMA}.`,
+		"3. When the results arrive, call `visual_planner_propose` once per request, with `requestId` and `baseRevision` copied verbatim from the list below and the item's `summary` and `replacement` passed through unchanged. Do not merge, edit or re-derive a replacement.",
+		"4. If an item fails, or `visual_planner_propose` refuses its answer, name it in chat and move on; do not repair it yourself.",
+		"5. Do not edit the architecture JSON or any repository file.",
+		"",
+		"## Requests",
+	];
+	for (const member of members) {
+		lines.push(`- requestId: ${member.requestId} · baseRevision: ${member.baseRevision} · ${member.label}`);
+		lines.push(`  instructions: ${member.path}`);
+	}
+	return `${lines.join("\n")}\n`;
+}
+
 const EVIDENCE_RULES = [
 	"## Evidence rules",
 	"Every block you emit must carry `evidence` and, when `observed`, at least one `sources` entry:",
@@ -334,7 +428,7 @@ function whereToLook(root: string): string {
 }
 
 /** Structure-producing intents explain reuse; `enhance` and `execute` do not restructure. */
-const REUSE_INTENTS: ReadonlySet<Intent> = new Set(["plan", "discover", "decompose", "investigate", "replan", "prune"]);
+const REUSE_INTENTS: ReadonlySet<Intent> = new Set(["plan", "discover", "decompose", "investigate", "replan", "prune", "change"]);
 
 /** Outside blocks are listed up to this many; beyond it the prompt points at a project read. */
 const CATALOG_LIMIT = 150;
@@ -349,7 +443,7 @@ const REUSE_RULES = [
 ].join("\n");
 
 /** The reuse rules, plus what outside this scope is available to link to. */
-function reuseSection(document: DiagramDocument, resolution: ScopeResolution): string {
+function reuseSection(document: DiagramDocument, resolution: ScopeResolution, returnVia: ComposeOptions["returnVia"]): string {
 	if (resolution.scope.kind === "project") return REUSE_RULES;
 	const inside = new Set(resolution.locations.map(location => location.block.id));
 	const outside = [...eachBlock(document.root)].filter(location => !inside.has(location.block.id));
@@ -359,12 +453,19 @@ function reuseSection(document: DiagramDocument, resolution: ScopeResolution): s
 		lines.push(`- [${location.block.id}] ${pathLabel(location, document)}`);
 	}
 	const rest = outside.length - CATALOG_LIMIT;
-	if (rest > 0) lines.push(`- … ${rest} more: read them with visual_planner_read (scope project)`);
+	if (rest > 0) {
+		// A subagent has no planner tools, so it cannot read the rest.
+		lines.push(
+			returnVia === "output"
+				? `- … ${rest} more, not listed: link only to blocks listed here`
+				: `- … ${rest} more: read them with visual_planner_read (scope project)`,
+		);
+	}
 	return `${REUSE_RULES}\n\n<planner-data>\n${lines.join("\n")}\n</planner-data>`;
 }
 
 /** Requests that add or regroup blocks may tag the ones a person looks at. */
-const SURFACE_INTENTS: ReadonlySet<Intent> = new Set(["plan", "decompose", "replan"]);
+const SURFACE_INTENTS: ReadonlySet<Intent> = new Set(["plan", "decompose", "replan", "change"]);
 
 const SURFACE_RULES = [
 	"## Visual surfaces",
@@ -372,6 +473,7 @@ const SURFACE_RULES = [
 	"- You may add `surface` to a block that has none. Never change or remove one that is set: the planner keeps the human's value.",
 	"- A page's components nest as its `children`. A component that more than one page needs is defined once and linked through `uses`.",
 	"- Keep every ```wireframe block in a description you keep. Wireframes are drawn one block at a time by a refine request, not here.",
+	"- Keep `mockup` on every block you keep. A mockup is drawn one block at a time by a refine request; leaving the field out keeps the current one.",
 ].join("\n");
 
 /** Where the design system lives. The planner points at it; it never writes it. */
@@ -388,6 +490,8 @@ function sketchSection(surface: Surface, codeRoot: string | undefined): string {
 		"- Put one wireframe in `description`: a fenced block opened with ```wireframe, at most 12 lines of 60 columns, drawn with box-drawing or ASCII characters. Show its regions top to bottom, the primary action, and real labels, never lorem ipsum. Replace an existing wireframe instead of adding a second.",
 		"- Under the wireframe, one line per state it needs: empty, loading, error, and any other the idea has.",
 		"- Draw the components it contains or uses as labelled boxes; each component is designed on its own block.",
+		"- Put a mockup in `mockup`: one self-contained HTML document with an inline <style>, showing the default state at 1280×800. No <script>, no external URL (fonts, images, stylesheets, links), no forms that submit; draw icons and pictures as CSS boxes or inline SVG. At most 40000 characters. Real labels, never lorem ipsum. Replace an existing mockup instead of adding to it.",
+		"- When `DESIGN.md` exists, declare its tokens as CSS custom properties at the top of the mockup's <style> and use them by name. When it is missing, use greys only; do not invent a palette.",
 		designSystemLine(codeRoot),
 	].join("\n");
 }
@@ -396,7 +500,7 @@ function sketchSection(surface: Surface, codeRoot: string | undefined): string {
 function buildSection(codeRoot: string | undefined): string {
 	return [
 		"## Visual design",
-		"Blocks marked `surface` carry a ```wireframe in their description. Build what it shows: its regions, primary action, labels and listed states. The wireframe fixes layout and content, not pixels.",
+		"Blocks marked `surface` carry a ```wireframe in their description. Build what it shows: its regions, primary action, labels and listed states. The wireframe fixes layout and content, not pixels. A block with a `mockup` shows the target: match its layout, hierarchy, spacing and copy; the wireframe lists the states.",
 		designSystemLine(codeRoot),
 	].join("\n");
 }
@@ -493,6 +597,8 @@ function briefFor(intent: Intent, document: DiagramDocument, scope: Scope): stri
 			return `Prune this plan: remove the blocks that do not earn their place — duplicates, work already covered elsewhere, scope the goal does not require. Keep everything that carries the plan forward, exactly as authored: this request removes excess, it does not redesign. ${KEEP_SETTLED} Return the whole document with every surviving block keeping its id, position and fields, and name each removal with its reason in \`summary\`. Change no code in the repository.`;
 		case "execute":
 			return renderDispatch(document, scope);
+		case "change":
+			return "Plan the change described in the goal above against the existing code. Read the code the change touches before proposing anything. Top-level blocks are the parts of the codebase the change touches — an existing module, command or subsystem — each citing the files it changes in `sources` with evidence `observed`. Nest the concrete edits as `children`: what changes, the expected output, and acceptance criteria a reviewer can check. A part the change creates from nothing is a block with evidence `inferred` and no sources, placed under the part that will own it. Do not add a block for code the change does not touch. Change no code in the repository. Return the whole document.";
 	}
 }
 
@@ -525,17 +631,24 @@ export function composePrompt(
 	sections.push(
 		`## Task\nintent: ${intent}\n${briefFor(intent, document, resolution.scope)}\n${PURPOSE_LINE[document.purpose]}`,
 	);
-	const readsCode = intent === "discover" || intent === "investigate" || document.purpose === "explore";
+	// A plan block that cites code gets the same evidence discipline as a map.
+	const readsCode =
+		intent === "discover" ||
+		intent === "investigate" ||
+		intent === "change" ||
+		document.purpose === "explore" ||
+		(document.purpose === "plan" && resolution.sources.length > 0);
 	if (readsCode) {
 		sections.push(EVIDENCE_RULES);
 		if (options.codeRoot) sections.push(whereToLook(options.codeRoot));
 	}
-	sections.push(`## Scope\n\n<planner-data>\n${renderScope(resolution, document)}\n</planner-data>`);
+	if (options.change) sections.push(...changeSections(options.change));
+	sections.push(`## Scope\n\n<planner-data>\n${renderScope(resolution, document, intent)}\n</planner-data>`);
 	if (options.related) {
 		const section = relatedSection(document, options.related);
 		if (section) sections.push(section);
 	}
-	if (REUSE_INTENTS.has(intent)) sections.push(reuseSection(document, resolution));
+	if (REUSE_INTENTS.has(intent)) sections.push(reuseSection(document, resolution, options.returnVia));
 	if (document.purpose !== "explore") {
 		if (SURFACE_INTENTS.has(intent)) sections.push(SURFACE_RULES);
 		const focus = resolution.scope.kind === "block" ? resolution.locations[0]?.block : undefined;
@@ -554,7 +667,9 @@ export function composePrompt(
 			"- Relationships describe architecture. They are not a schedule: do not treat them as an execution DAG.",
 		].join("\n"),
 	);
-	if (options.request) {
+	if (options.returnVia === "output") {
+		sections.push(OUTPUT_PROTOCOL);
+	} else if (options.request) {
 		sections.push(
 			[
 				"## Proposal token",

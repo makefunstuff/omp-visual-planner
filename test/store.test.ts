@@ -3,7 +3,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { createBlock, createDiagram, createDocument, createEdge, validateDocument } from "../src/model.ts";
+import { MOCKUP_MAX_CHARS, createBlock, createDiagram, createDocument, createEdge, validateDocument } from "../src/model.ts";
 import {
 	DocumentStore,
 	applyReplacement,
@@ -418,6 +418,40 @@ describe("proposal application", () => {
 		store.adopt(sample(), "/tmp/architecture.json");
 		store.transact(current => applyReplacement(current, { ...sample(), purpose: "brainstorm" }, undefined));
 		expect(store.require().purpose).toBe("explore");
+	});
+
+	test("a proposal may replace a mockup; leaving it out or sending an empty one keeps it", () => {
+		const store = new DocumentStore(type);
+		const document = sample();
+		document.root.blocks[0]!.mockup = "<p>v1</p>";
+		store.adopt(document, "/tmp/architecture.json");
+		store.transact(current => applyReplacement(current, createBlock({ id: "api", title: "API" }), "api"));
+		expect(store.require().root.blocks[0]!.mockup).toBe("<p>v1</p>");
+		store.transact(current => applyReplacement(current, { ...createBlock({ id: "api", title: "API" }), mockup: "" }, "api"));
+		expect(store.require().root.blocks[0]!.mockup).toBe("<p>v1</p>");
+		store.transact(current => applyReplacement(current, createBlock({ id: "api", title: "API", mockup: "<p>v2</p>" }), "api"));
+		expect(store.require().root.blocks[0]!.mockup).toBe("<p>v2</p>");
+	});
+});
+
+describe("mockups on disk", () => {
+	test("an empty mockup is not written", () => {
+		const document = sample();
+		document.root.blocks[0]!.mockup = "";
+		expect(serializeDocument(document)).not.toContain('"mockup"');
+		document.root.blocks[0]!.mockup = "<p>Home</p>";
+		expect(serializeDocument(document)).toContain('"mockup": "<p>Home</p>"');
+	});
+
+	test("a mockup over the limit is refused by name", () => {
+		const document = sample();
+		document.root.blocks[0]!.mockup = "x".repeat(MOCKUP_MAX_CHARS + 1);
+		const validated = validateDocument(document, type);
+		expect(validated.ok).toBe(false);
+		if (validated.ok) throw new Error("unreachable");
+		expect(validated.errors).toContain(`block "API" mockup is 40001 characters; the limit is 40000`);
+		document.root.blocks[0]!.mockup = "x".repeat(MOCKUP_MAX_CHARS);
+		expect(validateDocument(document, type).ok).toBe(true);
 	});
 });
 

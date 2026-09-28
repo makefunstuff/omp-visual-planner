@@ -310,7 +310,7 @@ describe("canvas rendering", () => {
 		);
 		const lines = plain(screen.render(120));
 		expect(lines.join("\n")).toContain("nothing planned yet");
-		expect(lines.join("\n")).toContain("o add a block   a draft or discover");
+		expect(lines.join("\n")).toContain("o add a block   a draft, discover or change");
 		for (const line of lines) expect(visibleWidth(line)).toBe(120);
 	});
 
@@ -724,7 +724,7 @@ describe("interaction", () => {
 		screen.handleInput("\r");
 		expect(plain(screen.render(120)).join("\n")).toContain("settled work");
 		expect(store.require().root.blocks.map(block => block.id)).toEqual(["api", "db", "worker"]);
-		expect(registry.pending()?.state).toBe("staged");
+		expect(registry.active()[0]?.state).toBe("staged");
 	});
 
 	test("a modal is drawn over the diagram, not instead of it", async () => {
@@ -784,6 +784,63 @@ describe("interaction", () => {
 		expect(result.prompt).toContain(result.request.requestId);
 		expect(result.prompt).toContain("stages a proposal for review");
 		expect(result.prompt).not.toContain("completed successfully");
+	});
+
+	test("two marked blocks run as one batch from the action menu", async () => {
+		const h = await harness();
+		h.screen.render(120);
+		h.screen.handleInput("m"); // API
+		h.screen.handleInput("j");
+		h.screen.handleInput("j"); // Database
+		h.screen.handleInput("m");
+		expect(plain(h.screen.render(120)).join("\n")).toContain('marked "Database" · 2 marked — a runs them in parallel');
+		h.screen.handleInput("a");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("› Refine 2 marked blocks in parallel");
+		h.screen.handleInput("\r");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("batch preview — Refine × 2 blocks");
+		h.screen.handleInput("\r");
+		const result = h.result() as { kind: string; batch: { requests: BeginInput[]; prompt: string } };
+		expect(result.kind).toBe("submit-batch");
+		expect(result.batch.requests.map(request => request.scope.id)).toEqual(["api", "db"]);
+		for (const request of result.batch.requests) expect(result.batch.prompt).toContain(`requestId: ${request.requestId}`);
+	});
+
+	test("staged batch proposals are reviewed one after another", async () => {
+		const h = await harness();
+		const member = (id: string): BeginInput => ({
+			requestId: `req-${id}`,
+			kind: "enhance",
+			intent: "enhance",
+			scope: { kind: "block", id },
+			label: `block "${id}"`,
+			branchKey: "session:leaf",
+			documentId: "doc-1",
+			baseRevision: 0,
+			baseDigest: h.store.diskDigest,
+			prompt: "",
+			batchId: "batch-1",
+		});
+		expect(h.registry.beginBatch([member("api"), member("db")]).ok).toBe(true);
+		for (const [id, title] of [["api", "API v2"], ["db", "Database v2"]] as const) {
+			const staged = h.registry.stage(`req-${id}`, `rename ${id}`, createBlock({ id, title }), {
+				branchKey: "session:leaf",
+				documentId: "doc-1",
+				diskDigest: h.store.diskDigest,
+				document: h.store.require(),
+				arktype: type,
+			});
+			expect(staged.ok).toBe(true);
+		}
+		h.screen.render(120);
+		expect(plain(h.screen.render(120)).join("\n")).toContain("◆ 2 proposals ready — R reviews");
+		h.screen.handleInput("R");
+		expect(plain(h.screen.render(120)).join("\n")).toContain("review proposal · 1 of 2");
+		h.screen.handleInput("\r");
+		await new Promise(resolve => setTimeout(resolve, 0));
+		const next = plain(h.screen.render(120)).join("\n");
+		expect(next).toContain("review proposal");
+		expect(next).not.toContain("1 of 2");
+		expect(next).toContain('block "db"');
 	});
 
 	/** A ranker that stays pending until the test resolves it, recording its signal. */
@@ -1017,8 +1074,8 @@ describe("outline", () => {
 
 	test("the action menu offers project replan and prune against the whole document", async () => {
 		for (const [steps, label, kind] of [
-			[7, "Replan the document…", "replan"],
-			[8, "Prune unnecessary blocks…", "prune"],
+			[8, "Replan the document…", "replan"],
+			[9, "Prune unnecessary blocks…", "prune"],
 		] as const) {
 			const h = await harness();
 			const before = serializeDocument(h.store.require());

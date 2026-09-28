@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+	BatchError,
 	FOCUS_CENTER,
+	composeBatch,
 	focusCounts,
 	focusNeighborhood,
 	focusTarget,
@@ -11,6 +13,8 @@ import {
 	normalizeFocusCursor,
 	outlineRows,
 	projectActions,
+	renderDispatch,
+	screenBoard,
 	useCandidates,
 	verbsFor,
 } from "../src/flow.ts";
@@ -99,12 +103,14 @@ describe("next step", () => {
 		expect(nextStep(document, block).act).toBe("implement");
 	});
 
-	test("a surface without a wireframe points at Sketch", () => {
+	test("a surface without a wireframe and a mockup points at Sketch", () => {
 		const document = createDocument({ title: "Tool", purpose: "brainstorm" });
 		const block = createBlock({ id: "home", title: "Home", surface: "page", description: "landing" });
 		document.root.blocks.push(block);
 		expect(nextStep(document, block)).toMatchObject({ label: "Sketch", verb: "refine", act: "verb" });
 		block.description = "```wireframe\n[ Sign up ]\n```";
+		expect(nextStep(document, block).label).toBe("Sketch");
+		block.mockup = "<p>Home</p>";
 		expect(nextStep(document, block).act).toBe("implement");
 
 		const plan = createDocument({ title: "Plan", purpose: "plan" });
@@ -231,5 +237,95 @@ describe("focus diagram", () => {
 		expect(focusTarget(hood, { slot: "down", index: 9 })).toBeUndefined();
 		expect(focusTarget(hood, { slot: "up", index: 0 })).toBeUndefined();
 		expect(focusCounts(hood)).toEqual({ up: 0, in: 1, out: 1, down: 1 });
+	});
+});
+
+describe("screens board", () => {
+	test("pages link to the pages their edges reach; a component lists the surfaces that hold or use it", () => {
+		const document = createDocument({ title: "Shop", purpose: "plan" });
+		const price = createBlock({ id: "price", title: "Price", surface: "component" });
+		const home = createBlock({
+			id: "home",
+			title: "Home",
+			surface: "page",
+			description: "```wireframe\n[ Deals ]\n```",
+			children: createDiagram({ blocks: [price] }),
+		});
+		const cart = createBlock({ id: "cart", title: "Cart", surface: "page", uses: ["price"], mockup: "<p>Cart</p>" });
+		const api = createBlock({ id: "api", title: "API" });
+		document.root.blocks.push(home, cart, api);
+		document.root.edges.push(
+			createEdge({ from: "home", to: "cart", label: "checkout" }),
+			createEdge({ from: "home", to: "api", label: "loads" }),
+		);
+		const board = screenBoard(document);
+		expect(board.pages.map(card => card.id)).toEqual(["home", "cart"]);
+		const [homeCard, cartCard] = board.pages;
+		expect(homeCard!.links).toEqual([{ id: "cart", title: "Cart", label: "checkout" }]);
+		expect(homeCard!.wireframe).toBe("[ Deals ]");
+		expect(homeCard!.hasMockup).toBe(false);
+		expect(cartCard!.links).toEqual([]);
+		expect(cartCard!.hasMockup).toBe(true);
+		expect(board.components).toEqual([
+			expect.objectContaining({
+				id: "price",
+				path: "Home",
+				usedBy: [
+					{ id: "home", title: "Home" },
+					{ id: "cart", title: "Cart" },
+				],
+			}),
+		]);
+	});
+});
+
+describe("batches", () => {
+	const refine = verbsFor("plan").find(verb => verb.id === "refine")!;
+	function tree() {
+		const document = createDocument({ title: "Plan", purpose: "plan" });
+		const inner = createBlock({ id: "inner", title: "Inner" });
+		document.root.blocks.push(
+			createBlock({ id: "a", title: "A", children: createDiagram({ blocks: [inner] }) }),
+			createBlock({ id: "b", title: "B" }),
+		);
+		return document;
+	}
+	const input = { branchKey: "s:leaf", baseDigest: "d", codeRoot: "/work" };
+
+	test("a marked parent and its child cannot run together", () => {
+		expect(() => composeBatch({ ...input, document: tree(), verb: refine, ids: ["a", "inner"] })).toThrow(
+			new BatchError('"Inner" is inside "A"; unmark one of them'),
+		);
+	});
+
+	test("the parent prompt names every member; each member returns through its output schema", () => {
+		const batch = composeBatch({ ...input, document: tree(), verb: refine, ids: ["a", "b"], batchId: "batch-1", requestIds: ["req-a", "req-b"] });
+		expect(batch.requests.map(request => [request.requestId, request.scope.id, request.batchId])).toEqual([
+			["req-a", "a", "batch-1"],
+			["req-b", "b", "batch-1"],
+		]);
+		for (const file of batch.files) expect(batch.prompt).toContain(file.path);
+		expect(batch.prompt).toContain("requestId: req-a · baseRevision: 0");
+		expect(batch.prompt).toContain("requestId: req-b · baseRevision: 0");
+		for (const file of batch.files) {
+			expect(file.text).toContain("You cannot call `visual_planner_propose`");
+			expect(file.text).not.toContain("## Proposal token");
+		}
+		expect(batch.label).toBe("Refine × 2 blocks");
+	});
+
+	test("execute never runs as a batch", () => {
+		const execute = verbsFor("plan").find(verb => verb.id === "execute")!;
+		expect(() => composeBatch({ ...input, document: tree(), verb: execute, ids: ["a", "b"] })).toThrow(BatchError);
+	});
+});
+
+describe("dispatch", () => {
+	test("a leaf lists the files it changes", () => {
+		const document = createDocument({ title: "Plan", purpose: "plan" });
+		document.root.blocks.push(
+			createBlock({ id: "leaf", title: "Leaf", status: "settled", acceptanceCriteria: ["works"], sources: [{ path: "src/a.ts", startLine: 1, endLine: 10 }] }),
+		);
+		expect(renderDispatch(document, { kind: "block", id: "leaf" })).toContain("  files: src/a.ts:1-10");
 	});
 });

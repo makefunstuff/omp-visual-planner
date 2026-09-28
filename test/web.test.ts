@@ -7,6 +7,7 @@ import { ActionRegistry, type BeginInput } from "../src/actions.ts";
 import { createBlock, createDocument, findBlockLocation } from "../src/model.ts";
 import type { RelatedRanker } from "../src/relevance.ts";
 import { DocumentStore, serializeDocument } from "../src/store.ts";
+import type { ComposedBatch } from "../src/flow.ts";
 import { type WebHandle, type WebSession, type WebState, cookieName, startWeb, stopWeb } from "../src/web.ts";
 
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -32,6 +33,7 @@ async function harness(options: { rankRelated?: RelatedRanker } = {}) {
 	};
 	let changes = 0;
 	const submitted: { request: BeginInput; prompt: string }[] = [];
+	const batches: ComposedBatch[] = [];
 	const sessionId = `test-${crypto.randomUUID()}`;
 	const handle = startWeb({
 		sessionId,
@@ -46,6 +48,12 @@ async function harness(options: { rankRelated?: RelatedRanker } = {}) {
 			submitted.push({ request, prompt });
 			return { ok: true, message: `request ${request.requestId} submitted` };
 		},
+		submitBatch: async batch => {
+			const began = session.registry.beginBatch(batch.requests);
+			if (!began.ok) return { ok: false, error: began.errors.join("; ") };
+			batches.push(batch);
+			return { ok: true, message: "batch submitted" };
+		},
 	});
 	cleanup.push(() => void stopWeb(sessionId));
 	const origin = `http://127.0.0.1:${handle.port}`;
@@ -53,7 +61,7 @@ async function harness(options: { rankRelated?: RelatedRanker } = {}) {
 	const op = (body: unknown) =>
 		fetch(`${origin}/api/op`, { method: "POST", headers: { cookie, origin, "content-type": "application/json" }, body: JSON.stringify(body) });
 	const state = async () => (await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json()) as WebState;
-	return { dir, path, document, store, session, handle, origin, cookie, op, state, submitted, changes: () => changes };
+	return { dir, path, document, store, session, handle, origin, cookie, op, state, submitted, batches, changes: () => changes };
 }
 
 describe("web mode access", () => {
@@ -248,7 +256,7 @@ describe("web mode requests", () => {
 		const preview = await op({ op: "preview", verb: "refine", id: "api" });
 		expect(preview.status).toBe(200);
 		expect(((await preview.json()) as { preview: { text: string } }).preview.text).toContain("Refine this block's authored text");
-		expect(session.registry.pending()).toBeUndefined();
+		expect(session.registry.active()).toEqual([]);
 
 		await op({ op: "patchBlock", id: "db", fields: { title: "Postgres" } });
 		const refused = await op({ op: "submit", verb: "refine", id: "api" });
@@ -260,7 +268,7 @@ describe("web mode requests", () => {
 		expect(store.dirty).toBe(false);
 		expect(submitted).toHaveLength(1);
 		expect(submitted[0]!.request).toMatchObject({ kind: "enhance", scope: { kind: "block", id: "api" } });
-		expect(session.registry.pending()?.requestId).toBe(submitted[0]!.request.requestId);
+		expect(session.registry.active()[0]?.requestId).toBe(submitted[0]!.request.requestId);
 		expect(submitted[0]!.prompt).toContain(`requestId: ${submitted[0]!.request.requestId}`);
 	});
 
@@ -276,7 +284,7 @@ describe("web mode requests", () => {
 		expect(serializeDocument(store.require())).toBe(before);
 		expect((await op({ op: "submit", verb: "prune" })).status).toBe(200);
 		expect(submitted[0]!.request).toMatchObject({ kind: "prune", scope: { kind: "project" } });
-		expect(session.registry.pending()?.state).toBe("pending");
+		expect(session.registry.active()[0]?.state).toBe("pending");
 		expect(serializeDocument(store.require())).toBe(before);
 		expect((await op({ op: "discard", requestId: submitted[0]!.request.requestId })).status).toBe(200);
 		expect((await op({ op: "submit", verb: "replan" })).status).toBe(200);
@@ -342,8 +350,8 @@ describe("web mode review", () => {
 		stage(session, document.id, 0);
 
 		const state = (await (await fetch(`${origin}/api/state`, { headers: { cookie } })).json()) as WebState;
-		expect(state.review!.requestId).toBe("req-1");
-		expect(state.review!.diff.modified).toEqual([
+		expect(state.reviews[0]!.requestId).toBe("req-1");
+		expect(state.reviews[0]!.diff.modified).toEqual([
 			expect.objectContaining({ title: "API v2", changes: [{ field: "title", from: "API", to: "API v2" }] }),
 		]);
 		expect(findBlockLocation(store.require().root, "api")!.block.title).toBe("API");
@@ -423,7 +431,13 @@ describe("web mode files", () => {
 
 describe("web server lifecycle", () => {
 	test("starting twice reuses the server; stop closes the port", async () => {
-		const quiet = { cwd: "/", getSession: () => undefined, onChange: () => {}, submit: () => ({ ok: false as const, error: "" }) };
+		const quiet = {
+			cwd: "/",
+			getSession: () => undefined,
+			onChange: () => {},
+			submit: () => ({ ok: false as const, error: "" }),
+			submitBatch: async () => ({ ok: false as const, error: "" }),
+		};
 		const again: WebHandle = startWeb({ sessionId: "lifecycle", ...quiet });
 		const same = startWeb({ sessionId: "lifecycle", ...quiet });
 		expect(same.port).toBe(again.port);
@@ -432,5 +446,68 @@ describe("web server lifecycle", () => {
 		expect(gone.status).toBe(410);
 		expect(stopWeb("lifecycle")).toBe(true);
 		await expect(fetch(`${again.url}api/state`)).rejects.toThrow();
+	});
+});
+
+describe("web mode batches, mockups and change plans", () => {
+	test("a batch previews both members, registers both, and each comes back as its own review", async () => {
+		const { op, state, session, batches, document } = await harness();
+		const preview = await op({ op: "previewBatch", verb: "refine", ids: ["api", "db"] });
+		expect(preview.status).toBe(200);
+		const previewed = ((await preview.json()) as { preview: { text: string; label: string } }).preview;
+		expect(previewed.label).toBe("Refine × 2 blocks");
+		expect(session.registry.active()).toEqual([]);
+
+		expect((await op({ op: "submitBatch", verb: "refine", ids: ["api", "db"] })).status).toBe(200);
+		const [batch] = batches;
+		expect(session.registry.active().map(entry => [entry.scope.id, entry.state])).toEqual([
+			["api", "pending"],
+			["db", "pending"],
+		]);
+		for (const request of batch!.requests) expect(batch!.prompt).toContain(`requestId: ${request.requestId}`);
+		expect(previewed.text).toContain("# Visual planner batch request");
+
+		for (const request of [...batch!.requests].reverse()) {
+			const id = request.scope.id!;
+			const staged = session.registry.stage(request.requestId, `refine ${id}`, createBlock({ id, title: `${id} v2`, x: 2, y: 2 }), {
+				branchKey: "s:leaf",
+				documentId: document.id,
+				diskDigest: undefined,
+				arktype: type,
+			});
+			expect(staged.ok).toBe(true);
+		}
+		expect((await state()).reviews.map(review => review.requestId)).toEqual(batch!.requests.map(request => request.requestId));
+	});
+
+	test("execute is refused as a batch", async () => {
+		const { op } = await harness();
+		const refused = await op({ op: "previewBatch", verb: "execute", ids: ["api", "db"] });
+		expect(refused.status).toBe(400);
+		expect(((await refused.json()) as { error: string }).error).toBe("no execute batch for a plan document");
+	});
+
+	test("the page can clear a mockup but never write one", async () => {
+		const { op, store } = await harness();
+		store.transact(draft => {
+			findBlockLocation(draft.root, "api")!.block.mockup = "<p>API</p>";
+		});
+		const written = await op({ op: "patchBlock", id: "api", fields: { mockup: "<p/>" } });
+		expect(written.status).toBe(400);
+		expect(((await written.json()) as { error: string }).error).toBe("mockup can only be cleared here; Sketch draws it");
+		expect(findBlockLocation(store.require().root, "api")!.block.mockup).toBe("<p>API</p>");
+		expect((await op({ op: "patchBlock", id: "api", fields: { mockup: "" } })).status).toBe(200);
+		expect(findBlockLocation(store.require().root, "api")!.block.mockup).toBeUndefined();
+	});
+
+	test("a change starts a new plan beside the others and asks the agent to read the code first", async () => {
+		const { op, dir, store, submitted } = await harness();
+		const started = await op({ op: "submit", start: { kind: "change", goal: "Add export", marked: ["api"] } });
+		expect(started.status).toBe(200);
+		expect(store.path).toBe(join(dir, ".omp-visual-planner", "changes", "add-export.json"));
+		expect(store.require()).toMatchObject({ title: "Add export", purpose: "plan" });
+		expect(submitted.at(-1)!.request).toMatchObject({ kind: "change", intent: "change", scope: { kind: "project" } });
+		expect(submitted.at(-1)!.prompt).toContain("## Task\nintent: change");
+		expect((await op({ op: "submit", start: { kind: "change", goal: "  " } })).status).toBe(400);
 	});
 });

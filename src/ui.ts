@@ -33,8 +33,13 @@ import {
 	retentionErrors,
 } from "./actions.ts";
 import { blockToMarkdown, markdownToBlock } from "./block-markdown.ts";
-import { type RelatedContext, ScopeError } from "./compose.ts";
+import { type ComposeOptions, type RelatedContext, ScopeError } from "./compose.ts";
 import {
+	BatchError,
+	type ComposedBatch,
+	type Verb,
+	changeContext,
+	composeBatch,
 	type ComposedRequest,
 	type DocumentStart,
 	type FocusCursor,
@@ -114,7 +119,7 @@ import {
 	removeUse,
 	usersOutside,
 } from "./model.ts";
-import { type RelatedOutcome, type RelatedRanker, relatedSummary, wantsRelated } from "./relevance.ts";
+import { type RelatedOutcome, type RelatedRanker, batchRelatedSummary, relatedSummary, wantsRelated } from "./relevance.ts";
 import type { DocumentStore } from "./store.ts";
 import { MAX_VIEWER_FILE_BYTES, PROJECT_DIR, applyReplacement, displayPath } from "./store.ts";
 
@@ -164,14 +169,17 @@ export interface ScreenLink {
 
 export type ScreenResult =
 	| { kind: "closed" }
-	| { kind: "submit"; request: BeginInput; prompt: string };
+	| { kind: "submit"; request: BeginInput; prompt: string }
+	| { kind: "submit-batch"; batch: ComposedBatch };
 
 
 /** Which flow to open straight away when the command asked for one. */
 export interface ScreenStart {
-	action?: "draft" | "discover";
+	action?: "draft" | "discover" | "change";
 	target?: string;
 	purpose?: "brainstorm" | "plan";
+	/** A change's goal; without one the screen asks for it. */
+	goal?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -416,6 +424,7 @@ const BLOCK_FIELDS = [
 	"position",
 	"uses",
 	"surface",
+	"mockup",
 ] as const;
 export type DiffField = (typeof BLOCK_FIELDS)[number];
 
@@ -437,6 +446,8 @@ function fieldText(block: Block, field: DiffField, name: (id: string) => string)
 			return (block.uses ?? []).map(name).join("\n");
 		case "surface":
 			return block.surface ?? "";
+		case "mockup":
+			return block.mockup ?? "";
 		default:
 			return block[field];
 	}
@@ -796,6 +807,8 @@ interface PreviewPending {
 	ranking?: RelatedOutcome | "pending";
 	/** Cancels an in-flight ranking when the preview closes. */
 	controller?: AbortController;
+	/** A change plan's map and starting points, fixed when it was previewed. */
+	change?: ComposeOptions["change"];
 }
 
 interface Override {
@@ -803,6 +816,21 @@ interface Override {
 	scope: Scope;
 	/** A new document to create and save before the request is composed. */
 	start?: DocumentStart;
+	change?: ComposeOptions["change"];
+}
+
+/** A previewed batch: one request per marked block, tokens fixed at preview time. */
+interface BatchPreviewPending {
+	verb: Verb;
+	ids: string[];
+	batchId: string;
+	requestIds: string[];
+	codeRoot: string;
+	related: Map<string, RelatedContext>;
+	ranking: "pending" | "done";
+	summary: string;
+	controller?: AbortController;
+	composed: ComposedBatch;
 }
 
 interface SourceView {
@@ -839,6 +867,9 @@ export class DiagramScreen implements Component {
 	#sourceView: SourceView | undefined;
 	#citationPreview: { key: string; lines: string[] } | undefined;
 	#preview: PreviewPending | undefined;
+	#batchPreview: BatchPreviewPending | undefined;
+	/** Blocks marked for a parallel batch. Per surface: not persisted, not shared with the browser. */
+	#marked = new Set<string>();
 	#viewport = { left: 0, top: 0 };
 	#fieldIndex = 0;
 	#message: string;
@@ -867,11 +898,13 @@ export class DiagramScreen implements Component {
 		if (initial !== undefined) this.#focus(initial);
 		// Only an import notice greets you; the status line computes key hints and the staged-proposal marker itself.
 		this.#message = options.store.importNotice === undefined ? "" : `${options.store.importNotice}; press s to choose a new path`;
-		const staged = this.#stagedEntry();
+		const staged = this.#stagedEntries()[0];
 		if (start?.action === "draft") {
 			this.#beginDraft(start.purpose ?? "plan");
 		} else if (start?.action === "discover") {
 			this.#beginDiscover(start.target ?? ".");
+		} else if (start?.action === "change") {
+			this.#beginChange(start.goal);
 		} else if (staged && staged.documentId === document.id) {
 			// Opening the planner is how a human comes back to a staged proposal,
 			// so show it rather than making them find the R binding.
@@ -938,14 +971,13 @@ export class DiagramScreen implements Component {
 		this.#ticker = undefined;
 	}
 
-	/** The agent's request on this branch while it is still running, and the ticker that animates it. */
-	#working(): JournalEntry | undefined {
-		const pending = this.#options.registry.pending();
-		const working = pending?.state === "pending" ? pending : undefined;
-		if (working && this.#ticker === undefined) {
+	/** The agent's requests on this branch still running, oldest first, and the ticker that animates them. */
+	#working(): JournalEntry[] {
+		const working = this.#options.registry.active().filter(entry => entry.state === "pending");
+		if (working.length > 0 && this.#ticker === undefined) {
 			this.#ticker = setInterval(() => this.#options.tui.requestRender(), 1000);
 			this.#ticker.unref?.();
-		} else if (!working) {
+		} else if (working.length === 0) {
 			this.#stopTicker();
 		}
 		return working;
@@ -1020,10 +1052,9 @@ export class DiagramScreen implements Component {
 		return document.root.blocks.length > 0 || document.root.edges.length > 0 || document.goal.trim().length > 0;
 	}
 
-	#stagedEntry(): JournalEntry | undefined {
-		return this.#options.registry
-			.entries.filter(entry => entry.state === "staged" && entry.branchKey === this.#options.branchKey)
-			.at(-1);
+	/** Every proposal staged on this branch, oldest first: the review queue. */
+	#stagedEntries(): JournalEntry[] {
+		return this.#options.registry.active().filter(entry => entry.state === "staged");
 	}
 
 	#diagramOf(document: DiagramDocument, diagramId: string): Diagram {
@@ -1174,6 +1205,21 @@ export class DiagramScreen implements Component {
 			case "a":
 				this.#openActionMenu();
 				return true;
+			case "m": {
+				const block = this.#block;
+				if (!block) {
+					this.#message = "select a block first";
+					return true;
+				}
+				const title = block.title.length > 0 ? block.title : block.id;
+				if (this.#marked.delete(block.id)) {
+					this.#message = `unmarked "${title}"`;
+				} else {
+					this.#marked.add(block.id);
+					this.#message = `marked "${title}" · ${this.#marked.size} marked — a runs them in parallel`;
+				}
+				return true;
+			}
 			case "s":
 				this.#save();
 				return true;
@@ -2168,10 +2214,22 @@ export class DiagramScreen implements Component {
 	// ------------------------------------------------------------------
 
 	#openActionMenu(): void {
-		const pending = this.#options.registry.pending();
+		const pending = this.#options.registry.active().filter(entry => entry.state === "pending");
 		const purpose = this.#document.purpose;
 		const block = this.#block;
 		const choices: { label: string; run: () => void }[] = [];
+		for (const id of this.#marked) {
+			if (!findBlockLocation(this.#document.root, id)) this.#marked.delete(id);
+		}
+		if (this.#marked.size >= 2) {
+			for (const verb of verbsFor(purpose)) {
+				if (verb.kind === "execute") continue;
+				choices.push({
+					label: `${verb.label} ${this.#marked.size} marked blocks in parallel`,
+					run: () => this.#openBatchPreview(verb),
+				});
+			}
+		}
 		if (block) {
 			for (const verb of verbsFor(purpose)) {
 				choices.push({
@@ -2188,12 +2246,24 @@ export class DiagramScreen implements Component {
 			choices.push({ label: `${action.label}…`, run: () => this.#runProjectAction(action) });
 		}
 		choices.push({ label: "Change purpose   P", run: () => this.#openPurposeMenu() });
-		if (pending) {
+		if (this.#marked.size > 0) {
 			choices.push({
-				label: "Discard pending request",
+				label: "Clear marks",
 				run: () => {
-					this.#options.registry.resolve(pending.requestId, "discarded");
-					this.#message = "pending request discarded; a late proposal for it will be refused";
+					this.#marked.clear();
+					this.#message = "marks cleared";
+				},
+			});
+		}
+		if (pending.length > 0) {
+			choices.push({
+				label: pending.length === 1 ? "Discard pending request" : `Discard ${pending.length} pending requests`,
+				run: () => {
+					for (const entry of pending) this.#options.registry.resolve(entry.requestId, "discarded");
+					this.#message =
+						pending.length === 1
+							? "pending request discarded; a late proposal for it will be refused"
+							: `${pending.length} pending requests discarded; late proposals for them will be refused`;
 				},
 			});
 		}
@@ -2220,6 +2290,10 @@ export class DiagramScreen implements Component {
 			this.#beginDiscover(".");
 			return;
 		}
+		if (action.kind === "change") {
+			this.#beginChange();
+			return;
+		}
 		this.#openPreview(action.kind, { kind: action.kind, scope: { kind: "project" } });
 	}
 
@@ -2241,6 +2315,30 @@ export class DiagramScreen implements Component {
 				scope: { kind: "project" },
 				start: { kind: "discover", target: value.trim() || "." },
 			});
+		});
+	}
+
+	/**
+	 * Plan a change as a new plan document. The map and the blocks marked on it
+	 * are read first, because starting the document replaces the one on screen.
+	 */
+	#beginChange(goal?: string): void {
+		const change = changeContext(this.#document, this.#options.store.path, this.#options.cwd, [...this.#marked]);
+		const start = (text: string): void => {
+			this.#marked.clear();
+			this.#openPreview("change", { kind: "change", scope: { kind: "project" }, start: { kind: "change", goal: text }, change });
+		};
+		if (goal !== undefined && goal.trim().length > 0) {
+			start(goal);
+			return;
+		}
+		this.#openTextPrompt("what change do you want to make? (becomes the goal)", "", text => {
+			if (text.trim().length === 0) {
+				this.#message = "a change needs a goal";
+				this.#options.tui.requestRender();
+				return;
+			}
+			start(text);
 		});
 	}
 
@@ -2279,12 +2377,22 @@ export class DiagramScreen implements Component {
 				branchKey: this.#options.branchKey,
 				baseDigest: this.#options.store.diskDigest,
 				codeRoot,
+				change: override.change,
 			});
 		} catch (error) {
 			this.#message = error instanceof ScopeError ? error.message : String(error);
 			return;
 		}
-		this.#preview = { composed, kind, intent, scope, requestId: composed.request.requestId, codeRoot, save };
+		this.#preview = {
+			composed,
+			kind,
+			intent,
+			scope,
+			requestId: composed.request.requestId,
+			codeRoot,
+			save,
+			change: override.change,
+		};
 		const preview = this.#preview;
 		const rank = this.#options.rankRelated;
 		if (rank && !override.start && wantsRelated(intent, scope)) {
@@ -2321,6 +2429,7 @@ export class DiagramScreen implements Component {
 					codeRoot: preview.codeRoot,
 					requestId,
 					related: outcome.context,
+					change: preview.change,
 				});
 				preview.related = outcome.context;
 			} catch (error) {
@@ -2389,6 +2498,7 @@ export class DiagramScreen implements Component {
 				codeRoot: preview.codeRoot,
 				requestId: preview.requestId,
 				related: preview.related,
+				change: preview.change,
 			});
 		} catch (error) {
 			this.#message = error instanceof ScopeError ? error.message : String(error);
@@ -2400,8 +2510,149 @@ export class DiagramScreen implements Component {
 		this.#done({ kind: "submit", request: composed.request, prompt: composed.prompt });
 	}
 
+	#batchTitle(preview: BatchPreviewPending): string {
+		const summary = preview.summary.length > 0 ? ` · ${preview.summary}` : "";
+		return `batch preview — ${preview.composed.label} (${preview.composed.size} chars)${summary}`;
+	}
+
+	/** The batch for a preview, with its fixed tokens and whatever ranking has landed. */
+	#composeBatchFor(preview: BatchPreviewPending): ComposedBatch {
+		return composeBatch({
+			document: this.#document,
+			verb: preview.verb,
+			ids: preview.ids,
+			branchKey: this.#options.branchKey,
+			baseDigest: this.#options.store.diskDigest,
+			codeRoot: preview.codeRoot,
+			batchId: preview.batchId,
+			requestIds: preview.requestIds,
+			related: preview.related,
+		});
+	}
+
+	#openBatchPreview(verb: Verb): void {
+		const ids = [...this.#marked];
+		const codeRoot = codeRootFor(this.#options.cwd, undefined);
+		let composed: ComposedBatch;
+		try {
+			composed = composeBatch({
+				document: this.#document,
+				verb,
+				ids,
+				branchKey: this.#options.branchKey,
+				baseDigest: this.#options.store.diskDigest,
+				codeRoot,
+			});
+		} catch (error) {
+			this.#message = error instanceof BatchError ? error.message : String(error);
+			return;
+		}
+		const preview: BatchPreviewPending = {
+			verb,
+			ids,
+			batchId: composed.batchId,
+			requestIds: composed.requests.map(request => request.requestId),
+			codeRoot,
+			related: new Map(),
+			ranking: "done",
+			summary: "",
+			composed,
+		};
+		this.#batchPreview = preview;
+		const rank = this.#options.rankRelated;
+		if (rank) {
+			const controller = new AbortController();
+			const document = this.#document;
+			preview.ranking = "pending";
+			preview.summary = relatedSummary("pending");
+			preview.controller = controller;
+			void Promise.all(ids.map(id => rank(document, { kind: "block", id }, controller.signal))).then(outcomes =>
+				this.#landBatchRanking(preview, outcomes),
+			);
+		}
+		this.#modal = { kind: "text", title: this.#batchTitle(preview), lines: composed.preview.split("\n"), offset: 0 };
+	}
+
+	/** Land every member's ranking into the batch preview they were started for, if it is still open. */
+	#landBatchRanking(preview: BatchPreviewPending, outcomes: RelatedOutcome[]): void {
+		if (this.#batchPreview !== preview) return;
+		outcomes.forEach((outcome, index) => {
+			if (outcome.ok) preview.related.set(preview.ids[index]!, outcome.context);
+		});
+		preview.summary = batchRelatedSummary(outcomes);
+		preview.ranking = "done";
+		preview.controller = undefined;
+		try {
+			preview.composed = this.#composeBatchFor(preview);
+		} catch (error) {
+			this.#message = error instanceof Error ? error.message : String(error);
+		}
+		const modal = this.#modal;
+		if (modal?.kind === "text") {
+			modal.title = this.#batchTitle(preview);
+			modal.lines = preview.composed.preview.split("\n");
+		}
+		this.#options.tui.requestRender();
+	}
+
+	#submitBatchPreview(): void {
+		const preview = this.#batchPreview;
+		if (!preview) return;
+		if (preview.ranking === "pending") {
+			this.#message = "still ranking related context — Enter again once it lands, or Esc";
+			this.#options.tui.requestRender();
+			return;
+		}
+		if (this.#options.store.dirty) {
+			this.#modal = {
+				kind: "confirm",
+				title: "unsaved changes",
+				message: "Save the authored document before submitting?",
+				confirmLabel: "Save",
+				onConfirm: () => {
+					void this.#options.store.save().then(result => {
+						if (!result.ok) {
+							this.#message = result.errors.join("; ");
+							this.#options.tui.requestRender();
+							return;
+						}
+						this.#finishBatchSubmit(preview);
+					});
+				},
+			};
+			return;
+		}
+		this.#finishBatchSubmit(preview);
+	}
+
+	#finishBatchSubmit(preview: BatchPreviewPending): void {
+		if (!this.#options.hasUI) {
+			this.#message = "the planner needs an interactive session to submit";
+			return;
+		}
+		if (!this.#options.isIdle() || this.#options.hasPendingMessages()) {
+			this.#message = "OMP is busy; finish or cancel the current task before submitting.";
+			this.#options.tui.requestRender();
+			return;
+		}
+		// Recompose against the saved document so every request carries the digest it was saved with.
+		let batch: ComposedBatch;
+		try {
+			batch = this.#composeBatchFor(preview);
+		} catch (error) {
+			this.#message = error instanceof Error ? error.message : String(error);
+			this.#options.tui.requestRender();
+			return;
+		}
+		this.#marked.clear();
+		this.#batchPreview = undefined;
+		this.#modal = undefined;
+		this.#done({ kind: "submit-batch", batch });
+	}
+
+	/** Opens the oldest staged proposal; accepting or rejecting it moves on to the next. */
 	#openReview(): void {
-		const entry = this.#stagedEntry();
+		const entry = this.#stagedEntries()[0];
 		if (!entry?.proposal) {
 			this.#message = "no staged proposal to review";
 			return;
@@ -2469,6 +2720,7 @@ export class DiagramScreen implements Component {
 		this.#modal = undefined;
 		if (this.#document.revision !== before) this.#message = this.#acceptedMessage(entry);
 		this.#publish();
+		if (this.#stagedEntries().length > 0) this.#openReview();
 		this.#options.tui.requestRender();
 	}
 
@@ -2494,6 +2746,7 @@ export class DiagramScreen implements Component {
 		this.#options.registry.resolve(requestId, "rejected");
 		this.#modal = undefined;
 		this.#message = "proposal rejected; the authored document is unchanged";
+		if (this.#stagedEntries().length > 0) this.#openReview();
 		this.#options.tui.requestRender();
 	}
 
@@ -2551,6 +2804,7 @@ export class DiagramScreen implements Component {
 			...verbs,
 			row("a", "all actions, including whole-document replan and prune"),
 			row("R", "review a staged proposal: Enter accepts, r rejects"),
+			row("m", "mark / unmark for a parallel batch (a runs it)"),
 		]);
 		const document = section("Document", [
 			row("s", "save — nothing is written until you do"),
@@ -2593,6 +2847,8 @@ export class DiagramScreen implements Component {
 	#close(): void {
 		this.#preview?.controller?.abort();
 		this.#preview = undefined;
+		this.#batchPreview?.controller?.abort();
+		this.#batchPreview = undefined;
 		this.#sourceView = undefined;
 		this.#dropModal();
 		this.#done({ kind: "closed" });
@@ -2644,25 +2900,30 @@ export class DiagramScreen implements Component {
 		}
 		if (modal.kind === "text") {
 			// The key sheet is read-only; only a request preview submits.
-			if (key === "escape" || (!this.#preview && (key === "enter" || key === "q" || key === "?"))) {
+			const previewing = this.#preview !== undefined || this.#batchPreview !== undefined;
+			if (key === "escape" || (!previewing && (key === "enter" || key === "q" || key === "?"))) {
 				this.#modal = undefined;
 				this.#preview?.controller?.abort();
 				this.#preview = undefined;
+				this.#batchPreview?.controller?.abort();
+				this.#batchPreview = undefined;
 				this.#options.tui.requestRender();
 				return;
 			}
 			if (key === "enter") {
-				this.#submitPreview();
+				if (this.#batchPreview) this.#submitBatchPreview();
+				else this.#submitPreview();
 				return;
 			}
-			if (key === "c" && this.#preview) {
-				this.#options.ui.setEditorText(this.#preview.composed.prompt);
+			const text = this.#batchPreview?.composed.preview ?? this.#preview?.composed.prompt;
+			if (key === "c" && text !== undefined) {
+				this.#options.ui.setEditorText(text);
 				this.#message = "copied the request into the prompt editor";
 				this.#options.tui.requestRender();
 				return;
 			}
-			if (key === "w" && this.#preview) {
-				void this.#exportPrompt(resolvePath(this.#options.cwd, PROJECT_DIR, "prompt.md"));
+			if (key === "w" && text !== undefined) {
+				void this.#exportPrompt(resolvePath(this.#options.cwd, PROJECT_DIR, "prompt.md"), text);
 				return;
 			}
 			modal.offset = this.#scrolled(modal.offset, key);
@@ -2754,11 +3015,9 @@ export class DiagramScreen implements Component {
 		this.#options.tui.requestRender();
 	}
 
-	async #exportPrompt(path: string): Promise<void> {
-		const composed = this.#preview?.composed;
-		if (!composed) return;
+	async #exportPrompt(path: string, text: string): Promise<void> {
 		try {
-			await Bun.write(path, composed.prompt);
+			await Bun.write(path, text);
 			this.#message = `exported ${displayPath(path, this.#options.cwd)}`;
 		} catch (error) {
 			this.#message = `cannot write ${path}: ${error instanceof Error ? error.message : String(error)}`;
@@ -2877,7 +3136,7 @@ export class DiagramScreen implements Component {
 					? ["empty mind map", "o add an idea   a seed from a prompt"]
 					: purpose === "explore"
 						? ["nothing mapped yet", "a map a codebase"]
-						: ["nothing planned yet", "o add a block   a draft or discover"];
+						: ["nothing planned yet", "o add a block   a draft, discover or change"];
 			return ["", theme.fg("muted", ` ${copy[0]}`), "", ` ${copy[1]}`].map(line => truncateToWidth(line, width));
 		}
 		const focusIndex = rows.findIndex(row => row.block.id === this.#selected);
@@ -2890,8 +3149,12 @@ export class DiagramScreen implements Component {
 		for (const { block } of eachBlock(document.root)) {
 			for (const id of block.uses ?? []) usedBy.set(id, (usedBy.get(id) ?? 0) + 1);
 		}
-		const pending = this.#options.registry.pending();
-		const pendingBlock = pending?.scope.kind === "block" ? pending.scope.id : undefined;
+		const requestFor = new Map(
+			this.#options.registry
+				.active()
+				.filter(entry => entry.scope.kind === "block")
+				.map(entry => [entry.scope.id!, entry]),
+		);
 		const lines: string[] = [];
 		for (const row of rows.slice(this.#outlineTop, this.#outlineTop + height)) {
 			const block = row.block;
@@ -2909,18 +3172,20 @@ export class DiagramScreen implements Component {
 						: block.evidence === "observed" && purpose === "plan"
 							? theme.fg("success", " *")
 							: "";
+			const request = requestFor.get(block.id);
 			const marker =
-				pending && pendingBlock === block.id
-					? pending.state === "staged"
+				request === undefined
+					? ""
+					: request.state === "staged"
 						? theme.fg("accent", " ◆ review")
-						: theme.fg("accent", ` ${spinnerFrame()} working`)
-					: "";
+						: theme.fg("accent", ` ${spinnerFrame()} working`);
 			const title = block.title.length > 0 ? block.title : "(untitled)";
 			const name = focused ? theme.bold(title) : uncited ? theme.fg("muted", title) : title;
 			const reuse = usedBy.get(block.id) ?? 0;
 			const reuseMark = reuse > 0 ? theme.fg("muted", ` ×${reuse}`) : "";
+			const markMark = this.#marked.has(block.id) ? theme.fg("accent", " ✓") : "";
 			const prefix = focused ? theme.fg("accent", "›") : " ";
-			const text = truncateToWidth(`${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${name}${badge}${reuseMark}${marker}`, width, Ellipsis.Unicode);
+			const text = truncateToWidth(`${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${name}${badge}${markMark}${reuseMark}${marker}`, width, Ellipsis.Unicode);
 			lines.push(focused ? theme.bg("selectedBg", pad(text, width)) : text);
 		}
 		return lines;
@@ -3067,7 +3332,9 @@ export class DiagramScreen implements Component {
 
 	/** A surface block's kind after its title; nothing for other blocks. */
 	#surfaceBadge(block: Block): string {
-		return block.surface === undefined ? "" : `  ${this.#options.theme.fg("muted", `[${block.surface}]`)}`;
+		if (block.surface === undefined) return "";
+		const kind = block.mockup === undefined ? block.surface : `${block.surface} · mockup`;
+		return `  ${this.#options.theme.fg("muted", `[${kind}]`)}`;
 	}
 
 	/** A block's first citation for one line: `path:10-40 +2`, or why there is none. */
@@ -3527,9 +3794,15 @@ export class DiagramScreen implements Component {
 			const unknown = blocks.filter(block => block.evidence === "unknown").length;
 			segments.push(`map · ${blocks.length} block${blocks.length === 1 ? "" : "s"}${unknown > 0 ? ` · ${unknown} unknown` : ""}`);
 		}
-		if (this.#stagedEntry()) segments.push(theme.fg("accent", "◆ proposal ready — R reviews"));
+		const staged = this.#stagedEntries().length;
+		if (staged === 1) segments.push(theme.fg("accent", "◆ proposal ready — R reviews"));
+		else if (staged > 1) segments.push(theme.fg("accent", `◆ ${staged} proposals ready — R reviews`));
 		const working = this.#working();
-		if (working) segments.push(theme.fg("accent", `${spinnerFrame()} agent working ${elapsedClock(working.createdAt)}`));
+		if (working.length > 0) {
+			const since = elapsedClock(working[0]!.createdAt);
+			const what = working.length === 1 ? `agent working ${since}` : `agent working on ${working.length} ${since}`;
+			segments.push(theme.fg("accent", `${spinnerFrame()} ${what}`));
+		}
 		const tail = this.#message.length > 0 ? this.#message : theme.fg("muted", this.#keyHints());
 		return truncateToWidth(` ${segments.join("  ")}   ${tail}`, width, Ellipsis.Unicode, true);
 	}
@@ -3606,7 +3879,7 @@ export class DiagramScreen implements Component {
 		} else if (modal?.kind === "text") {
 			boxWidth = Math.min(width, 110);
 			title = modal.title;
-			footer = this.#preview
+			footer = this.#preview || this.#batchPreview
 				? "Enter submit  c copy to the prompt editor  w export markdown  j/k PgUp/PgDn scroll  Esc back"
 				: "j/k scroll  Esc close";
 			const wrapped = modal.lines.flatMap(line => (line.length === 0 ? [""] : wrapTextWithAnsi(line, Math.max(10, boxWidth - 4))));
@@ -3623,7 +3896,8 @@ export class DiagramScreen implements Component {
 			content = scroll(itemLines, Math.max(0, modal.index - (Math.max(1, Math.min(height, 100) - 4)) + 1)).lines;
 		} else if (modal?.kind === "review") {
 			boxWidth = Math.min(width, 110);
-			title = "review proposal";
+			const queue = this.#stagedEntries().length;
+			title = queue > 1 ? `review proposal · 1 of ${queue}` : "review proposal";
 			footer =
 				modal.error === undefined
 					? "Enter accept  r reject  j/k scroll  Esc later — an accepted proposal stays unsaved until s"
@@ -3704,6 +3978,7 @@ export class DiagramScreen implements Component {
 			position: "position on the map",
 			uses: "uses",
 			surface: "surface",
+			mockup: "mockup",
 		};
 		if (diff.titleChanged || diff.goalChanged) {
 			lines.push(theme.bold("document"));
@@ -3713,7 +3988,15 @@ export class DiagramScreen implements Component {
 		}
 		for (const entry of diff.modified) {
 			lines.push(`${theme.fg("warning", "~")} ${theme.bold(entry.title)}${where(entry.path)}`);
-			for (const item of entry.changes) lines.push(...change(labels[item.field], item.from, item.to));
+			for (const item of entry.changes) {
+				if (item.field === "mockup") {
+					// The terminal never renders HTML: say how big each side is and where to look.
+					const before = item.from.length > 0 ? `${item.from.length} chars` : "none";
+					lines.push(`    ${muted("mockup")}`, `      ${before} → ${item.to.length} chars · /diagram web shows both`);
+					continue;
+				}
+				lines.push(...change(labels[item.field], item.from, item.to));
+			}
 			lines.push("");
 		}
 		if (diff.added.length > 0) {

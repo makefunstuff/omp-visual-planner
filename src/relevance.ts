@@ -181,3 +181,20 @@ export function relatedSummary(status: RelatedOutcome | "pending"): string {
 	if (status.asked === 0) return "related context: nothing outside this scope to rank";
 	return `related context: ${relatedIds(status.context).length} of ${status.asked} blocks · ${status.context.judge} · ${(status.elapsedMs / 1000).toFixed(1)} s · $${status.cost.toFixed(5)}`;
 }
+
+/** One line for a batch preview: how many members were ranked, how many blocks kept, and the first failure. */
+export function batchRelatedSummary(outcomes: readonly RelatedOutcome[]): string {
+	let ok = 0;
+	let kept = 0;
+	let failure: string | undefined;
+	for (const outcome of outcomes) {
+		if (outcome.ok) {
+			ok += 1;
+			kept += relatedIds(outcome.context).length;
+		} else {
+			failure ??= outcome.reason;
+		}
+	}
+	const line = `related context: ${ok} of ${outcomes.length} blocks ranked · ${kept} kept`;
+	return failure === undefined ? line : `${line} · ${failure}`;
+}

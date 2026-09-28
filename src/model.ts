@@ -53,6 +53,8 @@ export interface Block {
 	venue?: Venue;
 	/** Omitted for blocks nobody looks at. A proposal may add one; acceptance never changes or removes one the block already has. */
 	surface?: Surface;
+	/** A self-contained HTML/CSS mockup of a surface, drawn by Sketch. Shown only in a sandboxed frame. Omitted when empty. */
+	mockup?: string;
 	/** Ids of blocks this block reuses: a shared block is defined once and linked from anywhere. Omitted when empty. */
 	uses?: string[];
 	actions: BlockActions;
@@ -92,7 +94,7 @@ export interface Scope {
 	id?: string;
 }
 
-export type Intent = "plan" | "discover" | "enhance" | "decompose" | "investigate" | "execute" | "replan" | "prune";
+export type Intent = "plan" | "discover" | "enhance" | "decompose" | "investigate" | "execute" | "replan" | "prune" | "change";
 
 export type Direction = "h" | "j" | "k" | "l";
 
@@ -105,6 +107,8 @@ export const SURFACES: readonly Surface[] = ["page", "component"];
 export const EDGE_DIRECTIONS: readonly EdgeDirection[] = ["forward", "both", "none"];
 export const EDGE_ROUTINGS: readonly EdgeRouting[] = ["auto", "horizontal-first", "vertical-first"];
 export const EDGE_PORTS: readonly EdgePort[] = ["auto", "north", "east", "south", "west"];
+/** The largest mockup a block may carry, in characters. */
+export const MOCKUP_MAX_CHARS = 40_000;
 
 export type ArkTypeNamespace = typeof ArkType;
 
@@ -132,6 +136,7 @@ const DEFINITIONS = {
 		"status?": "Status",
 		"venue?": "Venue",
 		"surface?": "Surface",
+		"mockup?": "string",
 		"uses?": "string[]",
 		actions: "BlockActions",
 	},
@@ -269,6 +274,7 @@ export function createBlock(
 		status: init.status ?? "open",
 		...(init.venue !== undefined && init.venue !== "here" ? { venue: init.venue } : {}),
 		...(init.surface !== undefined ? { surface: init.surface } : {}),
+		...(init.mockup !== undefined && init.mockup.length > 0 ? { mockup: init.mockup } : {}),
 		...(init.uses !== undefined && init.uses.length > 0 ? { uses: [...init.uses] } : {}),
 		actions: init.actions ? { ...init.actions } : { enhance: "", execute: "" },
 		children: init.children === undefined ? null : init.children,
@@ -687,6 +693,9 @@ function checkBlock(block: Block, label: string, ledger: IdLedger): void {
 		if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
 			ledger.errors.push(`block "${label}" source ${source.path} has endLine ${endLine} before startLine ${startLine}`);
 		}
+	}
+	if (block.mockup !== undefined && block.mockup.length > MOCKUP_MAX_CHARS) {
+		ledger.errors.push(`block "${label}" mockup is ${block.mockup.length} characters; the limit is ${MOCKUP_MAX_CHARS}`);
 	}
 }
 

@@ -17,12 +17,17 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
 import type { RelatedContext } from "./compose.ts";
 import {
+	BatchError,
+	type ComposedBatch,
 	type DocumentStart,
 	type FocusLinkKind,
 	type PageField,
 	type ProjectAction,
+	type ScreenBoard,
 	type VerbId,
+	changeContext,
 	codeRootFor,
+	composeBatch,
 	composeRequest,
 	extractedMessage,
 	fieldLabel,
@@ -32,6 +37,7 @@ import {
 	pageFields,
 	progressLabel,
 	projectActions,
+	screenBoard,
 	startDocument,
 	statusCycle,
 	statusGlyph,
@@ -72,7 +78,7 @@ import {
 	removeBlock,
 	removeUse,
 } from "./model.ts";
-import { type RelatedRanker, relatedSummary, wantsRelated } from "./relevance.ts";
+import { type RelatedRanker, batchRelatedSummary, relatedSummary, wantsRelated } from "./relevance.ts";
 import { type DocumentStore, defaultDocumentPath, displayPath } from "./store.ts";
 import { type DocumentDiff, acceptReplacement, diffDocuments, emptyDiff, placeNewBlock, tidyDiagram } from "./ui.ts";
 import { WEB_PAGE } from "./web-page.ts";
@@ -98,6 +104,8 @@ export interface WebSession {
 	branchToken: string;
 	/** The ranking behind the last preview, reused by the submit that follows it. */
 	related?: { key: string; context: RelatedContext };
+	/** The same, for the last batch preview: one ranking per member block. */
+	relatedBatch?: { key: string; contexts: Map<string, RelatedContext> };
 }
 
 export interface WebBinding {
@@ -108,6 +116,8 @@ export interface WebBinding {
 	onChange: () => void;
 	/** Register a request and hand its prompt to the agent, exactly as the overlay does. */
 	submit: (request: BeginInput, prompt: string) => { ok: true; message: string } | { ok: false; error: string };
+	/** Register a batch, write its instruction files and hand the parent prompt to the agent. */
+	submitBatch: (batch: ComposedBatch) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
 	/** Ranks outside blocks for a previewed request; absent in tests and when no session context exists. */
 	rankRelated?: RelatedRanker;
 }
@@ -347,6 +357,8 @@ export interface WebFlow {
 	useCandidates: { id: string; title: string; depth: number; used: boolean }[];
 	/** Levels the selected block can be extracted to, nearest first; empty at the top level. */
 	extractTargets: { diagramId: string; label: string }[];
+	/** Every page and component, for the Screens board. */
+	screens: ScreenBoard;
 }
 
 export interface WebState {
@@ -362,11 +374,10 @@ export interface WebState {
 	stack: string[];
 	breadcrumb: { diagramId: string; title: string }[];
 	selected: string | undefined;
-	review: WebReview | undefined;
-	/** The request this branch waits on: what it is, where, and since when (ISO time) — for progress UI. */
-	pending:
-		| { requestId: string; label: string; state: string; kind: string; since: string; blockId: string | undefined }
-		| undefined;
+	/** Every staged proposal on this branch, oldest first; each is reviewed on its own. */
+	reviews: WebReview[];
+	/** Every request this branch waits on — what, where, since when (ISO time) — for progress UI, oldest first. */
+	requests: { requestId: string; label: string; state: string; kind: string; since: string; blockId: string | undefined }[];
 }
 
 /** Every label the page shows comes from the shared flow, never from the page itself. */
@@ -409,6 +420,7 @@ function flowOf(document: DiagramDocument, selected: string | undefined): WebFlo
 			selected === undefined
 				? []
 				: extractTargets(document.root, selected).map(target => ({ diagramId: target.diagramId, label: target.label })),
+		screens: screenBoard(document),
 	};
 }
 
@@ -421,9 +433,15 @@ function useMessage(root: Diagram, id: string, targetId: string, verb: "now uses
 	return `"${name(id)}" ${verb} "${name(targetId)}"`;
 }
 
-function stagedEntry(session: WebSession): JournalEntry | undefined {
-	const entry = session.registry.pending();
-	return entry?.state === "staged" && entry.proposal ? entry : undefined;
+function reviewOf(document: DiagramDocument, staged: JournalEntry): WebReview {
+	const base = { requestId: staged.requestId, label: staged.label, summary: staged.proposal?.summary ?? "" };
+	if (staged.documentId !== document.id) {
+		return { ...base, diff: emptyDiff(), error: `this proposal belongs to document ${staged.documentId}` };
+	}
+	const projected = project(document, staged);
+	return projected.ok
+		? { ...base, diff: diffDocuments(document, projected.document) }
+		: { ...base, diff: emptyDiff(), error: projected.error };
 }
 
 function project(document: DiagramDocument, entry: JournalEntry): { ok: true; document: DiagramDocument } | { ok: false; error: string } {
@@ -468,20 +486,11 @@ function ownerOf(root: Diagram, diagramId: string): Block | undefined {
 export function stateOf(session: WebSession, binding: WebBinding): WebState {
 	const document = session.store.document;
 	const stack = document ? normalizeStack(session, document) : [];
-	const staged = stagedEntry(session);
-	let review: WebReview | undefined;
-	if (staged && document) {
-		const base = { requestId: staged.requestId, label: staged.label, summary: staged.proposal?.summary ?? "" };
-		if (staged.documentId !== document.id) {
-			review = { ...base, diff: emptyDiff(), error: `this proposal belongs to document ${staged.documentId}` };
-		} else {
-			const projected = project(document, staged);
-			review = projected.ok
-				? { ...base, diff: diffDocuments(document, projected.document) }
-				: { ...base, diff: emptyDiff(), error: projected.error };
-		}
-	}
-	const pendingEntry = session.registry.pending();
+	const active = session.registry.active();
+	const reviews =
+		document === undefined
+			? []
+			: active.filter(entry => entry.state === "staged" && entry.proposal).map(entry => reviewOf(document, entry));
 	const version = [
 		document?.id ?? "-",
 		document?.revision ?? -1,
@@ -506,17 +515,15 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 		stack,
 		breadcrumb: document ? breadcrumbOf(document, stack) : [],
 		selected: session.selected,
-		review,
-		pending: pendingEntry
-			? {
-					requestId: pendingEntry.requestId,
-					label: pendingEntry.label,
-					state: pendingEntry.state,
-					kind: pendingEntry.kind,
-					since: pendingEntry.createdAt,
-					blockId: pendingEntry.scope.kind === "block" ? pendingEntry.scope.id : undefined,
-				}
-			: undefined,
+		reviews,
+		requests: active.map(entry => ({
+			requestId: entry.requestId,
+			label: entry.label,
+			state: entry.state,
+			kind: entry.kind,
+			since: entry.createdAt,
+			blockId: entry.scope.kind === "block" ? entry.scope.id : undefined,
+		})),
 	};
 }
 
@@ -690,6 +697,62 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 				session.related = undefined;
 				return { ok: true, changed: true, message: outcome.message };
 			}
+			case "previewBatch": {
+				const { verb, ids } = batchRequest(document, op);
+				const rank = binding.rankRelated;
+				const contexts = new Map<string, RelatedContext>();
+				let summary: string | undefined;
+				if (rank) {
+					const signal = new AbortController().signal;
+					const outcomes = await Promise.all(ids.map(id => rank(document, { kind: "block", id }, signal)));
+					outcomes.forEach((outcome, index) => {
+						if (outcome.ok) contexts.set(ids[index]!, outcome.context);
+					});
+					summary = batchRelatedSummary(outcomes);
+				}
+				session.relatedBatch = { key: batchKey(document, verb.kind, ids), contexts };
+				const batch = composeOrRefuse({
+					document,
+					verb,
+					ids,
+					branchKey: session.branchToken,
+					baseDigest: store.diskDigest,
+					codeRoot: codeRootFor(binding.cwd, undefined),
+					related: contexts,
+				});
+				return {
+					ok: true,
+					changed: false,
+					message: "",
+					preview: {
+						label: batch.label,
+						text: batch.preview,
+						size: batch.size,
+						...(summary === undefined ? {} : { related: summary }),
+					},
+				};
+			}
+			case "submitBatch": {
+				const { verb, ids } = batchRequest(document, op);
+				const saved = await saveBeforeSubmit(store, op);
+				if (saved) return saved;
+				const current = store.require();
+				const related =
+					session.relatedBatch?.key === batchKey(current, verb.kind, ids) ? session.relatedBatch.contexts : undefined;
+				const batch = composeOrRefuse({
+					document: current,
+					verb,
+					ids,
+					branchKey: session.branchToken,
+					baseDigest: store.diskDigest,
+					codeRoot: codeRootFor(binding.cwd, undefined),
+					related,
+				});
+				const outcome = await binding.submitBatch(batch);
+				if (!outcome.ok) return { ok: false, error: outcome.error };
+				session.relatedBatch = undefined;
+				return { ok: true, changed: true, message: outcome.message };
+			}
 			case "discard": {
 				const requestId = str(op.requestId, "requestId");
 				const entry = session.registry.entryFor(requestId);
@@ -744,7 +807,8 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 						key === "evidence" ||
 						key === "acceptanceCriteria" ||
 						key === "venue" ||
-						key === "surface";
+						key === "surface" ||
+						key === "mockup";
 					if (!editable) throw new OpError(`field ${key} cannot be edited here`);
 				}
 				if (patch.evidence !== undefined && !EVIDENCE_VALUES.includes(patch.evidence as Evidence)) {
@@ -755,6 +819,9 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 				}
 				if (patch.surface !== undefined && patch.surface !== "none" && !SURFACES.includes(patch.surface as Surface)) {
 					throw new OpError(`surface must be one of none, ${SURFACES.join(", ")}`);
+				}
+				if (patch.mockup !== undefined && patch.mockup !== "") {
+					throw new OpError("mockup can only be cleared here; Sketch draws it");
 				}
 				const criteria =
 					patch.acceptanceCriteria === undefined
@@ -784,6 +851,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 						if (patch.surface === "none") delete target.block.surface;
 						else target.block.surface = patch.surface as Surface;
 					}
+					if (patch.mockup === "") delete target.block.mockup;
 					if (criteria !== undefined) target.block.acceptanceCriteria = criteria;
 				});
 				return { ok: true, changed: true, message: "block updated" };
@@ -1021,6 +1089,29 @@ function requestScope(document: DiagramDocument, op: Record<string, unknown>): {
 	return { verb, scope: { kind: "block", id } };
 }
 
+/** The verb and marked blocks a batch op names; execute never runs as a batch. */
+function batchRequest(document: DiagramDocument, op: Record<string, unknown>) {
+	const verbId = str(op.verb, "verb");
+	const verb = verbsFor(document.purpose).find(candidate => candidate.id === verbId && candidate.kind !== "execute");
+	if (!verb) throw new OpError(`no ${verbId} batch for a ${document.purpose} document`);
+	if (!Array.isArray(op.ids) || op.ids.some(id => typeof id !== "string")) throw new OpError("ids must be a list of block ids");
+	return { verb, ids: op.ids as string[] };
+}
+
+/** A batch ranking belongs to one document revision, one verb and one ordered set of blocks. */
+function batchKey(document: DiagramDocument, kind: ActionKind, ids: readonly string[]): string {
+	return `${document.id}@${document.revision}:${kind}:${ids.join(",")}`;
+}
+
+function composeOrRefuse(input: Parameters<typeof composeBatch>[0]): ComposedBatch {
+	try {
+		return composeBatch(input);
+	} catch (error) {
+		if (error instanceof BatchError) throw new OpError(error.message);
+		throw error;
+	}
+}
+
 /**
  * A request is composed against the saved file. Unsaved edits answer 409 so
  * the page can ask; `saveFirst` saves them and carries on.
@@ -1032,32 +1123,46 @@ async function saveBeforeSubmit(store: DocumentStore, op: Record<string, unknown
 	return saved.ok ? undefined : { ok: false, error: saved.errors.join("; ") };
 }
 
-/** Start a fresh document (draft or discover) and submit its first request. */
+/** Start a fresh document (draft, discover or change) and submit its first request. */
 async function submitStart(session: WebSession, binding: WebBinding, op: Record<string, unknown>): Promise<OpResult> {
 	const store = session.store;
 	const start = parseStart(op.start);
 	if (store.dirty && (store.document?.root.blocks.length ?? 0) > 0) {
 		throw new OpError("save this document before starting a new one");
 	}
+	// Read before the start replaces the document: the map and its marked blocks.
+	const marked = (op.start as Record<string, unknown>).marked;
+	if (marked !== undefined && (!Array.isArray(marked) || marked.some(id => typeof id !== "string"))) {
+		throw new OpError("start.marked must be a list of block ids");
+	}
+	const change =
+		start.kind === "change" ? changeContext(store.document, store.path, binding.cwd, (marked as string[] | undefined) ?? []) : undefined;
 	const started = startDocument(store, binding.cwd, start);
 	session.stack = [started.document.root.id];
 	session.selected = undefined;
 	const saved = await started.save;
 	if (!saved.ok) return { ok: false, error: saved.errors.join("; ") };
-	const draft = start.kind === "draft";
+	const request = START_REQUEST[start.kind];
 	const composed = composeRequest({
 		document: store.require(),
-		kind: draft ? "draft" : "discover",
-		intent: draft ? "plan" : "discover",
+		kind: request.kind,
+		intent: request.intent,
 		scope: { kind: "project" },
 		branchKey: session.branchToken,
 		baseDigest: store.diskDigest,
 		codeRoot: codeRootFor(binding.cwd, start),
+		change,
 	});
 	const outcome = binding.submit(composed.request, composed.prompt);
 	if (!outcome.ok) return { ok: false, error: outcome.error };
 	return { ok: true, changed: true, message: outcome.message };
 }
+
+const START_REQUEST: Record<DocumentStart["kind"], { kind: ActionKind; intent: Intent }> = {
+	draft: { kind: "draft", intent: "plan" },
+	discover: { kind: "discover", intent: "discover" },
+	change: { kind: "change", intent: "change" },
+};
 
 function parseStart(value: unknown): DocumentStart {
 	if (typeof value !== "object" || value === null) throw new OpError("start must be an object");
@@ -1072,5 +1177,10 @@ function parseStart(value: unknown): DocumentStart {
 		const target = start.target === undefined ? "." : str(start.target, "target").trim() || ".";
 		return { kind: "discover", target };
 	}
-	throw new OpError("start.kind must be draft or discover");
+	if (start.kind === "change") {
+		const goal = str(start.goal ?? "", "goal");
+		if (goal.trim().length === 0) throw new OpError("a change needs a goal");
+		return { kind: "change", goal };
+	}
+	throw new OpError("start.kind must be draft, discover or change");
 }

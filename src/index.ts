@@ -5,9 +5,12 @@
  * navigation state persisted in this extension's session-metadata namespace.
  * Nothing here patches OMP core or global configuration.
  */
+import { mkdir, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import type { BeginInput, JournalEntry } from "./actions.ts";
 import { ActionRegistry, resumeBranchToken } from "./actions.ts";
+import type { ComposedBatch } from "./flow.ts";
 import { resolveScope } from "./compose.ts";
 import { resolvePlannerJudge } from "./judge.ts";
 import type { Purpose, Scope } from "./model.ts";
@@ -89,6 +92,8 @@ function sessionFor(pi: ExtensionAPI, ctx: ExtensionContext): PlannerSession {
 		listeners: new Set(),
 	};
 	SESSIONS.set(key, created);
+	// A save of our own must not make in-flight requests look stale.
+	created.store.onSave((previous, next) => created.registry.rebase(previous, next));
 	// After a plugin reload the listener is still up but serves the previous
 	// module's state; point it at this one.
 	if (runningWeb(key)) startWeb(webBinding(pi, ctx));
@@ -113,6 +118,13 @@ function webBinding(pi: ExtensionAPI, ctx: ExtensionContext): WebBinding {
 			if (!session) return { ok: false, error: "the planner session is gone" };
 			const outcome = submitRequest(pi, ctx, session, request, prompt);
 			// The terminal transcript is where the request runs, so say it there too.
+			ctx.ui.notify(`visual planner: ${outcome.ok ? outcome.message : outcome.error}`, outcome.ok ? "info" : "warning");
+			return outcome;
+		},
+		submitBatch: async batch => {
+			const session = SESSIONS.get(key);
+			if (!session) return { ok: false, error: "the planner session is gone" };
+			const outcome = await submitBatch(pi, ctx, session, batch);
 			ctx.ui.notify(`visual planner: ${outcome.ok ? outcome.message : outcome.error}`, outcome.ok ? "info" : "warning");
 			return outcome;
 		},
@@ -285,11 +297,16 @@ async function runScreen(
 		ctx.ui.notify(`visual planner: ${outcome.ok ? outcome.message : outcome.error}`, outcome.ok ? "info" : "warning");
 		return;
 	}
-	const staged = session.registry
-		.entries.filter(entry => entry.state === "staged" && entry.branchKey === branchKey)
-		.at(-1);
-	if (staged) {
-		ctx.ui.notify(`visual planner: proposal staged for ${staged.label}; reopen /diagram and press R to review`, "info");
+	if (result.kind === "submit-batch") {
+		const outcome = await submitBatch(pi, ctx, session, result.batch);
+		ctx.ui.notify(`visual planner: ${outcome.ok ? outcome.message : outcome.error}`, outcome.ok ? "info" : "warning");
+		return;
+	}
+	const staged = session.registry.entries.filter(entry => entry.state === "staged" && entry.branchKey === branchKey);
+	if (staged.length === 1) {
+		ctx.ui.notify(`visual planner: proposal staged for ${staged[0]!.label}; reopen /diagram and press R to review`, "info");
+	} else if (staged.length > 1) {
+		ctx.ui.notify(`visual planner: ${staged.length} proposals staged; reopen /diagram and press R to review`, "info");
 	}
 }
 
@@ -317,6 +334,38 @@ function submitRequest(
 	};
 }
 
+/**
+ * Register a batch, write each member's instructions where its subagent reads
+ * them, and hand the parent prompt to the agent. Shared by the overlay and web mode.
+ */
+async function submitBatch(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	session: PlannerSession,
+	batch: ComposedBatch,
+): Promise<{ ok: true; message: string } | { ok: false; error: string }> {
+	if (!ctx.isIdle() || ctx.hasPendingMessages()) {
+		return { ok: false, error: "OMP is busy; finish or cancel the current task before submitting." };
+	}
+	const began = session.registry.beginBatch(batch.requests);
+	if (!began.ok) return { ok: false, error: began.errors.join("; ") };
+	try {
+		await mkdir(dirname(batch.files[0]!.path), { recursive: true });
+		for (const file of batch.files) await writeFile(file.path, file.text, "utf8");
+	} catch (error) {
+		const reason = `could not write batch instructions: ${error instanceof Error ? error.message : String(error)}`;
+		for (const entry of began.entries) session.registry.resolve(entry.requestId, "failed", reason);
+		persist(pi, session);
+		return { ok: false, error: reason };
+	}
+	persist(pi, session);
+	pi.sendUserMessage(batch.prompt, { attribution: "agent" });
+	return {
+		ok: true,
+		message: `sent to the agent: ${batch.label}. Each block's proposal comes back for your review; nothing changes until you accept it.`,
+	};
+}
+
 const NEW_TITLES: Record<Purpose, string> = { brainstorm: "New brainstorm", plan: "New plan", explore: "New map" };
 
 const HELP_TEXT = [
@@ -325,6 +374,7 @@ const HELP_TEXT = [
 	"/diagram open <path>            open a document at a path",
 	"/diagram draft [brainstorm]     draft a plan (or seed a mind map) from a prompt",
 	"/diagram discover [path]        map an existing codebase (default: cwd)",
+	"/diagram change [goal]          plan a change to this codebase (reads the code first)",
 	"/diagram web                    open this session's planner in the browser (local server)",
 	"/diagram web stop               stop the local server",
 ].join("\n");
@@ -338,6 +388,7 @@ const COMPLETIONS = [
 	"draft",
 	"draft brainstorm",
 	"discover",
+	"change ",
 	"web",
 	"web stop",
 	"help",
@@ -347,7 +398,7 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 	const toolSchemas = toolSchemasFor(pi.arktype);
 
 	pi.registerCommand("diagram", {
-		description: "Open the visual planner (new/open/draft/discover/web)",
+		description: "Open the visual planner (new/open/draft/discover/change/web)",
 		getArgumentCompletions: prefix => {
 			const matches = COMPLETIONS.filter(item => item.startsWith(prefix));
 			return matches.length > 0 ? matches.map(item => ({ value: item, label: item })) : null;
@@ -427,6 +478,12 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 			if (trimmed === "discover" || trimmed.startsWith("discover ")) {
 				const target = trimmed.startsWith("discover ") ? trimmed.slice("discover ".length).trim() : ".";
 				await runScreen(pi, ctx, session, { action: "discover", target: target.length > 0 ? target : "." }, undefined);
+				return;
+			}
+			if (trimmed === "change" || trimmed.startsWith("change ")) {
+				const goal = trimmed.slice("change".length).trim();
+				const notice = await prepareDefault(ctx, session);
+				await runScreen(pi, ctx, session, { action: "change", ...(goal.length > 0 ? { goal } : {}) }, notice);
 				return;
 			}
 			const notice = await prepareDefault(ctx, session);

@@ -29,7 +29,8 @@ export type ActionKind =
 	| "investigate"
 	| "execute"
 	| "replan"
-	| "prune";
+	| "prune"
+	| "change";
 
 export type JournalState =
 	| "pending"
@@ -62,6 +63,8 @@ export interface JournalEntry {
 	state: JournalState;
 	stateReason?: string;
 	proposal?: StagedProposal;
+	/** Shared by every request one batch started; absent on a single request. */
+	batchId?: string;
 }
 
 export interface BeginInput {
@@ -75,6 +78,7 @@ export interface BeginInput {
 	baseRevision: number;
 	baseDigest: string | undefined;
 	prompt: string;
+	batchId?: string;
 }
 
 export interface StageContext {
@@ -273,9 +277,9 @@ export class ActionRegistry {
 		return this.#entries.find(entry => entry.requestId === requestId);
 	}
 
-	/** The one request this branch is waiting on, if any. */
-	pending(): JournalEntry | undefined {
-		return this.#entries.find(
+	/** Every request this branch is waiting on — pending or staged — in the order they were created. */
+	active(): JournalEntry[] {
+		return this.#entries.filter(
 			entry => entry.branchKey === this.#branchKey && (entry.state === "pending" || entry.state === "staged"),
 		);
 	}
@@ -299,7 +303,7 @@ export class ActionRegistry {
 	}
 
 	begin(input: BeginInput): BeginOutcome {
-		const active = this.pending();
+		const active = this.active()[0];
 		if (active) {
 			return {
 				ok: false,
@@ -316,6 +320,54 @@ export class ActionRegistry {
 		this.#entries.push(entry);
 		this.#trim();
 		return { ok: true, entry };
+	}
+
+	/**
+	 * Start several block requests at once, one per block, all sharing a `batchId`.
+	 * Each is staged and reviewed on its own; the batch only starts them together.
+	 */
+	beginBatch(inputs: readonly BeginInput[]): { ok: true; entries: JournalEntry[] } | StageFailure {
+		const active = this.active()[0];
+		if (active) {
+			return {
+				ok: false,
+				errors: [
+					`request ${active.requestId} (${active.kind}) is still ${active.state}; review, reject or discard it before starting another`,
+				],
+			};
+		}
+		if (inputs.length < 2) return { ok: false, errors: ["a batch needs at least two requests"] };
+		for (const input of inputs) {
+			if (input.kind === "execute" || input.scope.kind !== "block") {
+				const kind = input.kind === "execute" ? input.kind : input.scope.kind;
+				return { ok: false, errors: [`a batch holds block requests, not ${kind}`] };
+			}
+		}
+		const seen = new Set<string>();
+		for (const input of inputs) {
+			const id = input.scope.id ?? "";
+			if (seen.has(id)) return { ok: false, errors: [`block ${id} appears twice in one batch`] };
+			seen.add(id);
+		}
+		const batchId = inputs[0]!.batchId;
+		if (batchId === undefined || inputs.some(input => input.batchId !== batchId)) {
+			return { ok: false, errors: ["every request in a batch carries the same batchId"] };
+		}
+		const createdAt = new Date().toISOString();
+		const entries = inputs.map((input): JournalEntry => ({ ...input, createdAt, state: "pending" }));
+		this.#entries.push(...entries);
+		this.#trim();
+		return { ok: true, entries };
+	}
+
+	/**
+	 * The planner saved the file itself; requests written against the old bytes stay valid.
+	 * An outside edit never equals `previous`, so it still makes them stale.
+	 */
+	rebase(previous: string, next: string): void {
+		for (const entry of this.active()) {
+			if (entry.baseDigest === previous) entry.baseDigest = next;
+		}
 	}
 
 	stage(requestId: string, summary: string, replacement: unknown, context: StageContext): StageOutcome {

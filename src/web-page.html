@@ -153,7 +153,7 @@ svg.edges { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overfl
 }
 .crumbline a { cursor: pointer; }
 .crumbline a:hover { color: var(--text); text-decoration: underline; }
-@media (min-width: 1100px) { body.reviewing .workspace { right: 540px; } }
+@media (min-width: 1100px) { body.reviewing .workspace, body.reviewing .screens { right: 540px; } }
 .dump { margin-top: 22px; }
 
 .node { position: absolute; background: var(--bg); border: 1px solid var(--line-strong); user-select: none; }
@@ -343,6 +343,31 @@ body.busy, body.busy * { cursor: progress; }
 .keys .key .k { flex: none; width: 12ch; }
 .offline { position: fixed; inset: auto 0 0 0; background: var(--bad); color: #fdfcfc; text-align: center; padding: 4px; font-weight: 700; display: none; z-index: 20; }
 .offline.on { display: block; }
+/* Mockups: a sandboxed frame drawn at 1280×800 and scaled into its box; no scripts, no same-origin access. */
+.mockup-box { overflow: hidden; border: 1px solid var(--line); background: #fff; max-width: 100%; flex: none; }
+.mockup-box iframe { display: block; }
+.mockup .row { display: flex; gap: 8px; margin-top: 8px; }
+.mockup-diff { display: flex; gap: 12px; flex-wrap: wrap; }
+.mockup-diff .side { display: flex; flex-direction: column; gap: 4px; }
+/* Screens: every page and component on one board. */
+.screens { position: fixed; inset: var(--top) 0 var(--bottom); overflow: auto; padding: 16px 24px; background: var(--bg); }
+.screens .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; margin: 8px 0 24px; }
+.screens .card { display: flex; flex-direction: column; gap: 6px; min-width: 0; border: 1px solid var(--line-strong); border-radius: 4px; padding: 10px; }
+.screens .card pre { margin: 0; width: 320px; max-width: 100%; height: 200px; overflow: auto; padding: 6px 8px; background: var(--card); border-radius: 4px; font: 11px/1.4 var(--mono); white-space: pre; }
+.screens .card .none { width: 320px; max-width: 100%; height: 200px; display: flex; align-items: center; justify-content: center; color: var(--faint); border: 1px dashed var(--line); }
+.screens .card .title { align-self: flex-start; border: 0; background: transparent; padding: 0; font-weight: 700; text-align: left; }
+.screens .card .title:hover { color: var(--accent); }
+.screens .card .where { color: var(--muted); font-size: 12px; }
+.screens .chips { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 12px; color: var(--muted); }
+.screens .chips button, .screens .card .sketch { font-size: 12px; line-height: 1.6; padding: 0 6px; }
+.screens .card .sketch { align-self: flex-start; }
+/* Marks: blocks picked for a parallel batch. */
+.rail .row .check { flex: none; color: var(--accent); }
+.rail .batch { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 0 8px 10px; padding: 6px 8px; border: 1px solid var(--line); font-size: 12px; }
+.rail .batch button { font-size: 12px; line-height: 1.6; padding: 0 6px; }
+.rail .batch .subtle { color: var(--muted); }
+.review .queue { display: flex; gap: 6px; align-items: center; color: var(--muted); font-size: 12px; margin-top: 4px; }
+.review .queue button { font-size: 12px; line-height: 1.6; padding: 0 6px; }
 </style>
 </head>
 <body>
@@ -350,6 +375,7 @@ body.busy, body.busy * { cursor: progress; }
 <div class="viewport" id="viewport" hidden>
   <div class="world" id="world"><svg class="edges" id="edges"></svg></div>
 </div>
+<div class="screens" id="screens" hidden></div>
 <header class="hud top" id="topbar">
   <div class="left">
     <input class="doc" id="docTitle" title="Document title — click to rename" spellcheck="false">
@@ -364,6 +390,7 @@ body.busy, body.busy * { cursor: progress; }
     <button class="ghost" id="redo" title="Redo (⇧⌘Z)">Redo</button>
     <span class="sep"></span>
     <button class="ghost" id="filesToggle" title="Files in this workspace (/)">Files</button>
+    <button class="ghost" id="screensToggle" title="Every page and component, drawn (S)">Screens</button>
     <button class="ghost" id="mapToggle" title="Switch between the block page and the map (v)">Map</button>
     <button class="ghost" id="tidy" title="Lay this level out on the grid (T)" hidden>Tidy</button>
     <button class="ghost" id="fit" title="Fit to screen (F)" hidden>Fit</button>
@@ -397,7 +424,8 @@ function cardCols(title) { return Math.max(12, Math.min(32, [...title].length + 
 let state = null, message = "", messageIsError = false, opCount = 0;
 let purposeOpen = false, newPurpose = "plan", confirming = false, keysOpen = false;
 let selectedEdge = null, preview = null, gesture = null, editTitleOf = null, editBodyOf = null, centerOn = null;
-let surface = "page";
+let surface = "page"; // "page", "map" or "screens"
+let marked = new Set(), reviewIndex = 0, mockupOpen = false, goalOpen = false;
 const views = new Map(); // diagram id -> map pan and zoom, not document content
 const $ = id => document.getElementById(id);
 function choices(values, current, onPick) {
@@ -432,7 +460,7 @@ function svg(tag, attrs) {
 }
 
 // ---------------------------------------------------------------- server
-const BUSY_WORDS = { save: "saving", submit: "sending to the agent", accept: "applying", preview: "composing and ranking context", tidy: "tidying", undo: "undoing", redo: "redoing" };
+const BUSY_WORDS = { save: "saving", submit: "sending to the agent", accept: "applying", preview: "composing and ranking context", previewBatch: "composing and ranking context", submitBatch: "sending to the agent", tidy: "tidying", undo: "undoing", redo: "redoing" };
 let inFlight = 0, inFlightWord = "";
 /** Every write goes through here. Resolves to { ok, status, data } and never throws. */
 async function op(body) {
@@ -549,7 +577,9 @@ function render() {
   renderStart();
   $("workspace").hidden = surface !== "page";
   $("viewport").hidden = surface !== "map";
+  $("screens").hidden = surface !== "screens";
   $("mapToggle").textContent = surface === "map" ? "Page" : "Map";
+  $("screensToggle").textContent = surface === "screens" ? "Page" : "Screens";
   $("zoom").hidden = surface !== "map";
   $("tidy").hidden = $("fit").hidden = surface !== "map";
   if (surface === "page") {
@@ -557,13 +587,14 @@ function render() {
     renderRail();
     if (walking()) renderWalk();
     else if (!($("workspace").contains(active) && ["INPUT", "TEXTAREA", "SELECT"].includes(active.tagName))) renderWorkspace();
-  } else if (!editing() && !gesture) renderCanvas();
-  if (surface === "map") applyView();
+  } else if (surface === "map") {
+    if (!editing() && !gesture) renderCanvas();
+  } else renderScreens();
 }
 /** Brainstorm is always a walk. Explore walks until a block is settled; plan stays a page. */
 function walking() {
   const doc = state && state.document;
-  if (!doc || surface === "map") return false;
+  if (!doc || surface !== "page") return false;
   if (doc.purpose === "brainstorm") return true;
   if (doc.purpose !== "explore") return false;
   const block = selectedBlock();
@@ -768,22 +799,36 @@ function renderRail() {
   rail.replaceChildren();
   if (!doc) return;
   rail.append(el("div", { class: "label", text: "Outline" }));
+  for (const id of [...marked]) if (!findBlock(id)) marked.delete(id);
+  if (marked.size > 0) {
+    const n = marked.size, change = doc.purpose === "explore";
+    const bar = el("div", { class: "batch" }, el("span", { text: n + " marked" }));
+    if (n >= 2) for (const verb of state.flow.verbs) {
+      if (verb.id !== "execute") bar.append(el("button", { text: verb.label + " ×" + n + "…", title: "One subagent per block; each proposal is reviewed on its own", onclick: () => openBatchPreview(verb.id) }));
+    }
+    if (change) bar.append(el("button", { text: "Plan a change from " + n + " marked…", title: "A new plan that starts reading from these blocks", onclick: () => openGoalDialog("Plan a change to this codebase", goal => startProject("change", goal)) }));
+    bar.append(el("button", { class: "ghost", text: "clear", onclick: () => { marked.clear(); render(); } }));
+    if (n === 1 && !change) bar.append(el("span", { class: "subtle", text: "mark one more to run in parallel" }));
+    rail.append(bar);
+  }
   const status = state.flow.status;
-  const pending = state.pending;
+  const requestFor = new Map(state.requests.filter(request => request.blockId).map(request => [request.blockId, request]));
   const counts = usedCounts();
   const walk = (diagram, depth) => {
     for (const block of diagram.blocks) {
-      const mark = pending && pending.blockId === block.id
-        ? (pending.state === "pending" ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner()) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" }))
+      const request = requestFor.get(block.id);
+      const mark = request
+        ? (request.state === "pending" ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner()) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" }))
         : null;
       const reused = counts.get(block.id) || 0;
       rail.append(el("button", {
-        class: "row" + (block.id === state.selected ? " current" : "") + (uncited(block) ? " dim" : ""),
+        class: "row" + (block.id === state.selected ? " current" : "") + (uncited(block) ? " dim" : "") + (marked.has(block.id) ? " marked" : ""),
         style: "padding-left:" + (8 + depth * 16) + "px",
         title: status ? status.labels[block.status] : null,
-        onclick: () => op({ op: "focus", id: block.id }),
+        onclick: event => { if (event.shiftKey) toggleMark(block.id); else op({ op: "focus", id: block.id }); },
       }, status ? el("span", { class: "glyph", text: status.glyphs[block.status] }) : null,
         el("span", { class: "name", text: block.title || "(untitled)" }),
+        marked.has(block.id) ? el("span", { class: "check", text: "✓", title: "marked for a parallel batch (m)" }) : null,
         reused > 0 ? el("span", { class: "reuse", text: "×" + reused, title: "used by " + reused + (reused === 1 ? " block" : " blocks") }) : null,
         mark));
       if (block.children) walk(block.children, depth + 1);
@@ -855,7 +900,7 @@ function renderWalk() {
       centre.append(input);
       if (editBodyOf === block.id) requestAnimationFrame(() => input.focus());
     }
-    centre.append(actionRow(block, false), stepDetail());
+    centre.append(...[mockupSection(block)].filter(Boolean), actionRow(block, false), stepDetail());
   }
   focus.append(centre);
 
@@ -907,13 +952,15 @@ function renderWorkspace() {
   page.append(content);
   const block = selectedBlock();
   if (!block) {
-    const project = state.flow.projectActions.filter(action => action.kind === "replan" || action.kind === "prune" || action.kind === "execute");
+    const project = state.flow.projectActions.filter(action => action.kind === "change" || action.kind === "replan" || action.kind === "prune" || action.kind === "execute");
     content.append(el("div", { class: "label", text: doc.purpose + " · overview" }),
       el("h1", { text: doc.title }),
       el("p", { class: "subtle", text: doc.goal || "No goal written yet. Rename and describe the document in the top bar." }),
       el("p", { class: "subtle", text: state.flow.progress }),
       el("div", { class: "actions" }, stepButton(null),
-        ...project.map(action => el("button", { title: "Previews the request first", onclick: () => openPreview(action.kind) }, action.label + "…")),
+        ...project.map(action => action.kind === "change"
+          ? el("button", { title: "A new plan for a change to this codebase; the agent reads the code first", onclick: () => openGoalDialog("Plan a change to this codebase", goal => startProject("change", goal)) }, action.label + "…")
+          : el("button", { title: "Previews the request first", onclick: () => openPreview(action.kind) }, action.label + "…")),
         el("button", { text: "+ block", onclick: () => op({ op: "addBlock" }) })),
       stepDetail(),
       ...neighbourSections(null, "Nothing here yet. Add the first block."));
@@ -947,7 +994,7 @@ function renderWorkspace() {
     else if (field === "expectedOutput") cell.append(inlineText(block.expectedOutput, "What does it produce?", value => patch({ expectedOutput: value })));
     fields.append(cell);
   }
-  content.append(el("section", null, fields), actionRow(block, true), stepDetail(), ...neighbourSections(block, ""));
+  content.append(el("section", null, fields), ...[mockupSection(block)].filter(Boolean), actionRow(block, true), stepDetail(), ...neighbourSections(block, ""));
   const diagram = currentDiagram();
   if (!diagram.edges.some(edge => edge.from === block.id || edge.to === block.id)) {
     content.append(el("section", null, el("div", { class: "section-head", text: "Linked · 0" }),
@@ -970,6 +1017,78 @@ function renderWorkspace() {
   page.scrollTop = pageScroll;
 }
 
+// ---------------------------------------------------------------- mockups and screens
+/** A mockup drawn at 1280×800, scaled into a box; sandboxed: no scripts, no same-origin access. */
+function mockupFrame(html, width) {
+  const scale = width / 1280;
+  const frame = el("iframe", { sandbox: "", referrerpolicy: "no-referrer", title: "mockup", tabindex: "-1" });
+  frame.srcdoc = html;
+  frame.style.cssText = "width:1280px;height:800px;border:0;transform:scale(" + scale + ");transform-origin:0 0;pointer-events:none";
+  return el("div", { class: "mockup-box", style: "width:" + width + "px;height:" + Math.round(800 * scale) + "px" }, frame);
+}
+/** A block's mockup, with a full-size view and a way to remove it; nothing without one. */
+function mockupSection(block) {
+  if (!block.mockup) return null;
+  const html = block.mockup;
+  return el("section", { class: "mockup" }, el("div", { class: "section-head", text: "Mockup" }), mockupFrame(html, 640),
+    el("div", { class: "row" },
+      el("button", { text: "Full size", title: "The mockup at up to 1280×800", onclick: () => openMockup(html) }),
+      el("button", { class: "ghost danger", text: "Remove", title: "Only you remove a mockup; a proposal can only replace it",
+        onclick: () => ask("Remove this mockup? Sketch can draw it again.", "Remove", () => op({ op: "patchBlock", id: block.id, fields: { mockup: "" } })) })));
+}
+function closeMockup() { mockupOpen = false; const host = $("modal"); host.hidden = true; host.replaceChildren(); }
+function openMockup(html) {
+  mockupOpen = true;
+  const width = Math.min(1280, Math.floor(innerWidth * 0.9), Math.floor((innerHeight - 140) * 1.6));
+  const host = $("modal");
+  host.hidden = false;
+  host.replaceChildren(el("div", { class: "modal", role: "dialog", "aria-label": "mockup", style: "width:auto;max-width:none" },
+    mockupFrame(html, width),
+    el("div", { class: "row" }, el("button", { class: "primary", text: "Close", onclick: closeMockup }),
+      el("span", { class: "hint", text: "Esc closes · sandboxed: no scripts, no network" }))));
+}
+function toggleScreens() { surface = surface === "screens" ? "page" : "screens"; render(); }
+/** Every page and component, drawn: the mockup, else the wireframe, else a gap to sketch. */
+function renderScreens() {
+  const host = $("screens"), top = host.scrollTop;
+  host.replaceChildren();
+  const board = state.flow && state.flow.screens;
+  if (!board) return;
+  const goTo = id => op({ op: "focus", id }).then(() => { surface = "page"; render(); });
+  const card = entry => {
+    const block = findBlock(entry.id);
+    const thumb = block && block.mockup ? mockupFrame(block.mockup, 320)
+      : entry.wireframe !== undefined ? el("pre", { text: entry.wireframe })
+      : el("div", { class: "none", text: "not sketched" });
+    const chips = [];
+    if (entry.links.length) chips.push(el("div", { class: "chips" }, ...entry.links.map(link =>
+      el("button", { class: "ghost", text: "→ " + link.title + (link.label ? " · " + link.label : ""), title: "Open this page", onclick: () => goTo(link.id) }))));
+    if (entry.usedBy.length) chips.push(el("div", { class: "chips" }, "used by:", ...entry.usedBy.map(user =>
+      el("button", { class: "ghost", text: user.title, title: "Open this surface", onclick: () => goTo(user.id) }))));
+    return el("div", { class: "card" }, thumb,
+      el("button", { class: "title", text: entry.title, title: "Open this block's page", onclick: () => goTo(entry.id) }),
+      entry.path ? el("div", { class: "where", text: entry.path }) : null,
+      ...chips,
+      state.document.purpose !== "explore" ? el("button", { class: "sketch", text: "Sketch…", title: "Refine draws a wireframe and an HTML mockup; previewed first", onclick: () => openPreview("refine", entry.id) }) : null);
+  };
+  if (!board.pages.length && !board.components.length) {
+    host.append(el("p", { class: "subtle", text: "No pages or components yet. Mark a block as a page or component on its page, then Sketch it." }));
+    return;
+  }
+  host.append(el("div", { class: "label", text: "Pages · " + board.pages.length }), el("div", { class: "grid" }, ...board.pages.map(card)),
+    el("div", { class: "label", text: "Components · " + board.components.length }), el("div", { class: "grid" }, ...board.components.map(card)));
+  host.scrollTop = top;
+}
+/** Marks are this page's own: not saved, not shared with the terminal. */
+function toggleMark(id) {
+  const block = findBlock(id);
+  if (!block) return;
+  const title = block.title || "(untitled)";
+  if (marked.delete(id)) flash("unmarked “" + title + "”", false);
+  else { marked.add(id); flash("marked “" + title + "” · " + marked.size + " marked", false); }
+  render();
+}
+
 async function inspectAnchor(path, line) {
   const response = await fetch("/api/insight?path=" + encodeURIComponent(path) + "&line=" + line).catch(() => null);
   const result = response ? await response.json().catch(() => ({ error: "could not read source insight" })) : { error: "offline" };
@@ -988,15 +1107,21 @@ function clock(since) {
 function discardButton(requestId) {
   return el("button", { class: "ghost", text: "discard", title: "Stop waiting; a late proposal for it will be refused", onclick: () => op({ op: "discard", requestId }) });
 }
-/** The HUD's one line of progress: a click in flight, else the agent's request and how long it has run. */
+/** The HUD's one line of progress: a click in flight, else the agent's requests and how long they have run. */
 function renderActivity() {
   const host = $("activity");
   host.replaceChildren();
-  const pending = state && state.pending;
+  const requests = state ? state.requests : [];
+  const pending = requests.filter(request => request.state === "pending");
+  const staged = requests.filter(request => request.state === "staged").length;
   if (inFlight > 0) host.append(spinner(), el("span", { class: "what", text: inFlightWord + "…" }));
-  else if (pending && pending.state === "pending") {
-    host.append(spinner(), el("span", { class: "what", text: "agent working: " + pending.label, title: pending.label }), elapsed(pending.since), discardButton(pending.requestId));
-  } else if (pending && pending.state === "staged") host.append(el("span", { class: "what", text: "◆ proposal ready to review" }));
+  else if (pending.length === 1) {
+    const only = pending[0];
+    host.append(spinner(), el("span", { class: "what", text: "agent working: " + only.label, title: only.label }), elapsed(only.since), discardButton(only.requestId));
+  } else if (pending.length > 1) {
+    host.append(spinner(), el("span", { class: "what", text: "agent working: " + pending.length + " requests", title: pending.map(request => request.label).join("\n") }), elapsed(pending[0].since),
+      el("button", { class: "ghost", text: "discard all", title: "Stop waiting; late proposals for them will be refused", onclick: async () => { for (const request of pending) await op({ op: "discard", requestId: request.requestId }); } }));
+  } else if (staged > 0) host.append(el("span", { class: "what", text: "◆ " + staged + (staged === 1 ? " proposal" : " proposals") + " ready to review" }));
   host.hidden = host.childElementCount === 0;
 }
 // One ticker animates every spinner and elapsed clock on the page.
@@ -1216,7 +1341,7 @@ function keyHints() {
     for (const verb of flow.verbs) hints.push([verb.key, verb.label.toLowerCase()]);
   }
   if (doc.purpose !== "brainstorm") hints.push(["n", "next open"]);
-  hints.push(doc.purpose === "brainstorm" ? ["o", "dump a line"] : ["o O", "add / inside"], ["/", "files"], ["v", "map"]);
+  hints.push(doc.purpose === "brainstorm" ? ["o", "dump a line"] : ["o O", "add / inside"], ["m", "mark"], ["/", "files"], ["v", "map"], ["S", "screens"]);
   return hints;
 }
 
@@ -1230,13 +1355,15 @@ function renderStart() {
   const typing = document.activeElement && document.activeElement.tagName === "INPUT" && host.contains(document.activeElement);
   if (host.hidden || typing) return;
   host.replaceChildren();
-  const pending = state.pending;
-  if (emptyRoot && pending && !pending.blockId) {
-    const drafting = pending.kind === "draft";
+  const pending = state.requests.find(request => !request.blockId);
+  if (emptyRoot && pending) {
+    const working = pending.kind === "draft" ? "The agent is drafting this plan"
+      : pending.kind === "change" ? "The agent is reading the code and planning the change"
+      : "The agent is mapping the codebase";
     host.append(el("h1", { text: doc.title }));
     if (pending.state === "pending") {
       host.append(
-        el("div", { class: "working" }, spinner(), el("span", { text: drafting ? "The agent is drafting this plan" : "The agent is mapping the codebase" }), elapsed(pending.since)),
+        el("div", { class: "working" }, spinner(), el("span", { text: working }), elapsed(pending.since)),
         el("div", { class: "hint", text: "Follow it in the terminal. Its proposal appears here for review when it is done." }),
         el("div", { class: "row" }, discardButton(pending.requestId)));
     } else {
@@ -1254,7 +1381,7 @@ function renderStart() {
   if (emptyRoot) {
     const input = el("input", { type: "text", placeholder: "what is this about? (or a path to map)" });
     // An empty document can only be started: replan, prune and execute need blocks.
-    const actions = state.flow.projectActions.filter(action => action.kind === "draft" || action.kind === "discover")
+    const actions = state.flow.projectActions.filter(action => action.kind === "draft" || action.kind === "discover" || action.kind === "change")
       .map(action => el("button", { class: action.kind === "draft" ? "primary" : "", text: action.label, onclick: () => startProject(action.kind, input.value) }));
     host.append(el("h1", { text: doc.title }), input, el("div", { class: "row" }, ...actions,
       el("button", { text: "+ first block", onclick: () => op({ op: "addBlock" }) })),
@@ -1433,7 +1560,7 @@ function renderCanvas() {
   const diagram = currentDiagram();
   if (!diagram) return;
   const flow = state.flow, doc = state.document;
-  const pendingBlock = state.pending ? state.pending.blockId : undefined;
+  const requestFor = new Map(state.requests.filter(request => request.blockId).map(request => [request.blockId, request]));
   const nodes = new Map();
   for (const block of diagram.blocks) {
     const r = rectOf(block), selected = block.id === state.selected;
@@ -1442,7 +1569,8 @@ function renderCanvas() {
     const title = editTitleOf === block.id
       ? el("input", { class: "title-edit", type: "text", spellcheck: "false" })
       : el("span", { class: "title", text: block.title || "(untitled)", title: "Double-click to rename" });
-    const working = pendingBlock === block.id && state.pending.state === "pending";
+    const request = requestFor.get(block.id);
+    const working = !!request && request.state === "pending";
     const node = el("div", { class: "node" + (selected ? " selected" : "") + (working ? " working" : ""), "data-id": block.id },
       el("div", { class: "head" },
         glyph ? el("span", { class: "glyph", text: glyph, title: flow.status.labels[block.status] + " — click to step" }) : null,
@@ -1451,7 +1579,7 @@ function renderCanvas() {
           : block.evidence === "observed" ? el("span", { class: "badge observed", text: "*", title: "evidence: observed — click to step" })
           : block.evidence === "unknown" ? el("span", { class: "badge unknown", text: "?", title: "evidence: unknown — click to step" })
           : selected ? el("span", { class: "badge", text: "~", title: "evidence: inferred — click to step" }) : null,
-        pendingBlock === block.id ? (working ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner(), " ", elapsed(state.pending.since)) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" })) : null,
+        request ? (working ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner(), " ", elapsed(request.since)) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" })) : null,
         selected && flow.status ? el("span", { class: "state", text: flow.status.labels[block.status] }) : null,
         !selected && hasCode(block.description) ? el("span", { class: "has-code", text: "{}", title: "contains code" }) : null,
         el("span", { class: "inside", text: "[" + kids + "]", title: kids > 0 ? "Open the " + kids + " block(s) inside (Enter)" : "Open inside (Enter)" })),
@@ -1643,11 +1771,13 @@ function changeLines(from, to) {
   return out;
 }
 function whereText(path) { return path === "root" ? "" : "in " + path.replace(/^root > /, "").split(" > ").join(" › "); }
-/** The one human gate: every changed field before and after, then added, removed and relinked blocks. */
+/** The one human gate, one proposal at a time: every changed field before and after, then added, removed and relinked blocks. */
 function renderReview() {
-  const host = $("review"), review = state.review;
+  const host = $("review"), reviews = state.reviews;
+  reviewIndex = Math.min(reviewIndex, Math.max(0, reviews.length - 1));
+  const review = reviews[reviewIndex];
   host.hidden = !review;
-  document.body.classList.toggle("reviewing", !!review);
+  document.body.classList.toggle("reviewing", reviews.length > 0);
   if (!review) return;
   const diff = review.diff, body = el("div", { class: "body" });
   if (review.error) body.append(el("p", { class: "error", text: review.error }));
@@ -1661,7 +1791,14 @@ function renderReview() {
     }
     for (const entry of diff.modified) {
       body.append(el("h4", null, "~ " + entry.title + " ", el("span", { class: "where", text: whereText(entry.path) })));
-      for (const change of entry.changes) body.append(el("div", { class: "field" }, el("div", { class: "name", text: changeLabel(change.field) }), ...changeLines(change.from, change.to)));
+      for (const change of entry.changes) {
+        const name = el("div", { class: "name", text: changeLabel(change.field) });
+        if (change.field === "mockup") {
+          body.append(el("div", { class: "field" }, name, el("div", { class: "mockup-diff" },
+            el("div", { class: "side" }, el("div", { class: "name", text: "before" }), change.from ? mockupFrame(change.from, 300) : el("div", { class: "diffline same", text: "was empty" })),
+            el("div", { class: "side" }, el("div", { class: "name", text: "after" }), mockupFrame(change.to, 300)))));
+        } else body.append(el("div", { class: "field" }, name, ...changeLines(change.from, change.to)));
+      }
     }
     if (diff.added.length) body.append(el("h4", { text: "Added · " + diff.added.length }),
       ...diff.added.map(entry => el("div", { class: "diffline ins" }, entry.title + (entry.surface ? " [" + entry.surface + "]" : "") + " ", el("span", { class: "where", text: whereText(entry.path) }))));
@@ -1671,7 +1808,12 @@ function renderReview() {
     if (links.length) body.append(el("h4", { text: "Links" }), ...links.map(([kind, text]) => el("div", { class: "diffline " + kind, text })));
   }
   host.replaceChildren(
-    el("header", null, el("div", { class: "label", text: "Proposal to review" }), el("h3", { text: review.label }), review.summary ? el("div", { class: "summary", text: review.summary }) : null),
+    el("header", null, el("div", { class: "label", text: "Proposal to review" }),
+      reviews.length > 1 ? el("div", { class: "queue" },
+        el("button", { class: "ghost", text: "‹", title: "Previous proposal", disabled: reviewIndex === 0, onclick: () => { reviewIndex -= 1; renderReview(); } }),
+        el("span", { text: "Proposal " + (reviewIndex + 1) + " of " + reviews.length }),
+        el("button", { class: "ghost", text: "›", title: "Next proposal", disabled: reviewIndex === reviews.length - 1, onclick: () => { reviewIndex += 1; renderReview(); } })) : null,
+      el("h3", { text: review.label }), review.summary ? el("div", { class: "summary", text: review.summary }) : null),
     body,
     el("footer", null,
       review.error ? null : el("button", { class: "primary", text: "Accept", title: "Apply it as one undoable edit", onclick: () => op({ op: "accept", requestId: review.requestId }) }),
@@ -1687,6 +1829,14 @@ async function openPreview(verb, id) {
   renderModal();
 }
 function closeModal() { preview = null; renderModal(); }
+/** The marked blocks as one batch: the parent prompt and every subagent's instructions, previewed first. */
+async function openBatchPreview(verb) {
+  const ids = [...marked];
+  const result = await op({ op: "previewBatch", verb, ids });
+  if (!result.ok || !result.data.preview) return;
+  preview = { batch: true, verb, ids, ...result.data.preview };
+  renderModal();
+}
 function renderModal() {
   if (confirming) return;
   const host = $("modal");
@@ -1695,7 +1845,7 @@ function renderModal() {
   if (!preview) return;
   const current = preview;
   // The block's standing note for this verb lives here, next to the request it steers.
-  const noteField = current.verb === "refine" ? "enhance" : current.verb === "execute" ? "execute" : null;
+  const noteField = current.batch ? null : current.verb === "refine" ? "enhance" : current.verb === "execute" ? "execute" : null;
   const spec = noteField ? state.flow.fields.find(entry => entry.field === noteField) : null;
   const block = (currentDiagram() || { blocks: [] }).blocks.find(candidate => candidate.id === current.id);
   const note = spec && block ? inlineText(block.actions[noteField], spec.label + " for the agent (kept on the block)…", async value => {
@@ -1708,10 +1858,27 @@ function renderModal() {
     note ? el("div", { class: "note" }, note) : null,
     el("pre", { text: current.text }),
     el("div", { class: "row" },
-      el("button", { class: "primary", text: "Submit", title: "Enter", onclick: () => submitVerb(current.verb, current.id) }),
+      el("button", { class: "primary", text: "Submit", title: "Enter", onclick: () => current.batch ? submitBatchVerb(current.verb, current.ids) : submitVerb(current.verb, current.id) }),
       el("button", { text: "Copy", title: "Copy the request, to paste it somewhere else instead", onclick: () => navigator.clipboard.writeText(current.text).then(() => { flash("copied the request", false); renderHud(); }, () => { flash("the browser refused the clipboard", true); renderHud(); }) }),
       el("button", { text: "Cancel", title: "Esc", onclick: closeModal }),
-      el("span", { class: "hint", text: "Submit sends this to the OMP session. Its proposal comes back here for review." }))));
+      el("span", { class: "hint", text: current.batch
+        ? "Submit sends this to the OMP session, which runs one subagent per block. Each proposal comes back here for review."
+        : "Submit sends this to the OMP session. Its proposal comes back here for review." }))));
+}
+/** A modal with one text box for a goal; Submit stays off while it is empty. */
+function closeGoal() { goalOpen = false; const host = $("modal"); host.hidden = true; host.replaceChildren(); }
+function openGoalDialog(title, onSubmit) {
+  goalOpen = true;
+  const host = $("modal");
+  host.hidden = false;
+  const input = el("textarea", { rows: 4, placeholder: "What should change? e.g. add a JSON export to the report command", spellcheck: "false", style: "min-height:6em;overflow:auto" });
+  const submit = el("button", { class: "primary", text: "Submit", disabled: true, onclick: () => { const goal = input.value.trim(); if (!goal) return; closeGoal(); onSubmit(goal); } });
+  input.addEventListener("input", () => { submit.disabled = !input.value.trim(); });
+  host.replaceChildren(el("div", { class: "modal", role: "dialog", "aria-label": title },
+    el("h3", { text: title }), input,
+    el("div", { class: "row" }, submit, el("button", { text: "Cancel", onclick: closeGoal }),
+      el("span", { class: "hint", text: "Opens a new plan under .omp-visual-planner/changes/. The agent reads the code before it proposes anything." }))));
+  requestAnimationFrame(() => input.focus());
 }
 /** Every key the page answers to, grouped the way the terminal's `?` sheet is. */
 function openKeys() {
@@ -1725,9 +1892,9 @@ function openKeys() {
   host.replaceChildren(el("div", { class: "modal", role: "dialog", "aria-label": "keyboard shortcuts" },
     el("h3", { text: "Keyboard shortcuts" }),
     el("div", { class: "keys" },
-      group("Move", [["j / k", "next / previous block"], ["← ↑ → ↓", "walk the focus diagram (brainstorm, explore)"], ["Enter", "go to the highlighted block"], ["n", "next open block"], ["Esc", "back out: block → overview"], ["v", "switch page ⇄ map"], ["/", "find a file"]]),
+      group("Move", [["j / k", "next / previous block"], ["← ↑ → ↓", "walk the focus diagram (brainstorm, explore)"], ["Enter", "go to the highlighted block"], ["n", "next open block"], ["Esc", "back out: block → overview"], ["v", "switch page ⇄ map"], ["S", "screens: every page and component"], ["/", "find a file"]]),
       group("Edit", [["space", "step the status"], ["o / O", "add a block after / inside"], ["U", "uses: link to a reusable block anywhere"], ["M", "extract: move up a level to share it"], ["⌫", "delete the focused block"], ["⌘Z / ⇧⌘Z", "undo / redo"], ["⌘S", "save"], ["g", "grounded: hide uncited blocks (explore)"]]),
-      group("Ask the agent", [...verbs, ["Enter", "submit an open preview"]]),
+      group("Ask the agent", [...verbs, ["m", "mark / unmark for a parallel batch"], ["⇧-click", "mark a row in the outline"], ["Enter", "submit an open preview"]]),
       group("Map", [["drag", "move a block, or pan"], ["dbl-click", "add a block there"], ["Enter", "go inside the focused block"], ["F2", "rename"], ["F / T", "fit / tidy"]])),
     el("div", { class: "row" }, el("button", { class: "primary", text: "Close", onclick: close }), el("span", { class: "hint", text: "? toggles this sheet" }))));
 }
@@ -1749,11 +1916,24 @@ async function submitVerb(verb, id) {
   }
   if (result.ok) closeModal();
 }
+async function submitBatchVerb(verb, ids) {
+  const result = await op({ op: "submitBatch", verb, ids });
+  if (result.status === 409 && result.data.needsSave) {
+    ask("This document has unsaved edits. Save them and submit?", "Save and submit", () => op({ op: "submitBatch", verb, ids, saveFirst: true }).then(next => { if (next.ok) { marked.clear(); closeModal(); } }));
+    return;
+  }
+  if (result.ok) { marked.clear(); closeModal(); }
+}
 function startProject(kind, text) {
   if (kind === "prune" || kind === "replan" || kind === "execute") { openPreview(kind); return; }
   if (kind === "draft") {
     if (!text.trim()) { flash("a draft needs a goal: type what this is about", true); render(); return; }
     op({ op: "submit", start: { kind: "draft", goal: text, purpose: state.document.purpose === "brainstorm" ? "brainstorm" : "plan" } });
+    return;
+  }
+  if (kind === "change") {
+    if (!text.trim()) { flash("a change needs a goal: type what should change", true); render(); return; }
+    op({ op: "submit", start: { kind: "change", goal: text, marked: [...marked] } }).then(result => { if (result.ok) marked.clear(); });
     return;
   }
   op({ op: "submit", start: { kind: "discover", target: text.trim() || "." } });
@@ -1994,6 +2174,7 @@ $("tidy").addEventListener("click", async () => { await op({ op: "tidy" }); fit(
 $("fit").addEventListener("click", fit);
 function toggleMap() { surface = surface === "map" ? "page" : "map"; render(); if (surface === "map") fit(); }
 $("mapToggle").addEventListener("click", toggleMap);
+$("screensToggle").addEventListener("click", toggleScreens);
 $("filesToggle").addEventListener("click", () => { filesOpen = !filesOpen; if (filesOpen) loadFiles(); render(); });
 $("keysToggle").addEventListener("click", () => { if (keysOpen) { keysOpen = false; $("modal").hidden = true; } else openKeys(); });
 $("docTitle").addEventListener("keydown", event => { if (event.key === "Enter" || event.key === "Escape") event.target.blur(); });
@@ -2006,13 +2187,19 @@ document.addEventListener("keydown", event => {
   if (mod && event.key.toLowerCase() === "s") { event.preventDefault(); op({ op: "save" }); return; }
   if (event.key === "Escape" && pickerOpen) { closePicker(); return; }
   if (event.key === "Escape" && keysOpen) { keysOpen = false; $("modal").hidden = true; return; }
+  if (event.key === "Escape" && mockupOpen) { closeMockup(); return; }
+  if (event.key === "Escape" && goalOpen) { closeGoal(); return; }
   if (event.key === "Escape" && (preview || confirming)) { if (confirming) { confirming = false; } closeModal(); return; }
   if (event.key === "Escape" && purposeOpen) { purposeOpen = false; render(); return; }
   if (event.key === "Escape" && viewer && !typing) { viewer = null; renderViewer(); return; }
-  if (event.key === "Enter" && preview && !typing && !confirming) { event.preventDefault(); submitVerb(preview.verb, preview.id); return; }
+  if (event.key === "Enter" && preview && !typing && !confirming) {
+    event.preventDefault();
+    if (preview.batch) submitBatchVerb(preview.verb, preview.ids); else submitVerb(preview.verb, preview.id);
+    return;
+  }
   if (event.key === "/" && !typing) { event.preventDefault(); filesOpen = true; loadFiles(); render(); requestAnimationFrame(() => { const input = document.querySelector("#files input"); if (input) input.focus(); }); return; }
   if (event.key === "?" && !typing) { event.preventDefault(); if (keysOpen) { keysOpen = false; $("modal").hidden = true; } else if (state) openKeys(); return; }
-  if (typing || preview || keysOpen || pickerOpen) return;
+  if (typing || preview || keysOpen || pickerOpen || mockupOpen || goalOpen) return;
   if (mod && event.key.toLowerCase() === "z") { event.preventDefault(); op({ op: event.shiftKey ? "redo" : "undo" }); return; }
   if (mod || !state || !state.document) return;
   const block = selectedBlock();
@@ -2033,7 +2220,7 @@ document.addEventListener("keydown", event => {
         renderWalk();
         return;
       }
-      if (surface === "map") { surface = "page"; render(); return; }
+      if (surface === "map" || surface === "screens") { surface = "page"; render(); return; }
       if (selectedEdge) { selectedEdge = null; render(); return; }
       if (block) { op({ op: "focus", id: null }); return; }
       if (state.stack.length > 1) op({ op: "navigate", diagramId: state.stack[state.stack.length - 2] });
@@ -2064,6 +2251,8 @@ document.addEventListener("keydown", event => {
       return;
     }
     case "v": toggleMap(); return;
+    case "S": toggleScreens(); return;
+    case "m": if (state.selected) toggleMark(state.selected); else { flash("select a block first", true); render(); } return;
     case "U": if (block) openUsesPicker(block); return;
     case "M": if (block && state.flow.extractTargets.length) openExtract(block); return;
     case "g": if (state.document.purpose === "explore") { grounded = !grounded; render(); } return;

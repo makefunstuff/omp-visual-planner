@@ -63,7 +63,7 @@ describe("request lifecycle", () => {
 		expect(second.errors[0]).toContain("still pending");
 
 		expect(registry.resolve("req-1", "discarded")).toBe(true);
-		expect(registry.pending()).toBeUndefined();
+		expect(registry.active()).toEqual([]);
 		expect(beginFor(registry).ok).toBe(true);
 	});
 
@@ -73,7 +73,7 @@ describe("request lifecycle", () => {
 		expect(result.ok).toBe(true);
 		if (!result.ok) throw new Error("unreachable");
 		expect(result.entry.state).toBe("submitted");
-		expect(registry.pending()).toBeUndefined();
+		expect(registry.active()).toEqual([]);
 		// No token was issued, so nothing can be staged against it.
 		expect(registry.stage("exec-1", "nope", {}, contextFor()).ok).toBe(false);
 	});
@@ -82,7 +82,7 @@ describe("request lifecycle", () => {
 		const registry = new ActionRegistry(BRANCH);
 		beginFor(registry);
 		registry.adoptBranch("session-1:leaf-b");
-		expect(registry.pending()).toBeUndefined();
+		expect(registry.active()).toEqual([]);
 		const entry = registry.entryFor("req-1")!;
 		expect(entry.state).toBe("stale");
 		expect(entry.stateReason).toContain("leaf-b");
@@ -98,12 +98,12 @@ describe("request lifecycle", () => {
 
 		const second = new ActionRegistry("elsewhere");
 		second.adoptBranch(BRANCH, journal);
-		expect(second.pending()?.requestId).toBe("req-1");
+		expect(second.active()[0]?.requestId).toBe("req-1");
 		expect(second.entryFor("req-1")!.state).toBe("pending");
 
 		const third = new ActionRegistry("another");
 		third.adoptBranch("another", journal);
-		expect(third.pending()).toBeUndefined();
+		expect(third.active()).toEqual([]);
 		expect(third.entryFor("req-1")!.state).toBe("stale");
 	});
 
@@ -115,8 +115,76 @@ describe("request lifecycle", () => {
 		expect(token).toBe(BRANCH);
 		const resumed = new ActionRegistry("fresh");
 		resumed.adoptBranch(token, journal);
-		expect(resumed.pending()?.requestId).toBe("req-1");
-		expect(resumed.pending()?.state).toBe("pending");
+		expect(resumed.active()[0]?.requestId).toBe("req-1");
+		expect(resumed.active()[0]?.state).toBe("pending");
+	});
+});
+
+describe("batches", () => {
+	function member(id: string, overrides: Partial<BeginInput> = {}): BeginInput {
+		return {
+			requestId: `req-${id}`,
+			kind: "enhance",
+			intent: "enhance",
+			scope: { kind: "block", id },
+			label: `block "${id}"`,
+			branchKey: BRANCH,
+			documentId: "doc-1",
+			baseRevision: 3,
+			baseDigest: "digest-a",
+			prompt: "payload",
+			batchId: "batch-1",
+			...overrides,
+		};
+	}
+
+	test("a batch starts one pending request per block and blocks a new request", () => {
+		const registry = new ActionRegistry(BRANCH);
+		const began = registry.beginBatch([member("api"), member("db")]);
+		expect(began.ok).toBe(true);
+		expect(registry.active().map(entry => [entry.requestId, entry.state])).toEqual([
+			["req-api", "pending"],
+			["req-db", "pending"],
+		]);
+		const refused = beginFor(registry, { requestId: "req-other" });
+		expect(refused.ok).toBe(false);
+		if (refused.ok) throw new Error("unreachable");
+		expect(refused.errors[0]).toContain("req-api");
+	});
+
+	test("refuses a batch that is not two distinct block requests with one batchId", () => {
+		const refusal = (inputs: BeginInput[]) => {
+			const outcome = new ActionRegistry(BRANCH).beginBatch(inputs);
+			return outcome.ok ? undefined : outcome.errors[0];
+		};
+		expect(refusal([member("api")])).toBe("a batch needs at least two requests");
+		expect(refusal([member("api"), member("db", { kind: "execute", intent: "execute" })])).toBe(
+			"a batch holds block requests, not execute",
+		);
+		expect(refusal([member("api"), member("api", { requestId: "req-api-2" })])).toBe("block api appears twice in one batch");
+		expect(refusal([member("api"), member("db", { batchId: "batch-2" })])).toBe("every request in a batch carries the same batchId");
+		expect(refusal([member("api", { batchId: undefined }), member("db", { batchId: undefined })])).toBe(
+			"every request in a batch carries the same batchId",
+		);
+	});
+
+	test("the planner's own save keeps the rest of the batch applicable; an outside edit does not", () => {
+		const registry = new ActionRegistry(BRANCH);
+		registry.beginBatch([member("api"), member("db")]);
+		for (const id of ["api", "db"]) {
+			const staged = registry.stage(`req-${id}`, `refine ${id}`, createBlock({ id, title: id.toUpperCase() }), contextFor());
+			expect(staged.ok).toBe(true);
+		}
+		const current = { revision: 4, documentId: "doc-1", branchKey: BRANCH };
+		expect(registry.checkApplicable("req-api", { ...current, digest: "digest-a" }).ok).toBe(true);
+		registry.resolve("req-api", "accepted");
+		// Accepting and saving rewrites the file: digest-a becomes digest-b.
+		registry.rebase("digest-a", "digest-b");
+		expect(registry.checkApplicable("req-db", { ...current, digest: "digest-b" }).ok).toBe(true);
+		const outside = registry.checkApplicable("req-db", { ...current, digest: "digest-c" });
+		expect(outside.ok).toBe(false);
+		if (outside.ok) throw new Error("unreachable");
+		expect(outside.errors[0]).toStartWith("the project file changed on disk");
 	});
 });
 
@@ -344,7 +412,7 @@ describe("proposal staging", () => {
 		const entry = restored.entryFor("req-1")!;
 		expect(entry.state).toBe("accepted");
 		expect(entry.proposal?.summary).toBe("refine auth");
-		expect(restored.pending()).toBeUndefined();
+		expect(restored.active()).toEqual([]);
 	});
 });
 
