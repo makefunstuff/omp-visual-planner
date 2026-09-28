@@ -11,7 +11,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { findNode } from "./layout.ts";
 import { type PlanTree, TreeError, readTree, treeVersion } from "./tree.ts";
-import { WEB_PAGE } from "./web-page.ts";
+import { webPage } from "./web-page.ts";
 
 export const WEB_HOSTNAME = "127.0.0.1";
 const PREVIEW_LIMIT = 2 * 1024 * 1024;
@@ -192,7 +192,7 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 		if (!sameToken(cookieToken(request, entry.port), entry.token)) {
 			return new Response("open the link printed by /diagram", { status: 403, headers: SECURITY_HEADERS });
 		}
-		return new Response(WEB_PAGE, {
+		return new Response(await webPage(), {
 			headers: {
 				...SECURITY_HEADERS,
 				"content-type": "text/html; charset=utf-8",

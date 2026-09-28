@@ -5,8 +5,14 @@
     "": {
       "name": "omp-visual-planner",
       "dependencies": {
+        "bun-plugin-svelte": "^0.0.6",
+        "d3-selection": "^3.0.0",
+        "d3-zoom": "^3.0.0",
         "mdast-util-from-markdown": "^2.0.3",
+        "mdast-util-gfm": "^3.1.0",
         "mdast-util-to-string": "^4.0.0",
+        "micromark-extension-gfm": "^3.0.0",
+        "svelte": "^5.57.1",
       },
       "devDependencies": {
         "@oh-my-pi/pi-coding-agent": "18.2.11",
@@ -14,12 +20,6 @@
         "@types/d3-selection": "^3.0.12",
         "@types/d3-zoom": "^3.0.8",
         "@types/mdast": "^4.0.4",
-        "bun-plugin-svelte": "^0.0.6",
-        "d3-selection": "^3.0.0",
-        "d3-zoom": "^3.0.0",
-        "mdast-util-gfm": "^3.1.0",
-        "micromark-extension-gfm": "^3.0.0",
-        "svelte": "^5.57.1",
         "svelte2tsx": "^0.7.61",
         "typescript": "7.0.2",
         "typescript6": "npm:typescript@~6",
