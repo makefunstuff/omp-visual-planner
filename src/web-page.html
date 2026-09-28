@@ -258,6 +258,7 @@ kbd { font: 11px/1.4 var(--mono); color: var(--text); border: 1px solid var(--li
 button.pending { cursor: progress; opacity: .75; }
 body.busy, body.busy * { cursor: progress; }
 .node.working { border-style: dashed; border-color: var(--accent); }
+.stalled { color: var(--warn); }
 .start .working { display: flex; align-items: center; gap: 8px; color: var(--muted); }
 .start .working .spin { font-size: 16px; }
 .message { color: var(--muted); } .message.error { color: var(--bad); }
@@ -331,10 +332,22 @@ body.busy, body.busy * { cursor: progress; }
 .viewer .ident:hover { text-decoration: underline; }
 .viewer .intel { max-height: 40%; overflow: auto; border-bottom: 1px solid var(--line); padding: 6px 8px; font-size: 12px; }
 .viewer .intel pre { white-space: pre-wrap; margin: 4px 0; }
+.viewer .intel pre.hover-code { background: var(--soft); padding: 4px 6px; }
+.viewer .intel p.hover-text { white-space: pre-wrap; margin: 4px 0; color: var(--body); }
+.viewer .intel hr { border: 0; border-top: 1px solid var(--line); margin: 6px 0; }
 .viewer .intel .head { display: flex; align-items: center; gap: 6px; }
 .viewer .intel .head .name { flex: 1; font-weight: 700; }
-.viewer .intel button.loc { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 1px 4px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.viewer .intel button.loc { display: flex; align-items: baseline; gap: 1ch; width: 100%; text-align: left; border: 0; background: transparent; padding: 1px 4px; font-size: 12px; white-space: pre; overflow: hidden; }
 .viewer .intel button.loc:hover { background: var(--soft); }
+.viewer .intel .tree { flex: none; color: var(--faint); margin-right: -1ch; }
+.viewer .intel .kind { flex: none; width: 6ch; color: var(--muted); }
+.viewer .intel .sym { flex: 0 1 auto; min-width: 0; font-weight: 700; overflow: hidden; text-overflow: ellipsis; }
+.viewer .intel .sym-row .ln { margin-left: auto; }
+.viewer .intel .ln { flex: none; color: var(--faint); text-align: right; }
+.viewer .intel .preview { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.viewer .intel .file-head { display: flex; gap: 1ch; margin: 6px 0 2px; font-weight: 700; }
+.viewer .intel .file-head .count { color: var(--muted); font-weight: 400; }
+.viewer .intel .section-head { margin: 10px 0 2px; }
 .viewer .who .syntax { color: var(--muted); }
 .rail .row .drift, .drift-state { color: var(--warn); font-size: 12px; }
 .drift-panel .rows { overflow: auto; max-height: 55vh; display: flex; flex-direction: column; gap: 2px; }
@@ -836,7 +849,9 @@ function renderRail() {
     for (const block of diagram.blocks) {
       const request = requestFor.get(block.id);
       const mark = request
-        ? (request.state === "pending" ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner()) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" }))
+        ? (request.state !== "pending" ? el("span", { class: "mark", text: "◆", title: "proposal ready to review" })
+          : request.stalled ? el("span", { class: "mark stalled", text: "!", title: STALLED_TEXT })
+          : el("span", { class: "mark", title: "the agent is working on this block" }, spinner()))
         : null;
       const reused = counts.get(block.id) || 0;
       const drifted = driftStates(block.id).filter(kind => kind === "changed" || kind === "missing" || kind === "moved");
@@ -1130,20 +1145,27 @@ function clock(since) {
 function discardButton(requestId) {
   return el("button", { class: "ghost", text: "discard", title: "Stop waiting; a late proposal for it will be refused", onclick: () => op({ op: "discard", requestId }) });
 }
+/** A pending request the agent is no longer working on: say so instead of spinning. */
+const STALLED_TEXT = "The agent finished without a proposal. Discard the request, or ask again.";
 /** The HUD's one line of progress: a click in flight, else the agent's requests and how long they have run. */
 function renderActivity() {
   const host = $("activity");
   host.replaceChildren();
   const requests = state ? state.requests : [];
-  const pending = requests.filter(request => request.state === "pending");
+  // A pending request is only "working" while the agent runs a turn; one it left without a proposal is stalled.
+  const pending = requests.filter(request => request.state === "pending" && !request.stalled);
+  const stalled = requests.filter(request => request.state === "pending" && request.stalled);
   const staged = requests.filter(request => request.state === "staged").length;
+  const discardAll = list => el("button", { class: "ghost", text: "discard all", title: "Stop waiting; late proposals for them will be refused", onclick: async () => { for (const request of list) await op({ op: "discard", requestId: request.requestId }); } });
   if (inFlight > 0) host.append(spinner(), el("span", { class: "what", text: inFlightWord + "…" }));
   else if (pending.length === 1) {
     const only = pending[0];
     host.append(spinner(), el("span", { class: "what", text: "agent working: " + only.label, title: only.label }), elapsed(only.since), discardButton(only.requestId));
   } else if (pending.length > 1) {
-    host.append(spinner(), el("span", { class: "what", text: "agent working: " + pending.length + " requests", title: pending.map(request => request.label).join("\n") }), elapsed(pending[0].since),
-      el("button", { class: "ghost", text: "discard all", title: "Stop waiting; late proposals for them will be refused", onclick: async () => { for (const request of pending) await op({ op: "discard", requestId: request.requestId }); } }));
+    host.append(spinner(), el("span", { class: "what", text: "agent working: " + pending.length + " requests", title: pending.map(request => request.label).join("\n") }), elapsed(pending[0].since), discardAll(pending));
+  } else if (stalled.length > 0) {
+    host.append(el("span", { class: "what stalled", text: "! " + (stalled.length === 1 ? stalled[0].label : stalled.length + " requests") + " — agent finished without a proposal", title: stalled.map(request => request.label).join("\n") }),
+      stalled.length === 1 ? discardButton(stalled[0].requestId) : discardAll(stalled));
   } else if (staged > 0) host.append(el("span", { class: "what", text: "◆ " + staged + (staged === 1 ? " proposal" : " proposals") + " ready to review" }));
   host.hidden = host.childElementCount === 0;
 }
@@ -1358,7 +1380,7 @@ function syntaxLine(path, line) {
     return "syntax: …";
   }
   if (insight.error) return insight.error;
-  if (insight.symbols && insight.symbols.length) return "syntax: " + insight.symbols.map(node => node.kind).join(" › ") + (insight.range ? " · block " + insight.range.startLine + "–" + insight.range.endLine : "");
+  if (insight.summary) return insight.summary;
   return insight.limitation;
 }
 /** A language-server answer; a failed request reads as `{ ok: false, reason }`. */
@@ -1395,18 +1417,44 @@ function intelPane(current) {
   if (intel.loading) { pane.append(el("div", { class: "subtle" }, spinner(), " asking the language server…")); return pane; }
   const data = intel.data;
   if (!data.ok) { pane.append(el("div", { class: "subtle", text: data.reason })); return pane; }
-  const location = loc => el("button", { class: "loc", text: loc.path + ":" + loc.line + "  " + loc.preview, title: "Open " + loc.path, onclick: () => openFile(loc.path, loc.line) });
+  // Everything below comes from `data.view` (intel-view.ts), the same shapes the terminal draws.
+  const view = data.view;
   if (intel.mode === "outline") {
-    if (!data.value.length) pane.append(el("div", { class: "subtle", text: "no symbols" }));
-    for (const symbol of data.value) pane.append(el("button", { class: "loc", text: "  ".repeat(symbol.depth) + symbol.kind + " " + symbol.name + "  :" + symbol.startLine,
-      onclick: () => { current.selection = { a: symbol.startLine, b: symbol.endLine }; current.line = symbol.startLine; renderViewer(); } }));
+    if (!view.length) pane.append(el("div", { class: "subtle", text: "no symbols" }));
+    const digits = String(view.reduce((max, row) => Math.max(max, row.startLine), 0)).length;
+    for (const row of view) pane.append(el("button", { class: "loc sym-row", title: row.kind + " " + row.name + " · lines " + row.startLine + "–" + row.endLine,
+      onclick: () => { current.selection = { a: row.startLine, b: row.endLine }; current.line = row.startLine; renderViewer(); } },
+      el("span", { class: "tree", text: row.tree }),
+      el("span", { class: "kind", text: row.kind }),
+      el("span", { class: "sym", text: row.name }),
+      el("span", { class: "ln", text: String(row.startLine).padStart(digits) })));
     return pane;
   }
-  const facts = data.value;
-  if (facts.hover) pane.append(el("pre", { text: facts.hover.split("\n").slice(0, 12).join("\n") }));
-  pane.append(el("div", { class: "section-head", text: "Definition" }), ...facts.definitions.map(location));
-  pane.append(el("div", { class: "section-head", text: "References · " + facts.references.length + (facts.truncated ? "+" : "") }), ...facts.references.map(location));
+  for (const part of view.hover) {
+    if (part.kind === "rule") pane.append(el("hr"));
+    else if (part.kind === "text") pane.append(el("p", { class: "hover-text", text: part.text }));
+    else pane.append(el("pre", { class: "hover-code" }, ...part.code.split("\n").flatMap((text, index) =>
+      [...tokenNodes(part.tokens && part.tokens[index], text), "\n"])));
+  }
+  const groups = (title, total, list) => {
+    pane.append(el("div", { class: "section-head", text: title + " · " + total }));
+    if (!list.length) pane.append(el("div", { class: "subtle", text: "none" }));
+    for (const group of list) {
+      const digits = String(group.locations.reduce((max, loc) => Math.max(max, loc.line), 0)).length;
+      pane.append(el("div", { class: "file-head" }, el("span", { class: "path", text: group.path }), el("span", { class: "count", text: String(group.count) })));
+      for (const loc of group.locations) pane.append(el("button", { class: "loc ref-row", title: "Open " + group.path + ":" + loc.line, onclick: () => openFile(group.path, loc.line) },
+        el("span", { class: "ln", text: String(loc.line).padStart(digits) }),
+        el("span", { class: "preview" }, ...tokenNodes(loc.tokens, loc.preview))));
+    }
+  };
+  groups("Definition", String(view.definitions.reduce((sum, group) => sum + group.count, 0)), view.definitions);
+  groups("References", view.referenceTotal, view.references);
   return pane;
+}
+/** A line as token-class spans when the server highlighted it, else as plain text. Text only, never markup. */
+function tokenNodes(tokens, text) {
+  if (!tokens) return [text];
+  return tokens.map(([kind, part]) => kind ? el("span", { class: "tk-" + kind, text: part }) : part);
 }
 /** Add a block for selected lines — a change or a question — and open the preview of its request. */
 async function lineRequest(kind, text, range) {
@@ -1491,7 +1539,9 @@ function renderStart() {
       : pending.kind === "change" ? "The agent is reading the code and planning the change"
       : "The agent is mapping the codebase";
     host.append(el("h1", { text: doc.title }));
-    if (pending.state === "pending") {
+    if (pending.state === "pending" && pending.stalled) {
+      host.append(el("div", { class: "hint stalled", text: STALLED_TEXT }), el("div", { class: "row" }, discardButton(pending.requestId)));
+    } else if (pending.state === "pending") {
       host.append(
         el("div", { class: "working" }, spinner(), el("span", { text: working }), elapsed(pending.since)),
         el("div", { class: "hint", text: "Follow it in the terminal. Its proposal appears here for review when it is done." }),
@@ -1700,7 +1750,7 @@ function renderCanvas() {
       ? el("input", { class: "title-edit", type: "text", spellcheck: "false" })
       : el("span", { class: "title", text: block.title || "(untitled)", title: "Double-click to rename" });
     const request = requestFor.get(block.id);
-    const working = !!request && request.state === "pending";
+    const working = !!request && request.state === "pending" && !request.stalled;
     const node = el("div", { class: "node" + (selected ? " selected" : "") + (working ? " working" : ""), "data-id": block.id },
       el("div", { class: "head" },
         glyph ? el("span", { class: "glyph", text: glyph, title: flow.status.labels[block.status] + " — click to step" }) : null,
@@ -1709,7 +1759,9 @@ function renderCanvas() {
           : block.evidence === "observed" ? el("span", { class: "badge observed", text: "*", title: "evidence: observed — click to step" })
           : block.evidence === "unknown" ? el("span", { class: "badge unknown", text: "?", title: "evidence: unknown — click to step" })
           : selected ? el("span", { class: "badge", text: "~", title: "evidence: inferred — click to step" }) : null,
-        request ? (working ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner(), " ", elapsed(request.since)) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" })) : null,
+        request ? (working ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner(), " ", elapsed(request.since))
+          : request.state === "pending" ? el("span", { class: "mark stalled", text: "!", title: STALLED_TEXT })
+          : el("span", { class: "mark", text: "◆", title: "proposal ready to review" })) : null,
         selected && flow.status ? el("span", { class: "state", text: flow.status.labels[block.status] }) : null,
         !selected && hasCode(block.description) ? el("span", { class: "has-code", text: "{}", title: "contains code" }) : null,
         el("span", { class: "inside", text: "[" + kids + "]", title: kids > 0 ? "Open the " + kids + " block(s) inside (Enter)" : "Open inside (Enter)" })),

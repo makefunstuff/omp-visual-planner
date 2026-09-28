@@ -52,6 +52,7 @@ async function harness(
 		/** The workspace citations resolve against; defaults to a path nothing reads. */
 		cwd?: string;
 		codeIntel?: CodeIntel;
+		isIdle?: () => boolean;
 	} = {
 		width: 120,
 		rows: 24,
@@ -111,7 +112,7 @@ async function harness(
 			branchKey: "session:leaf",
 			documentPathHint: "/tmp/planner/.omp-visual-planner/architecture.json",
 			hasUI: true,
-			isIdle: () => true,
+			isIdle: options.isIdle ?? (() => true),
 			hasPendingMessages: () => false,
 			link,
 			externalEditor: options.editor,
@@ -1240,6 +1241,34 @@ describe("progress while the agent works", () => {
 		expect(lines.find(line => /│ › ▾ ○ API/.test(line))).toMatch(/API [⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
 		h.registry.resolve("req-9", "discarded");
 		expect(plain(h.screen.render(120)).at(-2)).not.toContain("agent working");
+		h.screen.dispose();
+	});
+
+	test("a request the idle agent left without a proposal stops spinning and says so", async () => {
+		let idle = false;
+		const h = await harness({ width: 120, rows: 24, isIdle: () => idle });
+		h.screen.render(120);
+		const began = h.registry.begin({
+			requestId: "req-10",
+			kind: "enhance",
+			intent: "enhance",
+			scope: { kind: "block", id: "api" },
+			label: 'block "API"',
+			branchKey: "session:leaf",
+			documentId: "doc-1",
+			baseRevision: 0,
+			baseDigest: undefined,
+			prompt: "",
+		});
+		if (!began.ok) throw new Error(began.errors.join("; "));
+		// Submitted a while ago, e.g. a stage the tool refused.
+		began.entry.createdAt = new Date(Date.now() - 60_000).toISOString();
+		expect(plain(h.screen.render(120)).at(-2)).toContain("agent working 1:0");
+		idle = true;
+		const lines = plain(h.screen.render(120));
+		expect(lines.at(-2)).toContain("! 1 request without a proposal — a discards");
+		expect(lines.at(-2)).not.toContain("agent working");
+		expect(lines.find(line => /│ › ▾ ○ API/.test(line))).toContain("API ! no proposal");
 		h.screen.dispose();
 	});
 });

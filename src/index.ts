@@ -112,6 +112,7 @@ function webBinding(pi: ExtensionAPI, ctx: ExtensionContext): WebBinding {
 		getSession: () => SESSIONS.get(key),
 		rankRelated: relatedRanker(() => resolvePlannerJudge(ctx)),
 		codeIntel: lspCodeIntel(ctx.cwd),
+		agentBusy: () => !ctx.isIdle() || ctx.hasPendingMessages(),
 		onChange: () => {
 			const session = SESSIONS.get(key);
 			if (!session) return;

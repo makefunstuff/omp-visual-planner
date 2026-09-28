@@ -30,11 +30,13 @@ import {
 	type ActionRegistry,
 	type BeginInput,
 	type JournalEntry,
+	isStalled,
 	retentionErrors,
 } from "./actions.ts";
 import { blockToMarkdown, markdownToBlock } from "./block-markdown.ts";
 import { inspectSource } from "./code-evidence.ts";
 import { type CodeIntel, identifiersOn } from "./code-intel.ts";
+import { outlineTree, symbolView, syntaxSummary } from "./intel-view.ts";
 import { type ComposeOptions, type RelatedContext, ScopeError } from "./compose.ts";
 import {
 	type CitationCheck,
@@ -839,6 +841,8 @@ interface ListModal {
 	onEnter: (index: number) => void;
 	/** Optional `d` handler for list rows that can be removed. */
 	onDelete?: (index: number) => void;
+	/** Items already carry their own styling; only the selection marker is added. */
+	styled?: boolean;
 }
 
 interface TextModal {
@@ -1070,16 +1074,27 @@ export class DiagramScreen implements Component {
 		this.#ticker = undefined;
 	}
 
-	/** The agent's requests on this branch still running, oldest first, and the ticker that animates them. */
-	#working(): JournalEntry[] {
-		const working = this.#options.registry.active().filter(entry => entry.state === "pending");
-		if (working.length > 0 && this.#ticker === undefined) {
+	/** Whether OMP is running a turn now; a pending request is only "working" while it is. */
+	#agentBusy(): boolean {
+		return !this.#options.isIdle() || this.#options.hasPendingMessages();
+	}
+
+	/**
+	 * The agent's pending requests on this branch, oldest first, split into those
+	 * it is working on and those it left without a proposal. The ticker runs while
+	 * any is pending, so a request that stalls is redrawn as stalled.
+	 */
+	#pending(): { working: JournalEntry[]; stalled: JournalEntry[] } {
+		const pending = this.#options.registry.active().filter(entry => entry.state === "pending");
+		if (pending.length > 0 && this.#ticker === undefined) {
 			this.#ticker = setInterval(() => this.#options.tui.requestRender(), 1000);
 			this.#ticker.unref?.();
-		} else if (working.length === 0) {
+		} else if (pending.length === 0) {
 			this.#stopTicker();
 		}
-		return working;
+		const busy = this.#agentBusy();
+		const stalled = pending.filter(entry => isStalled(entry, busy));
+		return { working: pending.filter(entry => !stalled.includes(entry)), stalled };
 	}
 
 	dispose(): void {
@@ -2343,11 +2358,7 @@ export class DiagramScreen implements Component {
 				return;
 			case "i":
 				void inspectSource(this.#options.cwd, rel, view.cursor).then(insight => {
-					if (!insight.ok) this.#message = insight.error;
-					else if (insight.symbols && insight.symbols.length > 0) {
-						const block = insight.range ? ` · block ${insight.range.startLine}–${insight.range.endLine}` : "";
-						this.#message = `syntax: ${insight.symbols.map(symbol => symbol.kind).join(" › ")}${block}`;
-					} else this.#message = insight.limitation;
+					this.#message = insight.ok ? syntaxSummary(insight) : insight.error;
 					this.#options.tui.requestRender();
 				});
 				return;
@@ -2391,33 +2402,53 @@ export class DiagramScreen implements Component {
 			this.#options.tui.requestRender();
 			return;
 		}
-		const facts = outcome.value;
-		const targets: (SourceRef | undefined)[] = [];
-		const items: string[] = [];
-		for (const hoverLine of facts.hover.split("\n").filter(text => text.trim().length > 0).slice(0, 8)) {
-			items.push(`  ${hoverLine}`);
-			targets.push(undefined);
-		}
-		for (const [glyph, locations] of [["→", facts.definitions], ["←", facts.references]] as const) {
-			for (const location of locations) {
-				items.push(`${glyph} ${location.path}:${location.line}  ${location.preview}`);
-				targets.push({ path: location.path, startLine: location.line, endLine: location.line });
-			}
-		}
-		if (facts.truncated) {
-			items.push("… more references not shown");
-			targets.push(undefined);
-		}
-		if (items.length === 0) {
+		const theme = this.#options.theme;
+		const view = symbolView(outcome.value, rel);
+		if (view.hover.length === 0 && view.definitions.length === 0 && view.references.length === 0) {
 			this.#message = `${outcome.server} knows nothing about ${identifier.name}`;
 			this.#options.tui.requestRender();
 			return;
+		}
+		// The list's inner width: the dialog is at most 100 columns, less its border and the selection marker.
+		const width = Math.max(20, Math.min(this.#lastWidth, 100) - 6);
+		const targets: (SourceRef | undefined)[] = [];
+		const items: string[] = [];
+		const row = (text: string, target?: SourceRef): void => {
+			items.push(text);
+			targets.push(target);
+		};
+		for (const part of view.hover) {
+			if (part.kind === "rule") row(theme.fg("borderMuted", "─".repeat(width)));
+			else if (part.kind === "text") for (const line of part.text.split("\n")) for (const wrapped of wrapTextWithAnsi(replaceTabs(line), width)) row(wrapped);
+			else for (const line of highlightCode(replaceTabs(part.code), part.language, theme)) row(`  ${line}`);
+		}
+		const definitionTotal = String(view.definitions.reduce((sum, group) => sum + group.count, 0));
+		for (const [title, total, groups] of [
+			["definition", definitionTotal, view.definitions],
+			["references", view.referenceTotal, view.references],
+		] as const) {
+			if (items.length > 0) row("");
+			row(`${theme.bold(title)} ${theme.fg("muted", `· ${total}`)}`);
+			for (const group of groups) {
+				row(`${theme.fg("accent", group.path)} ${theme.fg("muted", String(group.count))}`);
+				const language = getLanguageFromPath(group.path);
+				const digits = String(group.locations.reduce((max, location) => Math.max(max, location.line), 0)).length;
+				for (const location of group.locations) {
+					const preview = highlightCode(replaceTabs(location.preview), language, theme)[0] ?? "";
+					row(`  ${theme.fg("muted", String(location.line).padStart(digits))}  ${preview}`, {
+						path: group.path,
+						startLine: location.line,
+						endLine: location.line,
+					});
+				}
+			}
 		}
 		this.#message = "";
 		this.#modal = {
 			kind: "list",
 			title: `${identifier.name} · ${outcome.server}`,
 			items,
+			styled: true,
 			index: 0,
 			footer: "j/k select   Enter open   Esc close",
 			onEnter: index => {
@@ -2452,11 +2483,18 @@ export class DiagramScreen implements Component {
 			return;
 		}
 		const symbols = outcome.value;
+		const theme = this.#options.theme;
+		const width = Math.max(20, Math.min(this.#lastWidth, 100) - 6);
+		const digits = String(symbols.reduce((max, symbol) => Math.max(max, symbol.startLine), 0)).length;
 		this.#message = "";
 		this.#modal = {
 			kind: "list",
 			title: `outline · ${outcome.server}`,
-			items: symbols.map(symbol => `${"  ".repeat(symbol.depth)}${symbol.kind} ${symbol.name}  :${symbol.startLine}`),
+			items: outlineTree(symbols).map(row => {
+				const left = `${theme.fg("dim", row.tree)}${theme.fg("muted", row.kind.padEnd(6))} ${theme.bold(row.name)}`;
+				return `${pad(left, width - digits - 1)} ${theme.fg("muted", String(row.startLine).padStart(digits))}`;
+			}),
+			styled: true,
 			index: 0,
 			footer: "j/k select   Enter go to   Esc close",
 			onEnter: index => {
@@ -3612,6 +3650,7 @@ export class DiagramScreen implements Component {
 		);
 		const lines: string[] = [];
 		const drifted = new Set(this.#drift.drift ? driftedBlockIds(this.#drift.drift) : []);
+		const busy = this.#agentBusy();
 		for (const row of rows.slice(this.#outlineTop, this.#outlineTop + height)) {
 			const block = row.block;
 			const focused = block.id === this.#selected;
@@ -3634,7 +3673,9 @@ export class DiagramScreen implements Component {
 					? ""
 					: request.state === "staged"
 						? theme.fg("accent", " ◆ review")
-						: theme.fg("accent", ` ${spinnerFrame()} working`);
+						: isStalled(request, busy)
+							? theme.fg("warning", " ! no proposal")
+							: theme.fg("accent", ` ${spinnerFrame()} working`);
 			const title = block.title.length > 0 ? block.title : "(untitled)";
 			const name = focused ? theme.bold(title) : uncited ? theme.fg("muted", title) : title;
 			const reuse = usedBy.get(block.id) ?? 0;
@@ -4270,11 +4311,15 @@ export class DiagramScreen implements Component {
 		const staged = this.#stagedEntries().length;
 		if (staged === 1) segments.push(theme.fg("accent", "◆ proposal ready — R reviews"));
 		else if (staged > 1) segments.push(theme.fg("accent", `◆ ${staged} proposals ready — R reviews`));
-		const working = this.#working();
+		const { working, stalled } = this.#pending();
 		if (working.length > 0) {
 			const since = elapsedClock(working[0]!.createdAt);
 			const what = working.length === 1 ? `agent working ${since}` : `agent working on ${working.length} ${since}`;
 			segments.push(theme.fg("accent", `${spinnerFrame()} ${what}`));
+		}
+		if (stalled.length > 0) {
+			const what = stalled.length === 1 ? "1 request" : `${stalled.length} requests`;
+			segments.push(theme.fg("warning", `! ${what} without a proposal — a discards`));
 		}
 		const driftedCount = this.#drift.drift ? driftedBlockIds(this.#drift.drift).length : 0;
 		if (driftedCount > 0) segments.push(theme.fg("warning", `≠ ${driftedCount} drifted — D`));
@@ -4370,8 +4415,10 @@ export class DiagramScreen implements Component {
 		} else if (modal?.kind === "list") {
 			title = modal.title;
 			footer = modal.footer;
-			const itemLines = modal.items.map(
-				(item, index) => theme.fg(index === modal.index ? "accent" : "text", `${index === modal.index ? "›" : " "} ${item}`),
+			const itemLines = modal.items.map((item, index) =>
+				modal.styled
+					? `${index === modal.index ? theme.fg("accent", "›") : " "} ${item}`
+					: theme.fg(index === modal.index ? "accent" : "text", `${index === modal.index ? "›" : " "} ${item}`),
 			);
 			// Long pickers scroll so the selected row stays in view.
 			content = scroll(itemLines, Math.max(0, modal.index - (Math.max(1, Math.min(height, 100) - 4)) + 1)).lines;

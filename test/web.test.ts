@@ -17,7 +17,7 @@ afterEach(async () => {
 	for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-async function harness(options: { rankRelated?: RelatedRanker; codeIntel?: CodeIntel } = {}) {
+async function harness(options: { rankRelated?: RelatedRanker; codeIntel?: CodeIntel; agentBusy?: () => boolean } = {}) {
 	const dir = await mkdtemp(join(tmpdir(), "omp-visual-planner-web-"));
 	cleanup.push(() => rm(dir, { recursive: true, force: true }));
 	const document = createDocument({ title: "Service" });
@@ -44,6 +44,7 @@ async function harness(options: { rankRelated?: RelatedRanker; codeIntel?: CodeI
 		onChange: () => (changes += 1),
 		rankRelated: options.rankRelated,
 		codeIntel: options.codeIntel,
+		agentBusy: options.agentBusy,
 		// What the extension does, minus the agent: register the request.
 		submit: (request, prompt) => {
 			const began = session.registry.begin(request);
@@ -322,6 +323,31 @@ describe("web mode requests", () => {
 		const refused = await op({ op: "preview", verb: "execute", id: "api" });
 		expect(refused.status).toBe(400);
 		expect(((await refused.json()) as { error: string }).error).toBe("no execute action for a brainstorm document");
+	});
+
+	test("a pending request reads as stalled once the agent is idle past the grace, and the page version changes", async () => {
+		let busy = true;
+		const { session, state } = await harness({ agentBusy: () => busy });
+		const began = session.registry.begin({
+			requestId: "req-stall",
+			kind: "enhance",
+			intent: "enhance",
+			scope: { kind: "block", id: "api" },
+			label: 'block "API"',
+			branchKey: "s:leaf",
+			documentId: session.store.require().id,
+			baseRevision: 0,
+			baseDigest: undefined,
+			prompt: "",
+		});
+		if (!began.ok) throw new Error(began.errors.join("; "));
+		began.entry.createdAt = new Date(Date.now() - 60_000).toISOString();
+		const working = await state();
+		expect(working.requests.map(request => [request.state, request.stalled])).toEqual([["pending", false]]);
+		busy = false;
+		const stalled = await state();
+		expect(stalled.requests.map(request => [request.state, request.stalled])).toEqual([["pending", true]]);
+		expect(stalled.version).not.toBe(working.version);
 	});
 });
 
@@ -605,7 +631,7 @@ describe("web mode code-line requests", () => {
 		expect(submitted.at(-1)!.prompt).toContain("src/app.ts:2-3");
 	});
 
-	test("symbol lookups answer unavailable without a language server, and pass a server's answer through", async () => {
+	test("symbol lookups answer unavailable without a language server, and pass a server's answer through with its view", async () => {
 		const plain = await withApp();
 		const get = (h: typeof plain, path: string) => fetch(`${h.origin}${path}`, { headers: { cookie: h.cookie } });
 		expect(await (await get(plain, "/api/symbol?path=src/app.ts&line=1&character=0")).json()).toEqual({
@@ -619,7 +645,14 @@ describe("web mode code-line requests", () => {
 				symbolAt: async () => ({ ok: true, server: "stub", value: facts }),
 			},
 		});
-		expect(await (await get(stubbed, "/api/symbol?path=src/app.ts&line=1&character=0")).json()).toEqual({ ok: true, server: "stub", value: facts });
+		const answer = (await (await get(stubbed, "/api/symbol?path=src/app.ts&line=1&character=0")).json()) as { value: unknown; view: unknown };
+		expect(answer.value).toEqual(facts);
+		expect(answer.view).toEqual({
+			hover: [{ kind: "text", text: "h" }],
+			definitions: [],
+			references: [{ path: "src/app.ts", count: 1, locations: [{ path: "src/app.ts", line: 1, preview: "x", tokens: [["variable", "x"]] }] }],
+			referenceTotal: "1",
+		});
 		expect((await get(stubbed, "/api/symbol?path=src/app.ts&line=0&character=0")).status).toBe(400);
 	});
 });

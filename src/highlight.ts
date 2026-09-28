@@ -32,7 +32,11 @@ const ESCAPE = /\x1b\[[0-9;]*m/g;
 
 /** Highlighted lines for a file, or undefined when its language is unknown. */
 export function highlightLines(code: string, path: string): Span[][] | undefined {
-	const language = getLanguageFromPath(path);
+	return highlightLanguage(code, getLanguageFromPath(path));
+}
+
+/** Highlighted lines for code in a named language (a fence tag such as `ts`), or undefined when it is unknown. */
+export function highlightLanguage(code: string, language: string | undefined): Span[][] | undefined {
 	if (!language || !supportsLanguage(language)) return undefined;
 	let colored: string;
 	try {

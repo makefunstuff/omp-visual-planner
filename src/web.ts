@@ -14,9 +14,9 @@
  */
 import type { Server } from "bun";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
+import { type ActionKind, type ActionRegistry, type BeginInput, type JournalEntry, isStalled } from "./actions.ts";
 import type { RelatedContext } from "./compose.ts";
-import type { CodeIntel, IntelOutcome } from "./code-intel.ts";
+import type { CodeIntel, IntelOutcome, SymbolFacts } from "./code-intel.ts";
 import {
 	type CitationCheck,
 	type CitationState,
@@ -110,7 +110,8 @@ import {
 	tidyDiagram,
 } from "./ui.ts";
 import { WEB_PAGE } from "./web-page.ts";
-import { highlightLines } from "./highlight.ts";
+import { highlightLanguage, highlightLines } from "./highlight.ts";
+import { type LocationGroup, outlineTree, symbolView, syntaxSummary } from "./intel-view.ts";
 import { inspectSource } from "./code-evidence.ts";
 import { listWorkspaceFiles, readWorkspaceFile, workspacePath } from "./workspace-files.ts";
 
@@ -152,6 +153,8 @@ export interface WebBinding {
 	rankRelated?: RelatedRanker;
 	/** Language-server lookups for the file viewer; absent in tests. */
 	codeIntel?: CodeIntel;
+	/** Whether OMP is running a turn now; absent in tests, where requests read as worked on. */
+	agentBusy?: () => boolean;
 }
 
 export interface WebHandle {
@@ -329,12 +332,13 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 	if (url.pathname === "/api/insight" && request.method === "GET") {
 		const line = Number(url.searchParams.get("line"));
 		const insight = await inspectSource(entry.binding.cwd, url.searchParams.get("path") ?? "", line);
-		return insight.ok ? json(insight) : json({ error: insight.error }, insight.status);
+		return insight.ok ? json({ ...insight, summary: syntaxSummary(insight) }) : json({ error: insight.error }, insight.status);
 	}
 
 	if (url.pathname === "/api/outline" && request.method === "GET") {
 		const path = url.searchParams.get("path") ?? "";
-		return json(await (entry.binding.codeIntel?.outline(path, request.signal) ?? NO_INTEL));
+		const outcome = await (entry.binding.codeIntel?.outline(path, request.signal) ?? NO_INTEL);
+		return json(outcome.ok ? { ...outcome, view: outlineTree(outcome.value) } : outcome);
 	}
 
 	if (url.pathname === "/api/symbol" && request.method === "GET") {
@@ -344,7 +348,8 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 		if (!Number.isInteger(line) || line < 1 || !Number.isInteger(character) || character < 0) {
 			return json({ error: "line and character must be whole numbers" }, 400);
 		}
-		return json(await (entry.binding.codeIntel?.symbolAt(path, line, character, request.signal) ?? NO_INTEL));
+		const outcome = await (entry.binding.codeIntel?.symbolAt(path, line, character, request.signal) ?? NO_INTEL);
+		return json(outcome.ok ? { ...outcome, view: symbolPageView(outcome.value, workspacePath(path) ?? path) } : outcome);
 	}
 
 	if (url.pathname === "/api/op" && request.method === "POST") {
@@ -368,6 +373,25 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 	}
 
 	return json({ error: "not found" }, 404);
+}
+
+/** Token spans for a group's preview lines, highlighted as the file they come from. */
+function previewTokens(groups: readonly LocationGroup[]) {
+	return groups.map(group => ({
+		...group,
+		locations: group.locations.map(location => ({ ...location, tokens: highlightLines(location.preview, group.path)?.[0] ?? null })),
+	}));
+}
+
+/** The shared symbol view, with token spans for hover code and previews so the page never parses code itself. */
+function symbolPageView(facts: SymbolFacts, currentPath: string) {
+	const view = symbolView(facts, currentPath);
+	return {
+		...view,
+		hover: view.hover.map(part => (part.kind === "code" ? { ...part, tokens: highlightLanguage(part.code, part.language) ?? null } : part)),
+		definitions: previewTokens(view.definitions),
+		references: previewTokens(view.references),
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -445,8 +469,8 @@ export interface WebState {
 	selected: string | undefined;
 	/** Every staged proposal on this branch, oldest first; each is reviewed on its own. */
 	reviews: WebReview[];
-	/** Every request this branch waits on — what, where, since when (ISO time) — for progress UI, oldest first. */
-	requests: { requestId: string; label: string; state: string; kind: string; since: string; blockId: string | undefined }[];
+	/** Every request this branch waits on — what, where, since when (ISO time) — for progress UI, oldest first. `stalled`: pending, but the agent is idle. */
+	requests: { requestId: string; label: string; state: string; stalled: boolean; kind: string; since: string; blockId: string | undefined }[];
 	/** The latest drift check, or null before the first one. */
 	drift: WebDrift | null;
 }
@@ -558,6 +582,8 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 	const document = session.store.document;
 	const stack = document ? normalizeStack(session, document) : [];
 	const active = session.registry.active();
+	const busy = binding.agentBusy?.() ?? true;
+	const stalled = new Set(active.filter(entry => isStalled(entry, busy)).map(entry => entry.requestId));
 	const reviews =
 		document === undefined
 			? []
@@ -571,7 +597,7 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 		session.store.path ?? "",
 		stack.join("/"),
 		session.selected ?? "",
-		session.registry.entries.map(entry => `${entry.requestId}:${entry.state}`).join(","),
+		session.registry.entries.map(entry => `${entry.requestId}:${stalled.has(entry.requestId) ? "stalled" : entry.state}`).join(","),
 		session.drift?.checkedAt ?? "",
 	].join("|");
 	return {
@@ -592,6 +618,7 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 			requestId: entry.requestId,
 			label: entry.label,
 			state: entry.state,
+			stalled: stalled.has(entry.requestId),
 			kind: entry.kind,
 			since: entry.createdAt,
 			blockId: entry.scope.kind === "block" ? entry.scope.id : undefined,

@@ -255,6 +255,18 @@ export function resumeBranchToken(journal: readonly Pick<JournalEntry, "state" |
 	return liveToken;
 }
 
+/** How long a fresh request may sit pending while the agent has not picked it up yet. */
+export const STALL_GRACE_MS = 5_000;
+
+/**
+ * A pending request nobody is working on: the agent is idle and the request is
+ * past the grace a submit needs to start a turn. A refused stage keeps a request
+ * pending, so without this the surfaces would show it as running forever.
+ */
+export function isStalled(entry: Pick<JournalEntry, "state" | "createdAt">, agentBusy: boolean, now = Date.now()): boolean {
+	return entry.state === "pending" && !agentBusy && now - Date.parse(entry.createdAt) >= STALL_GRACE_MS;
+}
+
 /**
  * One journal per session. `branchKey` identifies the branch/tree position a
  * request belongs to, so a request cannot be satisfied from somewhere else.
