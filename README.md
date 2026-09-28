@@ -86,16 +86,17 @@ src/layout.ts      nested-box layout and arrow geometry (browser-safe)
 src/viewer.ts      the loopback server
 src/cli.ts         the view without OMP
 src/index.ts       the OMP extension: /diagram
-src/web-page.ts    compiles web/ into one HTML page on the first request
+src/web-page.ts    serves dist/web-page.html (gitignored)
 web/               the page (Svelte)
-scripts/           check-web.ts, json-to-tree.ts
+scripts/           build-web.ts, check-web.ts, json-to-tree.ts
 skills/plan-tree/  the skill; the only place the intents live
 ```
 
 ## Develop
 
 ```sh
-bun install
+bun install         # also builds dist/web-page.html
+bun run build:web   # after editing web/
 bun run check       # tsc and Svelte check
 bun test
 ```
