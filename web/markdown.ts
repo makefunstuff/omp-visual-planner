@@ -1,5 +1,5 @@
 /**
- * The block-description markdown the page reads, parsed with mdast (CommonMark
+ * A node's markdown (index.md body, design.md), parsed with mdast (CommonMark
  * plus GFM task lists) into data the Markdown component renders as text:
  * authored text never becomes markup.
  */
@@ -54,18 +54,4 @@ function block(node: RootContent): MarkdownBlock | undefined {
 
 export function parseMarkdown(text: string): MarkdownBlock[] {
 	return parse(text).flatMap(node => block(node) ?? []);
-}
-
-/** The collapsed node's two lines: the prose, without code or markup. */
-export function summary(text: string): string {
-	return parse(text)
-		.filter(node => node.type !== "code")
-		.map(node => toString(node))
-		.join(" ")
-		.replace(/\s+/g, " ")
-		.trim();
-}
-
-export function hasCode(text: string): boolean {
-	return parse(text).some(node => node.type === "code");
 }

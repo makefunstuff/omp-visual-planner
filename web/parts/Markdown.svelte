@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { parseMarkdown } from "../markdown.ts";
-	let { text, onclick }: { text: string; onclick?: () => void } = $props();
+	let { text }: { text: string } = $props();
 	const blocks = $derived(parseMarkdown(text));
 </script>
 
@@ -8,8 +8,7 @@
 	{#each parts as part, index (index)}{#if part.kind === "code"}<code>{part.text}</code>{:else if part.kind === "strong"}<strong>{part.text}</strong>{:else}{part.text}{/if}{/each}
 {/snippet}
 
-<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_static_element_interactions -->
-<div class="md" title="Click to edit" {onclick}>
+<div class="md">
 	{#each blocks as block, index (index)}
 		{#if block.kind === "code"}
 			<div class="code">{#if block.lang}<span class="lang">{block.lang}</span>{/if}<pre>{block.text}</pre></div>

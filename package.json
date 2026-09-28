@@ -3,7 +3,7 @@
 	"version": "0.1.0",
 	"private": true,
 	"type": "module",
-	"description": "OMP-native nested-block visual architecture planner and codebase-discovery surface",
+	"description": "Plan trees as directories of markdown files: a read-only nested-box view (/diagram) and the plan-tree skill",
 	"license": "MIT",
 	"omp": {
 		"extensions": [
@@ -16,17 +16,10 @@
 		"build:web": "bun scripts/build-web.ts"
 	},
 	"peerDependencies": {
-		"@oh-my-pi/pi-ai": ">=18.2.11",
-		"@oh-my-pi/pi-coding-agent": ">=18.2.11",
-		"@oh-my-pi/pi-natives": ">=18.2.11",
-		"@oh-my-pi/pi-tui": ">=18.2.11"
+		"@oh-my-pi/pi-coding-agent": ">=18.2.11"
 	},
 	"devDependencies": {
-		"@oh-my-pi/omptype": "18.2.11",
-		"@oh-my-pi/pi-ai": "18.2.11",
 		"@oh-my-pi/pi-coding-agent": "18.2.11",
-		"@oh-my-pi/pi-natives": "18.2.11",
-		"@oh-my-pi/pi-tui": "18.2.11",
 		"@types/bun": "latest",
 		"@types/d3-selection": "^3.0.12",
 		"@types/d3-zoom": "^3.0.8",

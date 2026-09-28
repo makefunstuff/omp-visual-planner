@@ -7,5 +7,3 @@ node_modules/
 # OS noise
 .DS_Store
 
-# recorder scratch
-scripts/demo/__pycache__/

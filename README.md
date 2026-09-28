@@ -1,238 +1,101 @@
 # omp-visual-planner
 
-An OMP extension for planning systems and mapping codebases as nested blocks. It is built for OMP, not as a plugin for other harnesses. Work on one block at a time in a terminal or browser; use the map when relationships or layout matter. A model can stage a proposal, but only a person can accept it.
+A plan is a directory tree of markdown files, committed next to the code:
 
-## What is in it
-
-- **One nested document.** Blocks nest into diagrams to any depth, with stable ids, authored order, labelled edges, source references and `uses` links. `.omp-visual-planner/architecture.json`, schema 1, explicit atomic saves that refuse to overwrite an outside edit; legacy boards import.
-- **Three purposes.** `brainstorm` (ideas, no status), `plan` (todo → planned → done, Execute), `explore` (unexplored → explored, citations, grounded mode).
-- **Verbs, previewed and scoped.** Refine, Break down / Expand / Map inside, Investigate, Replan, Prune, Execute — each composes one exact prompt for the block, subsystem or project you point at and previews it before anything is sent. `Esc` cancels; Enter submits.
-- **Judged related context (Jev).** A request narrower than the project arrives with the blocks outside its scope already ranked. The session's `judge` role — a System One decision model, **Jev** by default (`openrouter/~typesafe/jev-latest`), or Laya behind the same wire — is asked one narrow yes/no question per outside block, and those at p ≥ 0.7 join the prompt as a `## Related context` section. Measured at roughly $0.00003 and 0.3 s for three blocks. See [Related context](#related-context).
-- **Reviewed proposals.** A model can only stage through `visual_planner_propose`, with every changed field shown before and after; only a person accepts, and acceptance is one undoable, unsaved edit. Replan and prune cannot drop work the human already settled.
-- **Reuse that survives a move.** Extract lifts a block to share it, its former sibling links become `uses`, and Execute reads a use as a dependency. See [Reuse](#reuse).
-- **Execute as dispatch.** Only written leaves with acceptance criteria run, in the venue the block states (`here`, `subagent`, `worktree`); the plugin hands the work to OMP and never marks it done.
-- **Visual design as a block facet.** A block a person looks at is marked `surface` (`page` or `component`). A surface without a wireframe and a mockup points at **Sketch**, which draws a fenced `wireframe` in its description and a sandboxed HTML mockup; **Screens** shows every page and component together; Execute over a surface builds what they show. See [Design a page or component](#design-a-page-or-component).
-- **Parallel block requests.** Mark blocks with `m` and run one verb over all of them: the session spawns one subagent per block, and each proposal comes back for its own review. See [Explore several blocks at once](#explore-several-blocks-at-once).
-- **Change plans for an existing repository.** `/diagram change` opens a new plan under `.omp-visual-planner/changes/`, oriented by the codebase map and the blocks marked on it; the model reads the code first and each block cites the files it changes. See [Change an existing codebase](#change-an-existing-codebase).
-- **Two surfaces.** The terminal TUI and a loopback web view of the same session, sharing focus, undo and the store.
-- **Evidence over confidence.** Every block is `observed`, `inferred` or `unknown`; `observed` needs a source, and explore can hide what is not grounded.
-- **Drift you can see and resolve.** Every citation keeps a fingerprint of the lines it cited. `D` (terminal) or **Drift** (browser) checks them against the code and lists what moved, changed or went missing, plus files changed since the recorded git baseline that no block cites. See [Drift](#drift).
-- **Requests on selected code lines.** In either file viewer, select lines and **Request a change** or **Ask** about them: the planner adds a block citing them and previews its request. Identifiers ask OMP's language server for hover, definition and references; **Outline** lists the file's symbols.
-- **A skill for when no document is open.** [`skills/decompose`](skills/decompose/SKILL.md): the same decomposition as nested bullets in one markdown file, with `/tree` as the history.
-
-The skill is the agent plus `/tree`, which OMP and pi already have. The agent edits one markdown file of nested bullets, the way Logseq nests blocks. `/tree` is how you go back to an earlier decomposition. No second integration. OMP loads the skill with this plugin. For pi, link the directory:
-
-```sh
-ln -s /path/to/omp-visual-planner/skills/decompose ~/.pi/agent/skills/decompose
+```text
+docs/plan/
+  index.md                  # the project
+  design/
+    preview.html
+    design.md
+  feature-1/
+    index.md
+    implementation-1/
+      index.md
+      design/
+        preview.html
+        design.md
+    implementation-2/
 ```
 
-[![Discovery of omp-visual-planner](docs/visual-planner-demo.png)](docs/visual-planner-demo.mp4)
+One directory per node, its `index.md` is the node's text, subdirectories are its children, and links between nodes are the diagram's arrows. It is greppable, needs no plugin, a plan change sits next to the code change in the same diff, and agents and humans read it the same way.
 
-[31s tour](docs/visual-planner-demo.mp4), stitched from real browser captures of this repo's discovery document, one per step: the walk, the map, a file found in the tree with the blocks that cite it, the citing block, the Investigate preview before submit, and the `?` sheet. The still above is the map with the file tree open.
+This package has two parts:
 
-## Install
+- **The `plan-tree` skill** ([`skills/plan-tree/SKILL.md`](skills/plan-tree/SKILL.md)): the format, and the intents an agent runs on a node — `plan`, `discover`, `enhance`, `decompose`, `investigate`, `replan`, `prune`, `execute`, `change`, `sync`, `clarify`. Invoke as `/skill:plan-tree <intent> <node> [note]`.
+- **A read-only view**: the whole tree as nested boxes on one zoomable canvas, arrows between them, and the selected node's page beside it. It redraws within a second of any file change. Editing happens in your editor.
 
-From a checkout:
-
-```sh
-omp plugin link /path/to/omp-visual-planner
-omp plugin doctor
-```
-
-The link is user-scoped and follows changes in the checkout. Run `/reload-plugins` in an open session after editing. For a project-only install, link or copy the checkout to `<repo>/.omp/extensions/omp-visual-planner`. To load it explicitly without installation:
-
-```sh
-omp --no-extensions -e /path/to/omp-visual-planner/src/index.ts
-```
-
-The package is private; the npm install route is not available yet.
-
-## Try it without a model
-
-From this checkout:
-
-```sh
-DEMO_DIR="$(mktemp -d)"
-bun scripts/demo/fixture.ts "$DEMO_DIR"
-omp --cwd "$DEMO_DIR" --no-extensions -e "$PWD/src/index.ts"
-```
-
-In OMP, run `/diagram open architecture.json`. Move through the outline with `j`/`k`, press `Enter` to open the block's page, move to its source reference with `j`, and press `Enter` again. Scroll with `j`/`k`, arrows, `PgUp`/`PgDn`, or `g`/`G`; `Esc` returns. `t` previews a block replan; `a` offers project replan and prune. **Esc cancels a preview; Enter submits its request to the model.** The generated directory is disposable.
-
-## Commands
-
-| Command | Action |
-|---|---|
-| `/diagram` | Open the current document or create one |
-| `/diagram new [brainstorm\|plan\|explore]` | Create a document (default: plan) |
-| `/diagram open <path>` | Open a document; legacy boards import automatically |
-| `/diagram draft [brainstorm]` | Ask the model to draft a plan or mind map |
-| `/diagram discover [path]` | Ask the model to map an existing codebase (default: cwd) |
-| `/diagram change [goal]` | Plan a change to this codebase as a new plan; the model reads the code first |
-| `/diagram web` / `/diagram web stop` | Open/stop the browser view of this session |
-
-The terminal opens on a nested outline beside the selected block's page. Browsing, the page shows only what is written, and flags what a plan block still lacks. Its last line is the one next step for that block; `r`, `b`, `t`, and `X` are the other verbs. `Enter` opens every field with a cursor (`j`/`k` picks one, `Enter` edits it, `Esc` returns). `space` advances the status; `n` selects the next open block. `R` reviews a staged proposal. `U` links this block to a reusable one anywhere in the document, and `M` lifts it, with everything inside it, to a shared level. The outline marks a block others use with `×N`. `v` switches to the coordinate map, `E` edits the whole block as Markdown in `$VISUAL`/`$EDITOR`, and `s` saves. The status line lists the keys that work where you are; `?` groups all of them.
-
-The browser has the same outline on the left and the same page or walk beside it. The top bar holds the document, its progress, undo, the file tree, the map and Save; the status line at the bottom lists the keys, and `?` opens the full sheet. On the page, the next step is the first button and the one sentence under the buttons says why. **Uses…** and **Extract…** are the same two jobs as `U` and `M`, in a dialog you can filter.
-
-Brainstorm, and an explore block you have not settled, open on a **walk**: one **focus diagram** with the focused block as a card, its parent above, the blocks it links from on the left and to on the right — each link an arrow carrying its label, except a reuse link, which is dashed and unlabelled: `uses` on the left, `used by` on the right — and what is inside it below. The arrow keys move the highlight around it and `Enter` goes to the highlighted block (`Esc` recentres); `j`/`k` still move the outline, and a pane too narrow to draw the diagram falls back to a stacked list with the same cursor. Dump a line onto the focused idea (Enter in the browser, `O` in the terminal). In explore, a citation is the subtitle, uncited blocks are dim, and **grounded** (`g`) hides them. `Enter` on a cited block opens the source; `i` (or `Enter` on an uncited one) opens the editable page. Mark a block explored and it stays on the full page. Plan documents stay on that page. **Map** is coordinates. Both views share the session.
-
-| Purpose | Block actions | Human status |
-|---|---|---|
-| brainstorm | Refine, Expand, Replan | none |
-| plan | Refine, Break down, Replan, Execute | todo → planned → done |
-| explore | Investigate, Map inside, Replan | unexplored → explored |
+Git is the history: review an iteration with `git diff -- docs/plan`, drop it with `git restore -- docs/plan`. `/tree` and `/fork` move the conversation only; they never restore files.
 
 ## Use cases
 
-Seven sessions. In each one the model may only stage a proposal. You accept it, or you do not. Saving is a separate key.
+- **Plan a feature before writing it.** `plan <goal>`, then `decompose` the parts that are still vague. Mark a node `settled` once you agree with it; `execute` implements settled leaves that have acceptance criteria, in link order.
+- **Learn an unfamiliar codebase.** `discover` maps entry points and modules into nodes that cite the lines they describe; `investigate` goes one node deeper, and `clarify` answers a question in a node from the cited code.
+- **Scope a change to existing code.** `change <goal>` reads the code first and adds one subtree: the files it touches, then the concrete edits with acceptance criteria. The plan and the code land in the same commit.
+- **Design a screen.** `enhance` on a node with a `design/` folder draws a wireframe and a 1280×800 HTML preview; the view shows the preview beside the node.
+- **Keep a plan honest.** `sync` rewrites a node whose cited code moved; `replan` and `prune` rework a subtree without touching settled or done nodes.
 
-### Brainstorm an idea
+## Use
 
-You have a product thought and no structure. You do not want implementation steps.
+In OMP, load the package directory (so both the extension and `skills/` are found):
 
-```text
-/diagram new brainstorm
+```sh
+omp -e /path/to/omp-visual-planner
 ```
 
-The document opens on a walk. Dump the first line (`O` in the terminal, Enter in the browser). Dump the next line onto that idea to nest it, or onto the empty project to add a sibling. `r` previews Refine for the focused idea: title and note only, no new blocks. `b` previews Expand: sub-ideas come back as children. Accept the diff, then walk into one child and repeat. `space` does nothing here. Ideas have no status. There is no Execute verb. Once the idea has a note, the next step is **Implement**: it switches the document to a plan and opens Execute on that block.
+- `/diagram [dir]` opens the view of `dir` (default `docs/plan`, relative to the session's working directory) in the browser and prints the link.
+- `/diagram stop` stops it; it also stops when the session ends.
+- `/skill:plan-tree plan <goal>` drafts a tree; `/skill:plan-tree decompose feature-1` adds children to one node, and so on.
 
-When the map is the thing you want to look at, `v` (or Map in the browser). Relationships are context, not a schedule.
+Without OMP:
 
-### Explore a codebase
-
-You are new to a repository and want a map grounded in files, not a redesign.
-
-```text
-/diagram discover .
-/diagram web
+```sh
+bun src/cli.ts [dir] [--port <n>]    # dir defaults to docs/plan; Ctrl+C stops it
 ```
 
-Discover submits a project-scope request. The proposal is a document of blocks with source ranges. Reject anything that cites a path you cannot open. After accept, the walk shows a citation under each block. Uncited blocks are dim. `g` hides them. Open a citation (`Enter` on the source row, or the path in the browser file tree). **Inspect syntax** is a Tree-sitter range, not a type or a reference.
+For pi, link the skill directory:
 
-`r` on one block is Investigate: it may fill description, evidence, sources, and children, and only from code it read. `b` is Map inside, for one subsystem, not the whole repo. `space` marks the block explored and leaves the walk for the full page. Do not use this purpose to plan new work. That is a plan document.
-
-### Research a question interactively
-
-You are not mapping a repository and you are not shipping a feature. You are pulling a question apart and keeping the evidence next to the claim.
-
-```text
-/diagram new explore
+```sh
+ln -s /path/to/omp-visual-planner/skills/plan-tree ~/.pi/agent/skills/plan-tree
 ```
 
-Skip Discover. Author the question yourself (`o` in the terminal, **+ block** in the browser), then the competing claims as its children (`O`, or **+ inside**). Do not use Map inside for that. Map inside asks the model to derive children from code. Each claim gets a source reference (`path` or `path:10-40`) only after you have opened that range. Evidence stays `unknown` or `inferred` until a source exists. `observed` without a source is refused. Investigate (`r`) on one claim, review the diff, and reject a citation you did not check. `g` hides claims that are not grounded. `space` marks a claim explored. `n` selects the next open one.
+## The view
 
-This is the same document type as codebase exploration. The difference is that you author the blocks, and the model only fills the one you point at.
+- Boxes: status glyph (`○` open, `◐` settled, `●` done), title, `◇` for a node with a `design/` folder, `!` for a node with problems (missing `index.md`, bad front matter). Open nodes have a dashed border, settled and done a solid one, done ones dimmed text.
+- Drag or wheel pans; Ctrl/⌘-wheel or pinch zooms; double-click a box zooms to it; `f` or **Fit** fits everything.
+- Click a box to open its page: file path, status and venue, problems, the body, `links to` / `linked from` rows, source links, and the design (`design.md` and a sandboxed `preview.html` with **Full size**). The twisty collapses a box; arrows aimed inside it land on it.
+- `Esc` closes the full-size preview, else the page.
 
-### Refine an existing project
+The server binds `127.0.0.1` on a random port, exchanges the printed link's token for an HttpOnly SameSite=Strict cookie, checks the Host header, and serves only `GET /`, `GET /api/tree` and `GET /api/preview`. It never writes.
 
-A plan already exists. One block is thin, or the nesting is wrong. You do not want a new document.
+## Converting old planner documents
 
-```text
-/diagram open .omp-visual-planner/architecture.json
+Documents from the earlier JSON planner (`.omp-visual-planner/*.json`, schema version 1) convert once:
+
+```sh
+bun scripts/json-to-tree.ts .omp-visual-planner/architecture.json docs/plan [--repo <dir>]
 ```
 
-`n` moves to the next todo. `r` previews Refine for that block: description, expected output, acceptance criteria. It must not add or remove blocks. `b` is the separate request that adds children. `t` replans that block and its subtree. Settled and done blocks stay, under the same ids. A project replan or prune is `a`, and the same retention rule applies to the whole document.
+Each block becomes an `NN-slug/` directory with its title, description, expected output, acceptance criteria, sources, edges and uses as links, and notes; a mockup becomes `design/preview.html` and a wireframe fence moves to `design/design.md`. The target must not exist or be empty. `evidence` and positions are dropped.
 
-Accept, then `s`. Acceptance is unsaved until you save. Undo is still available before that.
+## Layout
 
-Execute is not refine. On the block you clicked, a written leaf runs even while it is still todo. A parent does not run: `X` dispatches only the ready leaves under it, and a leaf in that sweep still has to be planned and have acceptance criteria. Set venue on the block page, or Enter on the venue row in the terminal: `here`, `subagent`, or `worktree`. Unset means here. Execute ready leaves, from `a` or the project page, is that sweep for the whole plan. The prompt names the venue. This plugin does not spawn the subagent or the worktree, and it does not mark the leaf done. You do, after you have looked at the result.
+```text
+src/tree.ts        reads a plan tree: nodes, front matter, arrows, sources, version
+src/layout.ts      nested-box layout and arrow geometry (browser-safe)
+src/viewer.ts      the loopback server
+src/cli.ts         the view without OMP
+src/index.ts       the OMP extension: /diagram
+web/               the page (Svelte), built into src/web-page.html
+scripts/           build-web.ts, check-web.ts, json-to-tree.ts
+skills/plan-tree/  the skill; the only place the intents live
+```
 
-Two parts of the plan needing the same subsystem is not a reason to write it twice. `M` moves the one definition up to a level that holds both, the block that held it starts using it, and each of its former sibling links becomes a use. See [Reuse](#reuse).
-
-### Design a page or component
-
-Some blocks are things a person looks at, not code. Mark one `surface`: `page` for a whole screen, `component` for a reusable piece of UI inside pages. Set it on the block page in the browser, or Enter on the surface row in the terminal; unset, the default, is every block nobody looks at. It is a facet, not a fourth purpose: the rest of the model already carries the structure. A page's components nest as its children, a shared component is defined once and linked through `uses`, and navigation between pages is a labelled edge. A seed, expand or replan request may tag new blocks; the review shows the tags, and accepting never changes or removes one the human already set.
-
-A surface without a wireframe and a mockup points at **Sketch**: Refine with a design brief. The model puts one `wireframe` fence in the block's description — at most 12 lines of 60 columns, regions top to bottom, the primary action, real labels, never lorem ipsum — then one line per state it needs, and draws a contained or used component as a labelled box, since each component is designed on its own block. It also draws an HTML **mockup** in the block's `mockup` field: one self-contained HTML document with inline CSS, the default state at 1280×800, at most 40 000 characters. Sketched, the step falls through to the usual ones: Implement for a brainstorm, Refine/Execute/Open inside for a plan.
-
-The browser shows the mockup on the block page (**Full size** opens it at up to 1280×800), and the review shows a changed mockup before and after. The mockup renders in a sandboxed frame: no scripts, no network, no access to the planner page. The terminal never renders HTML; it marks the block `[page · mockup]` and counts the characters in a review. A proposal may replace a mockup, but leaving it out keeps the current one; only you remove one (**Remove** on the block page).
-
-**Screens** (`S`, or the button in the top bar) is every page and component on one board: each page with its mockup — its wireframe when it has none, `not sketched` when it has neither — the pages its edges lead to as `→ Cart · checkout` chips, and under each component the pages and components that contain or use it. **Sketch…** on a card previews Sketch for that block.
-
-The design system is `DESIGN.md` at the workspace root — the open DESIGN.md spec from Google, also used by Stitch and Open Design. Sketch and Execute read it when it exists and use its tokens (colors, typography, spacing, components) by name; a mockup declares them as CSS custom properties. The planner never creates or edits it, and when it is missing it does not invent a palette.
-
-Execute over a surface builds what the wireframe shows: its regions, primary action, labels and listed states. A mockup shows the target layout, hierarchy, spacing and copy; the wireframe lists the states.
-
-### Explore several blocks at once
-
-Several blocks need the same request — Refine these four pages, Map inside these three subsystems — and each is independent of the others.
-
-`m` marks the focused block (shift-click a row in the browser outline); a marked row shows `✓`. With two or more marked, `a` offers `<Verb> N marked blocks in parallel` for every verb but Execute (in the browser, the bar above the outline). A marked block inside another marked block is refused: unmark one.
-
-The preview shows the prompt for the session and, under it, each block's own instructions file. Submitting sends the session one request: spawn one subagent per block with the `task` tool, all at once, then stage each answer through `visual_planner_propose`. Each block's proposal is reviewed on its own. `R` opens the oldest; accepting or rejecting it opens the next (`review proposal · 1 of 3`). In the browser, ‹ › step through the queue. Accepting one and saving does not make the others stale; an edit to the file from outside the planner still does.
-
-### Change an existing codebase
-
-You want to change a repository you did not plan in this tool. The plan should cite the files it changes.
-
-1. `/diagram discover .` and walk the map until you know where the change lives.
-2. Mark the blocks where the change starts (`m`, or shift-click in the browser).
-3. `a` → **Plan a change to this codebase** (or `/diagram change add a JSON export`). Type the goal. A new plan opens under `.omp-visual-planner/changes/`; it never overwrites the workspace plan or the map.
-4. The model reads the map and the code from the marked blocks first. Review the proposal: top-level blocks are the parts of the code the change touches, each citing the files it changes; the concrete edits nest under them.
-5. Refine or Break down a block: a plan block that cites code gets the same evidence rules as a map, so the model reads the cited code.
-6. Set each leaf planned with acceptance criteria, choose a venue, then Execute. The dispatch lists each leaf's files.
-
-## Reuse
-
-A block that more than one part of the document needs is defined once and referenced, never duplicated. `uses` on a block names other blocks by id: the tree still says what a block is made of and where its work lives, and a use is a second relation over it, from one level of the tree to any other. A block may use any block in the document except itself, one that contains it, or one inside it; cycles are allowed, the way sibling edges already are. A link that names no block, repeats an id, points at the block itself, at one that contains it, or at one inside it, is refused by name.
-
-`U` in the terminal, or **Uses…** in the browser, links the focused block to a block anywhere in the document. The picker ticks what the block already uses; `Enter` (or a click) on a ticked row stops using it, and the list stays open so you can link several blocks in one visit. `M`, or **Extract…**, lifts the focused block *and everything inside it* to a level that contains all of it: the block that held it starts using it, and every link to a former sibling becomes a use, since a use carries no label. The block keeps its id, status and contents; `u` undoes the whole move, including the links it rewrote.
-
-The outline marks a block others use with `×N`, and deleting a used block says how many links it cuts. In a walk or on the page, a reuse link is a dashed wire labelled `uses` or `used by`, in a section of its own beside the sibling links.
-
-Execute reads a use as a dependency: a leaf waits for what it uses and for what its ancestors use — a subsystem's needs are its parts' needs — and the sweep orders the library before its users. Sibling edges keep their present, non-inherited meaning.
-
-Requests that produce structure (plan, discover, decompose, investigate, replan, prune) carry a `## Reuse` section saying this, and a scoped request also lists the blocks outside that scope it may link to. Proposals carry `uses` like any other field: the review diff shows it as titles, and staging refuses a proposal that would leave a use pointing at a block it removes. `enhance` and `execute` prompts propose no structure, so they say nothing about reuse.
-
-## Related context
-
-A request narrower than the project — a block or a subsystem, every verb but Execute — is composed from its scope alone, and the blocks outside that scope reach the prompt only as titles. So the preview ranks them first: the session's `judge` role (a System One decision model such as Jev, or Laya behind the same wire) is asked one yes/no question per outside block, *should an agent about to change the focused block read this other block before it does?*. Every block at or above probability 0.7, at most eight, joins the prompt as a `## Related context` section carrying its note, acceptance criteria and sources, marked as context rather than scope. The preview says how many of how many were kept, which judge answered, and what it cost, and what is previewed is what is submitted.
-
-Blocks the prompt already names are not asked about: what the scope uses, what uses the scope, and the relationships that leave it. A `judge` role that is a chat model is refused by name instead of being prompted once per block; a ranking that fails says why in the preview and submits without the section; and the whole ranking is bounded at ten seconds.
-
-## Review and evidence
-
-A proposal replaces a block, its nested diagram, or the project only after review. The exact request is previewed first; `c` copies it to the OMP prompt editor and `w` exports it instead of submitting (in the browser, **Copy** puts it on the clipboard). A model stages its response through `visual_planner_propose`; `R` in the terminal, or the panel that opens in the browser, shows every changed field before and after, then the blocks and links it adds or removes. Rejection leaves the document unchanged. Acceptance is one undoable, unsaved edit; press `s` to write it. Replan and prune must retain blocks already settled by the human under the same IDs. Execute submits work to OMP, not a proposal, and does not mark a block done.
-
-Every block marks its evidence `observed`, `inferred`, or `unknown`. `observed` requires a source reference, which may include a line range. Discovery prompts require the agent to read cited files. **Inspect syntax** reports Tree-sitter ranges and node kinds. Types, definitions and references come only from the language server, queried when you click an identifier (browser), press `s` in the terminal source view, or ask for the **Outline** (`o`); opening a file never starts a server. Browser file reads stay inside the workspace after symlink resolution.
-
-The proposal tool checks the request token, scope, document identity, revision, on-disk digest, and session branch. It stages data; it cannot apply a change or write a file. `visual_planner_read({ scope? })` exposes the active document or one scope to the model.
-
-## Drift
-
-Code changed outside the planner leaves blocks claiming what the code no longer says. Each citation stores a sha256 of the lines it cited (trailing whitespace ignored) when it is made — added by hand, carried in a staged proposal, or created from selected lines. Accepting a proposal keeps a carried-forward citation's old fingerprint, so a proposal cannot hide drift; only a Sync on that block re-fingerprints what it re-cites.
-
-The check is manual: `D` in the terminal, **Drift** in the browser. Each citation reads `fresh`, `moved` (same lines elsewhere), `changed`, `missing`, `unstamped` (no fingerprint yet) or `unchecked` (unreadable). It also lists files changed since the document's baseline commit, plus new untracked files, that no block cites. Then:
-
-- **Re-anchor** points moved citations at where their lines are now.
-- **Still true** (`y` on a changed citation in the terminal) accepts the new lines as the fingerprint.
-- **Sync** sends one request per drifted block — in parallel when there are several — asking the agent to re-read the code and update the block; each proposal is reviewed on its own, and status stays yours.
-- **Record baseline** fingerprints citations that have none and restarts uncited-change tracking from the current HEAD.
-
-## Files and development
-
-Documents default to `.omp-visual-planner/architecture.json` (schema version 1). Saving is explicit, atomic, and refuses to overwrite an external edit. Blocks have stable IDs, authored order, optional nested diagrams, source references, and optional `uses` links to other blocks; edges connect blocks in the same diagram. Old `{ "boxes": [...], "edges": [...] }` boards import without overwriting the legacy file (`demo.json` is an example).
+## Develop
 
 ```sh
 bun install
-bun run check
+bun run build:web   # regenerate src/web-page.html after editing web/
+bun run check       # tsc, Svelte check, stale-page check
 bun test
 ```
-
-The browser page is a Svelte app in `web/`, built into one self-contained file, `src/web-page.html`, which the extension serves as is (the page's CSP allows only inline scripts and styles). The built file is committed, so a checkout runs without a build step; after editing `web/`, rebuild it:
-
-```sh
-bun run build:web
-```
-
-`bun run check` fails when the committed page is stale. It also type-checks the Svelte components with the repo's TypeScript 7 (via `svelte2tsx`, which still needs the TypeScript 6 compiler API, installed as `typescript6`) and fails on Svelte compiler warnings.
-
-The optional terminal recording is [docs/demo.mp4](docs/demo.mp4) ([GIF](docs/demo.gif), [asciicast](docs/demo.cast.gz)). Reproduce it with Python, Pillow, `omp`, Bun, and FFmpeg:
-
-```sh
-python3 scripts/demo/scenario_full.py /tmp/planner-demo.cast
-python3 scripts/demo/render.py /tmp/planner-demo.cast /tmp/planner-demo-frames
-```
-
-The recorder creates and removes its own workspace. It previews a request and does not submit one.

@@ -9,11 +9,7 @@
         "mdast-util-to-string": "^4.0.0",
       },
       "devDependencies": {
-        "@oh-my-pi/omptype": "18.2.11",
-        "@oh-my-pi/pi-ai": "18.2.11",
         "@oh-my-pi/pi-coding-agent": "18.2.11",
-        "@oh-my-pi/pi-natives": "18.2.11",
-        "@oh-my-pi/pi-tui": "18.2.11",
         "@types/bun": "latest",
         "@types/d3-selection": "^3.0.12",
         "@types/d3-zoom": "^3.0.8",
@@ -29,10 +25,7 @@
         "typescript6": "npm:typescript@~6",
       },
       "peerDependencies": {
-        "@oh-my-pi/pi-ai": ">=18.2.11",
         "@oh-my-pi/pi-coding-agent": ">=18.2.11",
-        "@oh-my-pi/pi-natives": ">=18.2.11",
-        "@oh-my-pi/pi-tui": ">=18.2.11",
       },
     },
   },
