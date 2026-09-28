@@ -220,6 +220,14 @@ bun run check
 bun test
 ```
 
+The browser page is a Svelte app in `web/`, built into one self-contained file, `src/web-page.html`, which the extension serves as is (the page's CSP allows only inline scripts and styles). The built file is committed, so a checkout runs without a build step; after editing `web/`, rebuild it:
+
+```sh
+bun run build:web
+```
+
+`bun run check` fails when the committed page is stale. It also type-checks the Svelte components with the repo's TypeScript 7 (via `svelte2tsx`, which still needs the TypeScript 6 compiler API, installed as `typescript6`) and fails on Svelte compiler warnings.
+
 The optional terminal recording is [docs/demo.mp4](docs/demo.mp4) ([GIF](docs/demo.gif), [asciicast](docs/demo.cast.gz)). Reproduce it with Python, Pillow, `omp`, Bun, and FFmpeg:
 
 ```sh

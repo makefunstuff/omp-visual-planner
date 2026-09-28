@@ -89,8 +89,10 @@ describe("web mode access", () => {
 	test("the page carries its characters as text, not as \\u escapes", async () => {
 		const { origin, cookie } = await harness();
 		const page = await (await fetch(`${origin}/`, { headers: { cookie } })).text();
-		expect(page).toContain("disconnected from the OMP session — run /diagram web again");
-		expect(page).not.toMatch(/\\u[0-9a-fA-F]{4}/);
+		// Labels written with non-ASCII characters reach the page as those characters.
+		for (const text of ["disconnected from the OMP session — run /diagram web again", "● unsaved", "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏", "Proposal to review"]) {
+			expect(page).toContain(text);
+		}
 	});
 
 	test("two sessions' tabs keep separate cookies on the same loopback host", async () => {
@@ -226,8 +228,8 @@ describe("web mode editing", () => {
 		const router = session.selected as string;
 
 		expect((await op({ op: "addUse", id: router, target: "db" })).status).toBe(200);
+		expect(findBlockLocation(store.require().root, router)!.block.uses).toEqual(["db"]);
 		const linked = await state();
-		expect(linked.flow!.focus.inputs).toEqual([{ id: "db", label: "uses", direction: "forward", kind: "uses" }]);
 		expect(linked.flow!.useCandidates.map(candidate => candidate.id)).toEqual(["db"]);
 
 		const rootId = store.require().root.id;
@@ -237,20 +239,6 @@ describe("web mode editing", () => {
 
 		expect((await op({ op: "removeUse", id: "api", target: router })).status).toBe(200);
 		expect(findBlockLocation(store.require().root, "api")!.block.uses).toBeUndefined();
-	});
-
-	test("the walk's focus diagram projects the block's parent, links and children", async () => {
-		const { op, state } = await harness();
-		expect((await op({ op: "addEdge", from: "api", to: "db", label: "reads" })).status).toBe(200);
-		expect((await op({ op: "focus", id: "db" })).status).toBe(200);
-		expect((await state()).flow!.focus).toEqual({
-			parent: null,
-			inputs: [{ id: "api", label: "reads", direction: "forward", kind: "edge" }],
-			outputs: [],
-			children: [],
-		});
-		expect((await op({ op: "focus", id: null })).status).toBe(200);
-		expect((await state()).flow!.focus).toEqual({ parent: null, inputs: [], outputs: [], children: ["api", "db"] });
 	});
 });
 

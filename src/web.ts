@@ -16,7 +16,7 @@ import type { Server } from "bun";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { type ActionKind, type ActionRegistry, type BeginInput, type JournalEntry, isStalled } from "./actions.ts";
 import type { RelatedContext } from "./compose.ts";
-import type { CodeIntel, IntelOutcome, SymbolFacts } from "./code-intel.ts";
+import type { CodeIntel, CodeLocation, IntelOutcome, SymbolFacts } from "./code-intel.ts";
 import {
 	type CitationCheck,
 	type CitationState,
@@ -36,7 +36,6 @@ import {
 	BatchError,
 	type ComposedBatch,
 	type DocumentStart,
-	type FocusLinkKind,
 	type PageField,
 	type ProjectAction,
 	type ScreenBoard,
@@ -47,7 +46,6 @@ import {
 	composeRequest,
 	extractedMessage,
 	fieldLabel,
-	focusNeighborhood,
 	nextOpenBlock,
 	nextStep,
 	pageFields,
@@ -110,8 +108,8 @@ import {
 	tidyDiagram,
 } from "./ui.ts";
 import { WEB_PAGE } from "./web-page.ts";
-import { highlightLanguage, highlightLines } from "./highlight.ts";
-import { type LocationGroup, outlineTree, symbolView, syntaxSummary } from "./intel-view.ts";
+import { type Span, highlightLanguage, highlightLines } from "./highlight.ts";
+import { type HoverPart, type LocationGroup, outlineTree, symbolView, syntaxSummary } from "./intel-view.ts";
 import { inspectSource } from "./code-evidence.ts";
 import { listWorkspaceFiles, readWorkspaceFile, workspacePath } from "./workspace-files.ts";
 
@@ -375,16 +373,31 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 	return json({ error: "not found" }, 404);
 }
 
+/** A hover part as the page gets it: code carries token spans, one list per line, or null when unhighlighted. */
+export type WebHoverPart = Exclude<HoverPart, { kind: "code" }> | (Extract<HoverPart, { kind: "code" }> & { tokens: Span[][] | null });
+
+/** A file's definitions or references, each preview line with its token spans. */
+export interface WebLocationGroup extends Omit<LocationGroup, "locations"> {
+	locations: (CodeLocation & { tokens: Span[] | null })[];
+}
+
+/** What `/api/symbol` adds beside the raw answer: the shared view, highlighted so the page never parses code. */
+export interface WebSymbolView {
+	hover: WebHoverPart[];
+	definitions: WebLocationGroup[];
+	references: WebLocationGroup[];
+	referenceTotal: string;
+}
+
 /** Token spans for a group's preview lines, highlighted as the file they come from. */
-function previewTokens(groups: readonly LocationGroup[]) {
+function previewTokens(groups: readonly LocationGroup[]): WebLocationGroup[] {
 	return groups.map(group => ({
 		...group,
 		locations: group.locations.map(location => ({ ...location, tokens: highlightLines(location.preview, group.path)?.[0] ?? null })),
 	}));
 }
 
-/** The shared symbol view, with token spans for hover code and previews so the page never parses code itself. */
-function symbolPageView(facts: SymbolFacts, currentPath: string) {
+function symbolPageView(facts: SymbolFacts, currentPath: string): WebSymbolView {
 	const view = symbolView(facts, currentPath);
 	return {
 		...view,
@@ -406,13 +419,6 @@ export interface WebReview {
 	error?: string;
 }
 
-export interface WebFocus {
-	parent: string | null;
-	inputs: { id: string; label: string; direction: EdgeDirection; kind: FocusLinkKind }[];
-	outputs: { id: string; label: string; direction: EdgeDirection; kind: FocusLinkKind }[];
-	children: string[];
-}
-
 export interface WebFlow {
 	verbs: { id: VerbId; label: string; key: string }[];
 	/** Null for a brainstorm, whose ideas carry no status. */
@@ -422,8 +428,6 @@ export interface WebFlow {
 	progress: string;
 	nextOpen: string | undefined;
 	next: { label: string; detail: string; verb?: string; act: "verb" | "status" | "implement" | "enter" | "add" };
-	/** The focused block's parent, links and children, for the walk's focus diagram. */
-	focus: WebFocus;
 	/** Blocks the selected block may use, for the Uses dialog; empty with nothing selected. */
 	useCandidates: { id: string; title: string; depth: number; used: boolean }[];
 	/** Levels the selected block can be extracted to, nearest first; empty at the top level. */
@@ -479,8 +483,6 @@ export interface WebState {
 function flowOf(document: DiagramDocument, selected: string | undefined): WebFlow {
 	const purpose = document.purpose;
 	const cycle = statusCycle(purpose);
-	// Unfiltered: grounded is client-side state, so the page drops hidden blocks itself.
-	const hood = focusNeighborhood(document, selected);
 	return {
 		verbs: verbsFor(purpose).map(verb => ({ id: verb.id, label: verb.label, key: verb.key })),
 		status:
@@ -496,12 +498,6 @@ function flowOf(document: DiagramDocument, selected: string | undefined): WebFlo
 		progress: progressLabel(document),
 		nextOpen: nextOpenBlock(document, selected),
 		next: nextStep(document, selected ? findBlockLocation(document.root, selected)?.block : undefined),
-		focus: {
-			parent: hood.parent?.id ?? null,
-			inputs: hood.inputs.map(link => ({ id: link.block.id, label: link.label, direction: link.direction, kind: link.kind })),
-			outputs: hood.outputs.map(link => ({ id: link.block.id, label: link.label, direction: link.direction, kind: link.kind })),
-			children: hood.children.map(child => child.id),
-		},
 		useCandidates:
 			selected === undefined
 				? []
@@ -631,12 +627,21 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 // Operations
 // ---------------------------------------------------------------------------
 
+/** A composed request as the page previews it before anything is sent. */
+export interface WebPreview {
+	label: string;
+	text: string;
+	size: number;
+	related?: string;
+	request?: { verb: string; id: string };
+}
+
 type OpResult =
 	| {
 			ok: true;
 			changed: boolean;
 			message: string;
-			preview?: { label: string; text: string; size: number; related?: string; request?: { verb: string; id: string } };
+			preview?: WebPreview;
 	  }
 	| { ok: false; error: string; status?: number; needsSave?: boolean };
 

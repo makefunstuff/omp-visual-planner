@@ -1,16 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
 	BatchError,
-	FOCUS_CENTER,
 	composeBatch,
-	focusCounts,
-	focusNeighborhood,
-	focusTarget,
-	moveFocusCursor,
 	nextOpenBlock,
 	nextStatus,
 	nextStep,
-	normalizeFocusCursor,
 	outlineRows,
 	projectActions,
 	renderDispatch,
@@ -18,6 +12,7 @@ import {
 	useCandidates,
 	verbsFor,
 } from "../src/flow.ts";
+import { FOCUS_CENTER, focusCounts, focusNeighborhood, focusTarget, moveFocusCursor, normalizeFocusCursor } from "../src/focus.ts";
 import { PURPOSES, createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
 
 /** root: a (settled, children: a1 open), b (open) */

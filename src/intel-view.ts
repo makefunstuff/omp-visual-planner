@@ -7,6 +7,9 @@
  * control sequences before it is returned, and nothing is ever turned into
  * markup: a hover's markdown is read into parts, not rendered as HTML.
  */
+import type { RootContent } from "mdast";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { toString } from "mdast-util-to-string";
 import type { CodeLocation, OutlineSymbol, SymbolFacts } from "./code-intel.ts";
 import type { SourceInsight } from "./code-evidence.ts";
 
@@ -33,63 +36,30 @@ export type HoverPart =
 	| { kind: "text"; text: string }
 	| { kind: "rule" };
 
-const FENCE_OPEN = /^\s*(`{3,}|~{3,})\s*([\w+#.-]*)/;
-const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
-
-/** Inline markdown read as plain text: code spans, emphasis and links lose their markers. */
-export function plainInline(text: string): string {
-	return text
-		.replace(/`([^`]*)`/g, "$1")
-		.replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
-		.replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, "$2")
-		.replace(/(^|[^\w*])\*(?=\S)([^*]*?\S)\*(?!\w)/g, "$1$2")
-		.replace(/(^|[^\w])_(?=\S)([^_]*?\S)_(?!\w)/g, "$1$2")
-		.replace(/\\([\\`*_{}[\]()#+\-.!|>~])/g, "$1");
+/** A top-level markdown node as text: list items keep a line each, markers and inline markup dropped. */
+function textOf(node: RootContent): string {
+	if (node.type === "list") return node.children.map(item => `${node.ordered ? "1." : "-"} ${toString(item)}`).join("\n");
+	return toString(node);
 }
 
 /**
- * A hover's markdown as parts: fenced code with its language, prose paragraphs
- * with inline markers removed, and thematic breaks. An unclosed fence runs to
- * the end. Blank-line runs separate paragraphs; a paragraph keeps its line breaks
- * so list items stay on their own lines.
+ * A hover's markdown as parts: fenced code with its language, prose blocks as
+ * plain text, and thematic breaks between them. Parsed with mdast; an unclosed
+ * fence runs to the end, as CommonMark says.
  */
 export function hoverParts(hover: string): HoverPart[] {
 	const parts: HoverPart[] = [];
-	const lines = stripControls(hover).split("\n");
-	let paragraph: string[] = [];
-	const flush = (): void => {
-		if (paragraph.length > 0) parts.push({ kind: "text", text: paragraph.join("\n") });
-		paragraph = [];
-	};
-	for (let index = 0; index < lines.length; index += 1) {
-		const line = lines[index]!;
-		const fence = FENCE_OPEN.exec(line);
-		if (fence) {
-			flush();
-			const marker = fence[1]!;
-			const body: string[] = [];
-			index += 1;
-			while (index < lines.length && !lines[index]!.trim().startsWith(marker)) {
-				body.push(lines[index]!);
-				index += 1;
-			}
-			while (body.length > 0 && body.at(-1)!.trim() === "") body.pop();
-			const language = fence[2]!.toLowerCase();
-			if (body.length > 0) parts.push({ kind: "code", language: language.length > 0 ? language : undefined, code: body.join("\n") });
-			continue;
-		}
-		if (RULE.test(line)) {
-			flush();
+	for (const node of fromMarkdown(stripControls(hover)).children) {
+		if (node.type === "code") {
+			const code = node.value.replace(/\s+$/, "");
+			if (code.length > 0) parts.push({ kind: "code", language: node.lang?.toLowerCase() || undefined, code });
+		} else if (node.type === "thematicBreak") {
 			if (parts.length > 0 && parts.at(-1)!.kind !== "rule") parts.push({ kind: "rule" });
-			continue;
+		} else {
+			const text = textOf(node).trim();
+			if (text.length > 0) parts.push({ kind: "text", text });
 		}
-		if (line.trim() === "") {
-			flush();
-			continue;
-		}
-		paragraph.push(plainInline(line.trimEnd()));
 	}
-	flush();
 	while (parts.at(-1)?.kind === "rule") parts.pop();
 	return parts;
 }
