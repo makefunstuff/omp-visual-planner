@@ -8,10 +8,9 @@
  * sits inside. Both are syntax, and `limitation` says so — nothing here claims
  * to be a semantic reference.
  *
- * No language server is consulted. OMP reaches LSP through its `lsp` tool,
- * which starts servers and needs an agent tool context; there is no read-only
- * position query to reuse, so semantic references, types and diagnostics are
- * reported as unavailable rather than guessed at.
+ * No language server is consulted here: this answer is syntax only and never
+ * starts a server. Semantic lookups (hover, definition, references, outline)
+ * live in `code-intel.ts` and run only when a person asks for one.
  *
  * Reads go through `readWorkspaceFile`, so only files inside the workspace are
  * reachable and the viewer's byte and line limits still bound the work.

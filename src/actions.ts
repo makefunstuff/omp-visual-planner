@@ -30,7 +30,9 @@ export type ActionKind =
 	| "execute"
 	| "replan"
 	| "prune"
-	| "change";
+	| "change"
+	| "sync"
+	| "clarify";
 
 export type JournalState =
 	| "pending"
@@ -225,7 +227,7 @@ export function retentionErrors(
 	document: DiagramDocument,
 	replacement: DiagramDocument | Block | Diagram,
 ): string[] {
-	if (request.intent !== "replan" && request.intent !== "prune") return [];
+	if (request.intent !== "replan" && request.intent !== "prune" && request.intent !== "sync") return [];
 	const scoped = scopedBlocks(document, request.scope);
 	if (!scoped) return [];
 	const survivors = new Set([...walkBlocks(replacementRoots(replacement))].map(block => block.id));

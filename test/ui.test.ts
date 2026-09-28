@@ -255,3 +255,39 @@ describe("source references", () => {
 		expect(formatSourceRef({ path: "a.ts" })).toBe("a.ts");
 	});
 });
+
+describe("fingerprints across a proposal", () => {
+	function setup() {
+		const document = createDocument({ title: "Service" });
+		document.root.blocks.push(createBlock({ id: "api", title: "API", sources: [{ path: "src/a.ts", startLine: 1, endLine: 2, digest: "old" }] }));
+		const replacement = createBlock({
+			id: "api",
+			title: "API",
+			sources: [
+				{ path: "src/a.ts", startLine: 1, endLine: 2, digest: "new" },
+				{ path: "src/b.ts", digest: "b" },
+			],
+		});
+		return { document, replacement };
+	}
+
+	test("a carried-forward citation keeps the fingerprint it was made with; a new one keeps its own", () => {
+		const { document, replacement } = setup();
+		acceptReplacement(document, replacement, "api", { intent: "enhance", scope: { kind: "block", id: "api" } });
+		expect(document.root.blocks[0]!.sources.map(source => source.digest)).toEqual(["old", "b"]);
+	});
+
+	test("a Sync on the block re-fingerprints what it re-cites", () => {
+		const { document, replacement } = setup();
+		acceptReplacement(document, replacement, "api", { intent: "sync", scope: { kind: "block", id: "api" } });
+		expect(document.root.blocks[0]!.sources.map(source => source.digest)).toEqual(["new", "b"]);
+	});
+
+	test("a changed fingerprint alone is not a change the review shows", () => {
+		const before = createDocument({ title: "Service" });
+		before.root.blocks.push(createBlock({ id: "api", title: "API", sources: [{ path: "src/a.ts", startLine: 1, endLine: 2, digest: "old" }] }));
+		const after = structuredClone(before);
+		after.root.blocks[0]!.sources[0]!.digest = "new";
+		expect(diffDocuments(before, after).modified).toEqual([]);
+	});
+});

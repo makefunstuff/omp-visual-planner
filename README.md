@@ -16,6 +16,8 @@ An OMP extension for planning systems and mapping codebases as nested blocks. It
 - **Change plans for an existing repository.** `/diagram change` opens a new plan under `.omp-visual-planner/changes/`, oriented by the codebase map and the blocks marked on it; the model reads the code first and each block cites the files it changes. See [Change an existing codebase](#change-an-existing-codebase).
 - **Two surfaces.** The terminal TUI and a loopback web view of the same session, sharing focus, undo and the store.
 - **Evidence over confidence.** Every block is `observed`, `inferred` or `unknown`; `observed` needs a source, and explore can hide what is not grounded.
+- **Drift you can see and resolve.** Every citation keeps a fingerprint of the lines it cited. `D` (terminal) or **Drift** (browser) checks them against the code and lists what moved, changed or went missing, plus files changed since the recorded git baseline that no block cites. See [Drift](#drift).
+- **Requests on selected code lines.** In either file viewer, select lines and **Request a change** or **Ask** about them: the planner adds a block citing them and previews its request. Identifiers ask OMP's language server for hover, definition and references; **Outline** lists the file's symbols.
 - **A skill for when no document is open.** [`skills/decompose`](skills/decompose/SKILL.md): the same decomposition as nested bullets in one markdown file, with `/tree` as the history.
 
 The skill is the agent plus `/tree`, which OMP and pi already have. The agent edits one markdown file of nested bullets, the way Logseq nests blocks. `/tree` is how you go back to an earlier decomposition. No second integration. OMP loads the skill with this plugin. For pi, link the directory:
@@ -193,9 +195,20 @@ Blocks the prompt already names are not asked about: what the scope uses, what u
 
 A proposal replaces a block, its nested diagram, or the project only after review. The exact request is previewed first; `c` copies it to the OMP prompt editor and `w` exports it instead of submitting (in the browser, **Copy** puts it on the clipboard). A model stages its response through `visual_planner_propose`; `R` in the terminal, or the panel that opens in the browser, shows every changed field before and after, then the blocks and links it adds or removes. Rejection leaves the document unchanged. Acceptance is one undoable, unsaved edit; press `s` to write it. Replan and prune must retain blocks already settled by the human under the same IDs. Execute submits work to OMP, not a proposal, and does not mark a block done.
 
-Every block marks its evidence `observed`, `inferred`, or `unknown`. `observed` requires a source reference, which may include a line range. Discovery prompts require the agent to read cited files. Browser **Inspect syntax** reports Tree-sitter ranges and node kinds, not LSP references, types, or diagnostics. Browser file reads stay inside the workspace after symlink resolution.
+Every block marks its evidence `observed`, `inferred`, or `unknown`. `observed` requires a source reference, which may include a line range. Discovery prompts require the agent to read cited files. **Inspect syntax** reports Tree-sitter ranges and node kinds. Types, definitions and references come only from the language server, queried when you click an identifier (browser), press `s` in the terminal source view, or ask for the **Outline** (`o`); opening a file never starts a server. Browser file reads stay inside the workspace after symlink resolution.
 
 The proposal tool checks the request token, scope, document identity, revision, on-disk digest, and session branch. It stages data; it cannot apply a change or write a file. `visual_planner_read({ scope? })` exposes the active document or one scope to the model.
+
+## Drift
+
+Code changed outside the planner leaves blocks claiming what the code no longer says. Each citation stores a sha256 of the lines it cited (trailing whitespace ignored) when it is made — added by hand, carried in a staged proposal, or created from selected lines. Accepting a proposal keeps a carried-forward citation's old fingerprint, so a proposal cannot hide drift; only a Sync on that block re-fingerprints what it re-cites.
+
+The check is manual: `D` in the terminal, **Drift** in the browser. Each citation reads `fresh`, `moved` (same lines elsewhere), `changed`, `missing`, `unstamped` (no fingerprint yet) or `unchecked` (unreadable). It also lists files changed since the document's baseline commit, plus new untracked files, that no block cites. Then:
+
+- **Re-anchor** points moved citations at where their lines are now.
+- **Still true** (`y` on a changed citation in the terminal) accepts the new lines as the fingerprint.
+- **Sync** sends one request per drifted block — in parallel when there are several — asking the agent to re-read the code and update the block; each proposal is reviewed on its own, and status stays yours.
+- **Record baseline** fingerprints citations that have none and restarts uncited-change tracking from the current HEAD.
 
 ## Files and development
 

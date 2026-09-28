@@ -455,6 +455,32 @@ describe("mockups on disk", () => {
 	});
 });
 
+describe("fingerprints and baseline on disk", () => {
+	test("a citation's digest and the document baseline survive save and reload", async () => {
+		const dir = await workspace();
+		const path = defaultDocumentPath(dir);
+		const document = sample();
+		document.root.blocks[0]!.sources = [{ path: "src/a.ts", startLine: 3, endLine: 5, digest: "abc" }, { path: "src" }];
+		document.baseline = { commit: "0123456789abcdef", at: "2026-09-28T10:00:00.000Z" };
+		const store = new DocumentStore(type);
+		store.adopt(document, path);
+		expect((await store.save()).ok).toBe(true);
+		const reopened = new DocumentStore(type);
+		expect((await reopened.open(path)).ok).toBe(true);
+		expect(reopened.require().root.blocks[0]!.sources).toEqual([{ path: "src/a.ts", startLine: 3, endLine: 5, digest: "abc" }, { path: "src" }]);
+		expect(reopened.require().baseline).toEqual({ commit: "0123456789abcdef", at: "2026-09-28T10:00:00.000Z" });
+	});
+
+	test("a document replacement cannot change the baseline", () => {
+		const store = new DocumentStore(type);
+		const document = sample();
+		document.baseline = { at: "2026-09-28T10:00:00.000Z" };
+		store.adopt(document, "/tmp/architecture.json");
+		store.transact(current => applyReplacement(current, { ...sample(), baseline: { commit: "forged", at: "2030-01-01T00:00:00.000Z" } }, undefined));
+		expect(store.require().baseline).toEqual({ at: "2026-09-28T10:00:00.000Z" });
+	});
+});
+
 describe("digest helper", () => {
 	test("digest is stable and content-addressed", () => {
 		expect(digestOfText("a")).toBe(digestOfText("a"));

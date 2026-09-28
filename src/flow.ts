@@ -31,6 +31,7 @@ import {
 	descendantIds,
 	eachBlock,
 	findBlockLocation,
+	createBlock,
 	formatSourceRef,
 } from "./model.ts";
 import {
@@ -42,8 +43,9 @@ import {
 	displayPath,
 	freshChangePath,
 } from "./store.ts";
+import type { SyncContext } from "./drift.ts";
 
-export type VerbId = "refine" | "breakdown" | "execute" | "replan" | "prune";
+export type VerbId = "refine" | "breakdown" | "execute" | "replan" | "prune" | "sync" | "clarify";
 
 export interface Verb {
 	id: VerbId;
@@ -56,6 +58,10 @@ export interface Verb {
 const REFINE: Verb = { id: "refine", label: "Refine", key: "r", intent: "enhance", kind: "enhance" };
 const REPLAN: Verb = { id: "replan", label: "Replan", key: "t", intent: "replan", kind: "replan" };
 const EXECUTE: Verb = { id: "execute", label: "Execute", key: "X", intent: "execute", kind: "execute" };
+/** Re-grounds a block whose cited code drifted. Offered by the drift views, not by `verbsFor`. */
+export const SYNC: Verb = { id: "sync", label: "Sync", key: "Y", intent: "sync", kind: "sync" };
+/** Answers a question about cited lines. Offered by the file viewers, not by `verbsFor`. */
+export const CLARIFY: Verb = { id: "clarify", label: "Ask", key: "Q", intent: "clarify", kind: "clarify" };
 
 /** The block verbs a document offers, in display order. */
 export function verbsFor(purpose: Purpose): Verb[] {
@@ -76,6 +82,33 @@ export function verbsFor(purpose: Purpose): Verb[] {
 				REPLAN,
 			];
 	}
+}
+
+/** A verb by id: every verb `verbsFor` offers, plus Sync and Ask. */
+export function verbById(purpose: Purpose, id: string): Verb | undefined {
+	if (id === "sync") return SYNC;
+	if (id === "clarify") return CLARIFY;
+	return verbsFor(purpose).find(verb => verb.id === id);
+}
+
+export type LineRequestKind = "change" | "ask";
+
+/** The block a request on selected code lines adds: a change to make, or a question to answer. */
+export function lineRequestBlock(input: { kind: LineRequestKind; text: string; source: SourceRef }): Block {
+	const first = input.text.split("\n").find(line => line.trim().length > 0)?.trim() ?? "";
+	return input.kind === "change"
+		? createBlock({ title: clip(first, 60), description: input.text.trim(), sources: [input.source], evidence: "observed" })
+		: createBlock({
+				title: clip(`Q: ${first}`, 60),
+				description: `Question: ${input.text.trim()}`,
+				sources: [input.source],
+				evidence: "unknown",
+			});
+}
+
+/** The request a line request previews: Ask for a question, the purpose's Refine for a change. */
+export function lineRequestVerb(purpose: Purpose, kind: LineRequestKind): Verb {
+	return kind === "ask" ? CLARIFY : verbsFor(purpose).find(verb => verb.id === "refine")!;
 }
 
 /** Statuses a human steps through with one key; brainstorm ideas have none. */
@@ -608,6 +641,8 @@ export function composeRequest(input: {
 	related?: RelatedContext;
 	/** A change plan's map and starting points. */
 	change?: ComposeOptions["change"];
+	/** What drifted, for a Sync. */
+	drift?: SyncContext;
 }): ComposedRequest {
 	const { document, kind, intent, scope, codeRoot } = input;
 	const requestId = input.requestId ?? crypto.randomUUID();
@@ -617,7 +652,13 @@ export function composeRequest(input: {
 		intent,
 		kind === "execute"
 			? { codeRoot }
-			: { request: { requestId, baseRevision: document.revision }, codeRoot, related: input.related, change: input.change },
+			: {
+					request: { requestId, baseRevision: document.revision },
+					codeRoot,
+					related: input.related,
+					change: input.change,
+					drift: input.drift,
+				},
 	);
 	return {
 		request: {
@@ -653,6 +694,7 @@ export function changeContext(
 	documentPath: string | undefined,
 	cwd: string,
 	markedIds: readonly string[],
+	selected: readonly SourceRef[] = [],
 ): NonNullable<ComposeOptions["change"]> {
 	const exploring = document?.purpose === "explore" ? document : undefined;
 	const map = exploring !== undefined && documentPath !== undefined ? documentPath : codebaseMapPath(cwd);
@@ -667,6 +709,9 @@ export function changeContext(
 				sources: [...location.block.sources],
 			});
 		}
+	}
+	for (const source of selected) {
+		startingPoints.push({ path: formatSourceRef(source), description: "selected in the file viewer", sources: [source] });
 	}
 	return { ...(map !== undefined ? { mapPath: displayPath(map, cwd) } : {}), startingPoints };
 }
@@ -706,6 +751,8 @@ export function composeBatch(input: {
 	batchId?: string;
 	requestIds?: readonly string[];
 	related?: ReadonlyMap<string, RelatedContext>;
+	/** What drifted, for a Sync batch. */
+	drift?: SyncContext;
 }): ComposedBatch {
 	const { document, verb, ids } = input;
 	if (verb.kind === "execute") throw new BatchError("execute does not run as a batch; use Execute on the parent");
@@ -732,6 +779,7 @@ export function composeBatch(input: {
 			codeRoot: input.codeRoot,
 			related: input.related?.get(id),
 			returnVia: "output",
+			drift: input.drift,
 		});
 		const path = join(batchDir(batchId), `${requestId}.md`);
 		files.push({ path, text: composed.text });

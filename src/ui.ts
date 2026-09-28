@@ -33,11 +33,34 @@ import {
 	retentionErrors,
 } from "./actions.ts";
 import { blockToMarkdown, markdownToBlock } from "./block-markdown.ts";
+import { inspectSource } from "./code-evidence.ts";
+import { type CodeIntel, identifiersOn } from "./code-intel.ts";
 import { type ComposeOptions, type RelatedContext, ScopeError } from "./compose.ts";
+import {
+	type CitationCheck,
+	type DriftHolder,
+	type SyncContext,
+	carryDigests,
+	changedCheck,
+	checkDrift,
+	currentDigest,
+	driftCounts,
+	driftedBlockIds,
+	prepareBaseline,
+	reanchorMoved,
+	refKey,
+	stampMissing,
+	syncContext,
+	syncTargets,
+} from "./drift.ts";
 import {
 	BatchError,
 	type ComposedBatch,
+	type LineRequestKind,
 	type Verb,
+	SYNC,
+	lineRequestBlock,
+	lineRequestVerb,
 	changeContext,
 	composeBatch,
 	type ComposedRequest,
@@ -101,6 +124,7 @@ import {
 	addEdge,
 	addUse,
 	createBlock,
+	createDiagram,
 	createEdge,
 	cycleBlock,
 	descendantIds,
@@ -109,6 +133,7 @@ import {
 	extractBlock,
 	extractTargets,
 	findBlockLocation,
+	findDiagram,
 	findDiagramPath,
 	findOwnedDiagram,
 	moveBlockInOrder,
@@ -153,6 +178,10 @@ export interface ScreenOptions {
 	externalEditor?: (text: string, name: string) => Promise<string | null>;
 	/** Ranks outside blocks for a previewed request; absent in tests and when no session context exists. */
 	rankRelated?: RelatedRanker;
+	/** Where the latest drift check lives; the planner session shares it with web mode. */
+	driftHolder?: DriftHolder;
+	/** Language-server lookups for the source view; absent in tests. */
+	codeIntel?: CodeIntel;
 }
 
 export interface SharedFocus {
@@ -223,6 +252,23 @@ export function placeNewBlock(diagram: Diagram, selectedId?: string): BlockPosit
 	return { x: candidate.x, y: candidate.y };
 }
 
+/**
+ * Place a block a line request created: inside the focused block when there is
+ * one, otherwise in the diagram on screen. Mutates a draft.
+ */
+export function insertLineBlock(root: Diagram, block: Block, parentId: string | undefined, diagramId: string): void {
+	const owner = parentId === undefined ? undefined : findBlockLocation(root, parentId)?.block;
+	if (owner) {
+		owner.children ??= createDiagram();
+		block.position = placeNewBlock(owner.children, undefined);
+		addBlock(root, owner.children.id, block);
+		return;
+	}
+	const target = diagramId === root.id ? root : (findDiagram(root, diagramId) ?? root);
+	block.position = placeNewBlock(target, undefined);
+	addBlock(root, target.id, block);
+}
+
 const GRID_COLUMNS = 3;
 const GRID_GAP_X = 4;
 const GRID_GAP_Y = 2;
@@ -272,9 +318,29 @@ export function acceptReplacement(
 ): void {
 	const refused = retentionErrors(request, document, replacement);
 	if (refused.length > 0) throw new Error(refused.join("; "));
+	// A citation carried forward keeps the fingerprint it was made with, so drift
+	// stays visible; only a Sync on the block re-fingerprints what it re-cites.
+	const prior = new Map<string, Map<string, string | undefined>>();
+	for (const { block } of eachBlock(document.root)) {
+		prior.set(block.id, new Map(block.sources.map(source => [refKey(source), source.digest])));
+	}
 	// Replace first: a document-scope proposal swaps `document.root` itself, so the
 	// root to lay out must be read after the replacement, not before it.
 	const added = applyReplacement(document, replacement, targetId);
+	const target = request.scope.kind === "block" ? request.scope.id : undefined;
+	for (const { block, ancestors } of eachBlock(document.root)) {
+		const isSyncTarget =
+			request.intent === "sync" && target !== undefined && (block.id === target || ancestors.some(ancestor => ancestor.id === target));
+		const before = prior.get(block.id);
+		if (isSyncTarget || before === undefined) continue;
+		for (const source of block.sources) {
+			const key = refKey(source);
+			if (!before.has(key)) continue;
+			const digest = before.get(key);
+			if (digest === undefined) delete source.digest;
+			else source.digest = digest;
+		}
+	}
 	layoutNewBlocks(document.root, added);
 }
 
@@ -486,7 +552,12 @@ export function diffDocuments(before: DiagramDocument, after: DiagramDocument): 
 				diff.added.push({ id, title: block.title, path, ...(block.surface !== undefined ? { surface: block.surface } : {}) });
 				continue;
 			}
-			const fields = BLOCK_FIELDS.filter(field => JSON.stringify(previous[field]) !== JSON.stringify(block[field]));
+			// A re-fingerprint is not a change a reviewer needs to see.
+			const fields = BLOCK_FIELDS.filter(field =>
+				field === "sources"
+					? fieldText(previous, field, nameBefore) !== fieldText(block, field, nameAfter)
+					: JSON.stringify(previous[field]) !== JSON.stringify(block[field]),
+			);
 			if (fields.length === 0) continue;
 			const changes = fields.map(field => ({
 				field,
@@ -711,13 +782,23 @@ export function renderSourceLines(
 	path: string,
 	firstLine: number,
 	width: number,
+	/** The source view's cursor line and selected range, drawn in a mark column; omitted elsewhere. */
+	marks?: { cursor: number; from: number; to: number },
 ): string[] {
 	const lines = highlightCode(code, getLanguageFromPath(path), theme);
 	const gutter = String(firstLine + Math.max(0, lines.length - 1)).length;
-	const bodyWidth = Math.max(1, width - gutter - 1);
+	const bodyWidth = Math.max(1, width - gutter - 1 - (marks ? 2 : 0));
 	return lines.map((line, index) => {
-		const number = theme.fg("muted", String(firstLine + index).padStart(gutter));
-		return `${number} ${truncateToWidth(line, bodyWidth)}`;
+		const lineNumber = firstLine + index;
+		const number = theme.fg("muted", String(lineNumber).padStart(gutter));
+		const mark = !marks
+			? ""
+			: lineNumber === marks.cursor
+				? `${theme.fg("accent", "›")} `
+				: lineNumber >= marks.from && lineNumber <= marks.to
+					? `${theme.fg("accent", "┃")} `
+					: "  ";
+		return `${mark}${number} ${truncateToWidth(line, bodyWidth)}`;
 	});
 }
 
@@ -809,6 +890,8 @@ interface PreviewPending {
 	controller?: AbortController;
 	/** A change plan's map and starting points, fixed when it was previewed. */
 	change?: ComposeOptions["change"];
+	/** What drifted, for a Sync; fixed when it was previewed. */
+	drift?: SyncContext;
 }
 
 interface Override {
@@ -817,6 +900,7 @@ interface Override {
 	/** A new document to create and save before the request is composed. */
 	start?: DocumentStart;
 	change?: ComposeOptions["change"];
+	drift?: SyncContext;
 }
 
 /** A previewed batch: one request per marked block, tokens fixed at preview time. */
@@ -831,6 +915,7 @@ interface BatchPreviewPending {
 	summary: string;
 	controller?: AbortController;
 	composed: ComposedBatch;
+	drift?: SyncContext;
 }
 
 interface SourceView {
@@ -839,8 +924,19 @@ interface SourceView {
 	/** Raw file lines; only visible lines are highlighted on render. */
 	lines: string[];
 	offset: number;
+	/** 1-based line the source view's cursor is on. */
+	cursor: number;
+	/** Where a range selection started (`v`); undefined when only the cursor line is selected. */
+	anchor?: number;
 	path?: string;
 	error?: string;
+}
+
+/** The lines a source view's action covers: the cursor line, or the range from the anchor. */
+function sourceSelection(view: SourceView): [number, number] {
+	return view.anchor === undefined
+		? [view.cursor, view.cursor]
+		: [Math.min(view.anchor, view.cursor), Math.max(view.anchor, view.cursor)];
 }
 
 export class DiagramScreen implements Component {
@@ -878,9 +974,12 @@ export class DiagramScreen implements Component {
 	#published = "";
 	/** Redraws once a second while the agent works, so the elapsed clock and spinner move. */
 	#ticker: ReturnType<typeof setInterval> | undefined;
+	/** The latest drift check; shared with web mode through the session when one is passed in. */
+	readonly #drift: DriftHolder;
 
 	constructor(options: ScreenOptions, done: (result: ScreenResult) => void, start?: ScreenStart) {
 		this.#options = options;
+		this.#drift = options.driftHolder ?? {};
 		this.#done = result => {
 			this.#stopTicker();
 			this.#unsubscribe?.();
@@ -1093,21 +1192,8 @@ export class DiagramScreen implements Component {
 			if (key === "escape" || key === "ctrl+c") {
 				this.#sourceView = undefined;
 				this.#message = "closed the source view";
-			} else if (!view.error) {
-				const visible = Math.max(1, Math.min(layoutFor(this.#lastWidth, this.#options.tui.terminal.rows).bodyHeight, 100) - 2);
-				const last = Math.max(0, view.lines.length - visible);
-				switch (key) {
-					case "j":
-					case "down": view.offset = Math.min(last, view.offset + 1); break;
-					case "k":
-					case "up": view.offset = Math.max(0, view.offset - 1); break;
-					case "pageDown": view.offset = Math.min(last, view.offset + visible); break;
-					case "pageUp": view.offset = Math.max(0, view.offset - visible); break;
-					case "g":
-					case "home": view.offset = 0; break;
-					case "G":
-					case "end": view.offset = last; break;
-				}
+			} else if (!view.error && key !== undefined) {
+				this.#handleSourceKey(view, key);
 			}
 			this.#options.tui.requestRender();
 			return;
@@ -1240,6 +1326,9 @@ export class DiagramScreen implements Component {
 				return true;
 			case "?":
 				this.#openHelp();
+				return true;
+			case "D":
+				void this.#checkDrift();
 				return true;
 			default:
 				return false;
@@ -1479,6 +1568,8 @@ export class DiagramScreen implements Component {
 				this.#message = "that block was deleted while you were editing it";
 			} else {
 				const next = markdownToBlock(after, current);
+				// Unchanged refs keep their fingerprint, so editing text cannot hide drift.
+				const sources = await stampMissing(this.#options.cwd, carryDigests(current.sources, next.sources));
 				this.#transact(document => {
 					const target = findBlockLocation(document.root, blockId)?.block;
 					if (!target) throw new Error("that block was deleted while you were editing it");
@@ -1486,7 +1577,7 @@ export class DiagramScreen implements Component {
 					target.description = next.description;
 					target.expectedOutput = next.expectedOutput;
 					target.acceptanceCriteria = next.acceptanceCriteria;
-					target.sources = next.sources;
+					target.sources = sources;
 					target.actions = { enhance: next.enhance, execute: next.execute };
 				}, `updated "${next.title}" from your editor`);
 			}
@@ -1920,29 +2011,36 @@ export class DiagramScreen implements Component {
 			return true;
 		}
 		if (key === "o" && field.startsWith("source")) {
-			this.#openTextPrompt("add source reference (path or path:10-40)", "", value => {
+			this.#openTextPrompt("add source reference (path or path:10-40)", "", value => void (async () => {
 				const source = parseSourceRef(value);
 				const block = this.#block;
 				if (source.path.length === 0 || !block) return;
+				const [stamped] = await stampMissing(this.#options.cwd, [source]);
 				this.#transact(document => {
-					findBlockLocation(document.root, block.id)?.block.sources.push(source);
+					findBlockLocation(document.root, block.id)?.block.sources.push(stamped!);
 				}, `added source ${source.path}`);
-			});
+			})());
+			return true;
+		}
+		if (key === "y" && field.startsWith("source:") && field !== "source:add") {
+			const block = this.#block;
+			if (block) void this.#markStillTrue(block.id, Number(field.slice("source:".length)));
 			return true;
 		}
 		if (key === "m" && field.startsWith("source:") && field !== "source:add") {
 			const source = this.#block?.sources[Number(field.slice("source:".length))];
 			if (source) {
-				this.#openTextPrompt("edit source reference", formatSourceRef(source), value => {
+				this.#openTextPrompt("edit source reference", formatSourceRef(source), value => void (async () => {
 					const next = parseSourceRef(value);
 					const block = this.#block;
 					const sourceIndex = Number(field.slice("source:".length));
 					if (next.path.length === 0 || !block) return;
+					const [stamped] = await stampMissing(this.#options.cwd, [next]);
 					this.#transact(document => {
 						const target = findBlockLocation(document.root, block.id);
-						if (target?.block.sources[sourceIndex]) target.block.sources[sourceIndex] = next;
+						if (target?.block.sources[sourceIndex]) target.block.sources[sourceIndex] = stamped!;
 					}, `updated source ${next.path}`);
-				});
+				})());
 			}
 			return true;
 		}
@@ -2008,13 +2106,14 @@ export class DiagramScreen implements Component {
 			return;
 		}
 		if (field === "source:add") {
-			this.#openTextPrompt("add source reference (path or path:10-40)", "", value => {
+			this.#openTextPrompt("add source reference (path or path:10-40)", "", value => void (async () => {
 				const source = parseSourceRef(value);
 				if (source.path.length === 0 || !block) return;
+				const [stamped] = await stampMissing(this.#options.cwd, [source]);
 				this.#transact(document => {
-					findBlockLocation(document.root, block.id)?.block.sources.push(source);
+					findBlockLocation(document.root, block.id)?.block.sources.push(stamped!);
 				}, `added source ${source.path}`);
-			});
+			})());
 			return;
 		}
 		if (field.startsWith("source:") && block) {
@@ -2143,6 +2242,7 @@ export class DiagramScreen implements Component {
 					source,
 					lines: [],
 					offset: 0,
+					cursor: 1,
 					error: `${absolute} is ${info.size} bytes; the source pane refuses files over ${MAX_VIEWER_FILE_BYTES}`,
 				};
 				this.#options.tui.requestRender();
@@ -2152,17 +2252,362 @@ export class DiagramScreen implements Component {
 			const lines = text.split("\n");
 			const visible = Math.max(1, Math.min(layoutFor(this.#lastWidth, this.#options.tui.terminal.rows).bodyHeight, 100) - 2);
 			const offset = Math.min(Math.max(0, (source.startLine ?? 1) - 4), Math.max(0, lines.length - visible));
-			this.#sourceView = { title, source, lines, offset, path: absolute };
+			const cursor = Math.min(Math.max(1, source.startLine ?? 1), Math.max(1, lines.length));
+			this.#sourceView = { title, source, lines, offset, cursor, path: absolute };
 		} catch (error) {
 			this.#sourceView = {
 				title,
 				source,
 				lines: [],
 				offset: 0,
+				cursor: 1,
 				error: `cannot read ${absolute}: ${error instanceof Error ? error.message : String(error)}`,
 			};
 		}
 		this.#options.tui.requestRender();
+	}
+
+	/** Keys in a readable source view: move the cursor, select a range, act on the lines. */
+	#handleSourceKey(view: SourceView, key: string): void {
+		const visible = Math.max(1, Math.min(layoutFor(this.#lastWidth, this.#options.tui.terminal.rows).bodyHeight, 100) - 2);
+		const count = Math.max(1, view.lines.length);
+		const moveTo = (line: number): void => {
+			view.cursor = Math.min(count, Math.max(1, line));
+			if (view.cursor - 1 < view.offset) view.offset = view.cursor - 1;
+			else if (view.cursor > view.offset + visible) view.offset = view.cursor - visible;
+		};
+		switch (key) {
+			case "j":
+			case "down":
+				return moveTo(view.cursor + 1);
+			case "k":
+			case "up":
+				return moveTo(view.cursor - 1);
+			case "pageDown":
+				return moveTo(view.cursor + visible);
+			case "pageUp":
+				return moveTo(view.cursor - visible);
+			case "g":
+			case "home":
+				return moveTo(1);
+			case "G":
+			case "end":
+				return moveTo(count);
+			case "v":
+				view.anchor = view.anchor === undefined ? view.cursor : undefined;
+				return;
+		}
+		if (!["c", "a", "s", "o", "i"].includes(key)) return;
+		const rel = displayPath(view.path ?? resolvePath(this.#options.cwd, view.source.path), this.#options.cwd);
+		if (isAbsolute(rel)) {
+			this.#message = "only files inside the workspace can be cited";
+			return;
+		}
+		const [from, to] = sourceSelection(view);
+		const range: SourceRef = { path: rel, startLine: from, endLine: to };
+		switch (key) {
+			case "c":
+				if (this.#document.purpose === "explore") {
+					this.#sourceView = undefined;
+					this.#beginChange(undefined, [range]);
+					return;
+				}
+				this.#openTextPrompt(`what should change in ${rel}:${from}-${to}?`, "", text => void this.#lineRequest("change", text, range));
+				return;
+			case "a":
+				this.#openTextPrompt(`what do you want to know about ${rel}:${from}-${to}?`, "", text => void this.#lineRequest("ask", text, range));
+				return;
+			case "s": {
+				const identifiers = identifiersOn(view.lines[view.cursor - 1] ?? "");
+				if (identifiers.length === 0) {
+					this.#message = "no identifier on this line";
+					return;
+				}
+				const line = view.cursor;
+				this.#modal = {
+					kind: "list",
+					title: `symbol on line ${line}`,
+					items: identifiers.map(identifier => identifier.name),
+					index: 0,
+					footer: "j/k select   Enter ask the language server   Esc close",
+					onEnter: index => {
+						this.#modal = undefined;
+						const identifier = identifiers[index];
+						if (identifier) void this.#showSymbol(rel, line, identifier);
+					},
+				};
+				return;
+			}
+			case "o":
+				void this.#showOutline(rel);
+				return;
+			case "i":
+				void inspectSource(this.#options.cwd, rel, view.cursor).then(insight => {
+					if (!insight.ok) this.#message = insight.error;
+					else if (insight.symbols && insight.symbols.length > 0) {
+						const block = insight.range ? ` · block ${insight.range.startLine}–${insight.range.endLine}` : "";
+						this.#message = `syntax: ${insight.symbols.map(symbol => symbol.kind).join(" › ")}${block}`;
+					} else this.#message = insight.limitation;
+					this.#options.tui.requestRender();
+				});
+				return;
+		}
+	}
+
+	/** A change request or a question on selected lines: a block citing them, then the preview of its request. */
+	async #lineRequest(kind: LineRequestKind, text: string, range: SourceRef): Promise<void> {
+		if (text.trim().length === 0) {
+			this.#message = kind === "change" ? "a change request needs text" : "a question needs text";
+			this.#options.tui.requestRender();
+			return;
+		}
+		const [source] = await stampMissing(this.#options.cwd, [range]);
+		const block = lineRequestBlock({ kind, text, source: source! });
+		const parentId = this.#selected !== undefined && findBlockLocation(this.#document.root, this.#selected) ? this.#selected : undefined;
+		const diagramId = this.#diagram.id;
+		this.#transact(document => insertLineBlock(document.root, block, parentId, diagramId), `added "${block.title}"`);
+		if (!findBlockLocation(this.#document.root, block.id)) return;
+		this.#sourceView = undefined;
+		if (parentId !== undefined) this.#collapsed.delete(parentId);
+		this.#focus(block.id);
+		const verb = lineRequestVerb(this.#document.purpose, kind);
+		this.#openPreview(verb.intent, { kind: verb.kind, scope: { kind: "block", id: block.id } });
+		this.#options.tui.requestRender();
+	}
+
+	/** Hover, definition and references for one identifier, as a list that opens the places it names. */
+	async #showSymbol(rel: string, line: number, identifier: { name: string; character: number }): Promise<void> {
+		const intel = this.#options.codeIntel;
+		if (!intel) {
+			this.#message = "language servers are not available in this session";
+			this.#options.tui.requestRender();
+			return;
+		}
+		this.#message = "asking the language server…";
+		this.#options.tui.requestRender();
+		const outcome = await intel.symbolAt(rel, line, identifier.character, new AbortController().signal);
+		if (!outcome.ok) {
+			this.#message = outcome.reason;
+			this.#options.tui.requestRender();
+			return;
+		}
+		const facts = outcome.value;
+		const targets: (SourceRef | undefined)[] = [];
+		const items: string[] = [];
+		for (const hoverLine of facts.hover.split("\n").filter(text => text.trim().length > 0).slice(0, 8)) {
+			items.push(`  ${hoverLine}`);
+			targets.push(undefined);
+		}
+		for (const [glyph, locations] of [["→", facts.definitions], ["←", facts.references]] as const) {
+			for (const location of locations) {
+				items.push(`${glyph} ${location.path}:${location.line}  ${location.preview}`);
+				targets.push({ path: location.path, startLine: location.line, endLine: location.line });
+			}
+		}
+		if (facts.truncated) {
+			items.push("… more references not shown");
+			targets.push(undefined);
+		}
+		if (items.length === 0) {
+			this.#message = `${outcome.server} knows nothing about ${identifier.name}`;
+			this.#options.tui.requestRender();
+			return;
+		}
+		this.#message = "";
+		this.#modal = {
+			kind: "list",
+			title: `${identifier.name} · ${outcome.server}`,
+			items,
+			index: 0,
+			footer: "j/k select   Enter open   Esc close",
+			onEnter: index => {
+				const target = targets[index];
+				if (!target) return;
+				this.#modal = undefined;
+				void this.#loadSource(target);
+			},
+		};
+		this.#options.tui.requestRender();
+	}
+
+	/** The file's symbols from its language server; Enter moves the cursor to one. */
+	async #showOutline(rel: string): Promise<void> {
+		const intel = this.#options.codeIntel;
+		if (!intel) {
+			this.#message = "language servers are not available in this session";
+			this.#options.tui.requestRender();
+			return;
+		}
+		this.#message = "asking the language server…";
+		this.#options.tui.requestRender();
+		const outcome = await intel.outline(rel, new AbortController().signal);
+		if (!outcome.ok) {
+			this.#message = outcome.reason;
+			this.#options.tui.requestRender();
+			return;
+		}
+		if (outcome.value.length === 0) {
+			this.#message = `${outcome.server} lists no symbols in ${rel}`;
+			this.#options.tui.requestRender();
+			return;
+		}
+		const symbols = outcome.value;
+		this.#message = "";
+		this.#modal = {
+			kind: "list",
+			title: `outline · ${outcome.server}`,
+			items: symbols.map(symbol => `${"  ".repeat(symbol.depth)}${symbol.kind} ${symbol.name}  :${symbol.startLine}`),
+			index: 0,
+			footer: "j/k select   Enter go to   Esc close",
+			onEnter: index => {
+				this.#modal = undefined;
+				const symbol = symbols[index];
+				const view = this.#sourceView;
+				if (!symbol || !view) return;
+				const visible = Math.max(1, Math.min(layoutFor(this.#lastWidth, this.#options.tui.terminal.rows).bodyHeight, 100) - 2);
+				view.cursor = Math.min(Math.max(1, view.lines.length), Math.max(1, symbol.startLine));
+				view.anchor = undefined;
+				view.offset = Math.max(0, Math.min(view.cursor - 1, view.lines.length - visible));
+			},
+		};
+		this.#options.tui.requestRender();
+	}
+
+	// ------------------------------------------------------------------
+	// Drift
+	// ------------------------------------------------------------------
+
+	/** `D`: check every citation against the code, then show what drifted. */
+	async #checkDrift(): Promise<void> {
+		this.#message = "checking cited code…";
+		this.#options.tui.requestRender();
+		this.#drift.drift = await checkDrift(this.#options.cwd, this.#document);
+		this.#message = "";
+		this.#openDriftMenu();
+		this.#options.tui.requestRender();
+	}
+
+	/** A drift action changed the document: check again so the menu shows what is left. */
+	async #afterDriftEdit(): Promise<void> {
+		const message = this.#message;
+		this.#drift.drift = await checkDrift(this.#options.cwd, this.#document);
+		this.#openDriftMenu();
+		this.#message = message;
+		this.#options.tui.requestRender();
+	}
+
+	#openDriftMenu(): void {
+		const report = this.#drift.drift;
+		if (!report) return;
+		const document = this.#document;
+		const counts = driftCounts(report);
+		const uncovered = report.uncovered;
+		const uncited = uncovered.ok ? String(uncovered.files.length) : "?";
+		const stale = report.revision !== document.revision || report.documentId !== document.id;
+		const clean = report.citations.every(check => check.state === "fresh") && uncovered.ok && uncovered.files.length === 0;
+		const title =
+			(clean
+				? "drift — every citation matches the code"
+				: `drift — ${counts.changed} changed · ${counts.missing} missing · ${counts.moved} moved · ${counts.unstamped} without a baseline · ${uncited} uncited changes`) +
+			(stale ? " · document edited since — D checks again" : "");
+		const choices: { label: string; run: () => void }[] = [];
+		const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? "" : "s"}`;
+		if (!clean) {
+			if (counts.moved > 0) {
+				choices.push({
+					label: `Re-anchor ${plural(counts.moved, "moved citation")}`,
+					run: () => {
+						let moved = 0;
+						this.#transact(draft => {
+							moved = reanchorMoved(draft, report);
+						}, `re-anchored ${plural(counts.moved, "moved citation")}`);
+						if (moved > 0) void this.#afterDriftEdit();
+					},
+				});
+			}
+			const targets = syncTargets(document, report);
+			const context = syncContext(document, report);
+			if (targets.length === 1) {
+				const id = targets[0]!;
+				const block = findBlockLocation(document.root, id)?.block;
+				choices.push({
+					label: `Sync "${block?.title || id}"`,
+					run: () => this.#openPreview("sync", { kind: "sync", scope: { kind: "block", id }, drift: context }),
+				});
+			} else if (targets.length > 1) {
+				choices.push({
+					label: `Sync ${targets.length} drifted blocks in parallel`,
+					run: () => this.#openBatchPreview(SYNC, targets, context),
+				});
+			}
+		}
+		choices.push({
+			label: `Record baseline (${plural(counts.unstamped, "citation")} without one; uncited changes restart from now)`,
+			run: () => void this.#recordBaseline(),
+		});
+		if (!clean) {
+			for (const check of report.citations) {
+				if (check.state === "fresh") continue;
+				const moved = check.movedTo ? ` → ${check.movedTo.startLine}-${check.movedTo.endLine}` : "";
+				choices.push({
+					label: `≠ ${check.title} — ${formatSourceRef(check.source)} ${check.state}${moved}`,
+					run: () => {
+						if (findBlockLocation(this.#document.root, check.blockId)) this.#focus(check.blockId);
+					},
+				});
+			}
+		}
+		if (uncovered.ok) {
+			for (const file of uncovered.files) {
+				choices.push({
+					label: `+ ${file} — no block cites it`,
+					run: () => {
+						this.#message = "place it: Map inside or Break down the block it belongs to, or add a block that cites it";
+					},
+				});
+			}
+		} else {
+			choices.push({ label: `uncited changes: ${uncovered.reason}`, run: () => this.#openDriftMenu() });
+		}
+		this.#modal = {
+			kind: "list",
+			title,
+			items: choices.map(choice => choice.label),
+			index: 0,
+			footer: "j/k select   Enter choose   Esc close",
+			onEnter: index => {
+				this.#modal = undefined;
+				choices[index]?.run();
+			},
+		};
+	}
+
+	async #recordBaseline(): Promise<void> {
+		const baseline = await prepareBaseline(this.#options.cwd, this.#document);
+		const at = baseline.commit === undefined ? "" : ` at ${baseline.commit.slice(0, 12)}`;
+		this.#transact(baseline.apply, `baseline recorded${at}; changed citations keep their flag`);
+		await this.#afterDriftEdit();
+	}
+
+	/** `y` on a changed citation: the code changed, but the block still describes it. */
+	async #markStillTrue(blockId: string, index: number): Promise<void> {
+		const check = changedCheck(this.#drift.drift, blockId, index);
+		if (!check) {
+			this.#message = "only a changed citation can be marked still true (D checks drift)";
+			return;
+		}
+		const digest = await currentDigest(this.#options.cwd, check.source);
+		if (digest === undefined) {
+			this.#message = "that citation cannot be read";
+			this.#options.tui.requestRender();
+			return;
+		}
+		this.#transact(document => {
+			const source = findBlockLocation(document.root, blockId)?.block.sources[index];
+			if (!source) throw new Error(`no source ${index} on that block`);
+			source.digest = digest;
+		}, `still true: ${formatSourceRef(check.source)}`);
+		await this.#afterDriftEdit();
 	}
 	/** A few syntax-highlighted lines of the focused block's first citation, loaded once per range. */
 	#citationLines(block: Block, width: number): string[] {
@@ -2322,8 +2767,8 @@ export class DiagramScreen implements Component {
 	 * Plan a change as a new plan document. The map and the blocks marked on it
 	 * are read first, because starting the document replaces the one on screen.
 	 */
-	#beginChange(goal?: string): void {
-		const change = changeContext(this.#document, this.#options.store.path, this.#options.cwd, [...this.#marked]);
+	#beginChange(goal?: string, lines: SourceRef[] = []): void {
+		const change = changeContext(this.#document, this.#options.store.path, this.#options.cwd, [...this.#marked], lines);
 		const start = (text: string): void => {
 			this.#marked.clear();
 			this.#openPreview("change", { kind: "change", scope: { kind: "project" }, start: { kind: "change", goal: text }, change });
@@ -2378,6 +2823,7 @@ export class DiagramScreen implements Component {
 				baseDigest: this.#options.store.diskDigest,
 				codeRoot,
 				change: override.change,
+				drift: override.drift,
 			});
 		} catch (error) {
 			this.#message = error instanceof ScopeError ? error.message : String(error);
@@ -2392,6 +2838,7 @@ export class DiagramScreen implements Component {
 			codeRoot,
 			save,
 			change: override.change,
+			drift: override.drift,
 		};
 		const preview = this.#preview;
 		const rank = this.#options.rankRelated;
@@ -2430,6 +2877,7 @@ export class DiagramScreen implements Component {
 					requestId,
 					related: outcome.context,
 					change: preview.change,
+					drift: preview.drift,
 				});
 				preview.related = outcome.context;
 			} catch (error) {
@@ -2499,6 +2947,7 @@ export class DiagramScreen implements Component {
 				requestId: preview.requestId,
 				related: preview.related,
 				change: preview.change,
+				drift: preview.drift,
 			});
 		} catch (error) {
 			this.#message = error instanceof ScopeError ? error.message : String(error);
@@ -2527,11 +2976,11 @@ export class DiagramScreen implements Component {
 			batchId: preview.batchId,
 			requestIds: preview.requestIds,
 			related: preview.related,
+			drift: preview.drift,
 		});
 	}
 
-	#openBatchPreview(verb: Verb): void {
-		const ids = [...this.#marked];
+	#openBatchPreview(verb: Verb, ids: string[] = [...this.#marked], drift?: SyncContext): void {
 		const codeRoot = codeRootFor(this.#options.cwd, undefined);
 		let composed: ComposedBatch;
 		try {
@@ -2542,6 +2991,7 @@ export class DiagramScreen implements Component {
 				branchKey: this.#options.branchKey,
 				baseDigest: this.#options.store.diskDigest,
 				codeRoot,
+				drift,
 			});
 		} catch (error) {
 			this.#message = error instanceof BatchError ? error.message : String(error);
@@ -2557,6 +3007,7 @@ export class DiagramScreen implements Component {
 			ranking: "done",
 			summary: "",
 			composed,
+			drift,
 		};
 		this.#batchPreview = preview;
 		const rank = this.#options.rankRelated;
@@ -2644,7 +3095,8 @@ export class DiagramScreen implements Component {
 			this.#options.tui.requestRender();
 			return;
 		}
-		this.#marked.clear();
+		// A Sync batch runs the drifted blocks, not the marked ones: the marks stay.
+		if (preview.verb.id !== "sync") this.#marked.clear();
 		this.#batchPreview = undefined;
 		this.#modal = undefined;
 		this.#done({ kind: "submit-batch", batch });
@@ -2805,6 +3257,9 @@ export class DiagramScreen implements Component {
 			row("a", "all actions, including whole-document replan and prune"),
 			row("R", "review a staged proposal: Enter accepts, r rejects"),
 			row("m", "mark / unmark for a parallel batch (a runs it)"),
+			row("D", "check drift: cited code that changed since it was cited"),
+			row("y", "on a changed citation: still true"),
+			row("source view", "v range · c request a change · a ask · s symbol · o outline · i syntax"),
 		]);
 		const document = section("Document", [
 			row("s", "save — nothing is written until you do"),
@@ -3156,6 +3611,7 @@ export class DiagramScreen implements Component {
 				.map(entry => [entry.scope.id!, entry]),
 		);
 		const lines: string[] = [];
+		const drifted = new Set(this.#drift.drift ? driftedBlockIds(this.#drift.drift) : []);
 		for (const row of rows.slice(this.#outlineTop, this.#outlineTop + height)) {
 			const block = row.block;
 			const focused = block.id === this.#selected;
@@ -3183,9 +3639,10 @@ export class DiagramScreen implements Component {
 			const name = focused ? theme.bold(title) : uncited ? theme.fg("muted", title) : title;
 			const reuse = usedBy.get(block.id) ?? 0;
 			const reuseMark = reuse > 0 ? theme.fg("muted", ` ×${reuse}`) : "";
+			const driftMark = drifted.has(block.id) ? theme.fg("warning", " ≠") : "";
 			const markMark = this.#marked.has(block.id) ? theme.fg("accent", " ✓") : "";
 			const prefix = focused ? theme.fg("accent", "›") : " ";
-			const text = truncateToWidth(`${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${name}${badge}${markMark}${reuseMark}${marker}`, width, Ellipsis.Unicode);
+			const text = truncateToWidth(`${prefix} ${"  ".repeat(row.depth)}${twisty} ${glyph}${glyph ? " " : ""}${name}${badge}${driftMark}${markMark}${reuseMark}${marker}`, width, Ellipsis.Unicode);
 			lines.push(focused ? theme.bg("selectedBg", pad(text, width)) : text);
 		}
 		return lines;
@@ -3284,7 +3741,14 @@ export class DiagramScreen implements Component {
 			if (field === "sources") {
 				if (block.sources.length === 0 && !editing) continue;
 				lines.push(`  ${muted(name)}`);
-				block.sources.forEach((source, index) => lines.push(`${cursor(current === `source:${index}`)}  ${formatSourceRef(source)}`));
+				block.sources.forEach((source, index) => {
+					const check = this.#citationCheck(block.id, index, source);
+					const moved = check?.movedTo ? ` → ${check.movedTo.startLine}-${check.movedTo.endLine}` : "";
+					const state = check ? muted(` · ${check.state}${moved}`) : "";
+					const row = current === `source:${index}`;
+					const hint = check?.state === "changed" && row ? muted("  y still true") : "";
+					lines.push(`${cursor(row)}  ${formatSourceRef(source)}${state}${hint}`);
+				});
 				if (editing) lines.push(`${cursor(current === "source:add")}  ${muted("+ add a reference")}`);
 				continue;
 			}
@@ -3337,10 +3801,19 @@ export class DiagramScreen implements Component {
 		return `  ${this.#options.theme.fg("muted", `[${kind}]`)}`;
 	}
 
+	/** The latest drift check's verdict on one citation, when it is not fresh and still describes this ref. */
+	#citationCheck(blockId: string, index: number, source: SourceRef): CitationCheck | undefined {
+		const check = this.#drift.drift?.citations.find(candidate => candidate.blockId === blockId && candidate.index === index);
+		return check && check.state !== "fresh" && refKey(check.source) === refKey(source) ? check : undefined;
+	}
+
 	/** A block's first citation for one line: `path:10-40 +2`, or why there is none. */
 	#citeLabel(block: Block): string {
 		const source = block.sources[0];
-		if (source) return formatSourceRef(source) + (block.sources.length > 1 ? ` +${block.sources.length - 1}` : "");
+		if (source) {
+			const check = this.#citationCheck(block.id, 0, source);
+			return formatSourceRef(source) + (block.sources.length > 1 ? ` +${block.sources.length - 1}` : "") + (check ? ` · ${check.state}` : "");
+		}
 		return this.#document.purpose === "explore" ? `not cited · ${block.evidence}` : "";
 	}
 
@@ -3803,6 +4276,8 @@ export class DiagramScreen implements Component {
 			const what = working.length === 1 ? `agent working ${since}` : `agent working on ${working.length} ${since}`;
 			segments.push(theme.fg("accent", `${spinnerFrame()} ${what}`));
 		}
+		const driftedCount = this.#drift.drift ? driftedBlockIds(this.#drift.drift).length : 0;
+		if (driftedCount > 0) segments.push(theme.fg("warning", `≠ ${driftedCount} drifted — D`));
 		const tail = this.#message.length > 0 ? this.#message : theme.fg("muted", this.#keyHints());
 		return truncateToWidth(` ${segments.join("  ")}   ${tail}`, width, Ellipsis.Unicode, true);
 	}
@@ -3811,7 +4286,7 @@ export class DiagramScreen implements Component {
 	#keyHints(): string {
 		// A dialog pins its own keys at its foot.
 		if (this.#modal) return "";
-		if (this.#sourceView) return "j/k scroll  PgUp/PgDn page  g/G ends  Esc back";
+		if (this.#sourceView) return "j/k line  v range  c change  a ask  s symbol  o outline  i syntax  Esc back";
 		if (this.#linkFrom !== undefined) return "arrows or Tab pick the target  Enter links  Esc cancels";
 		const purpose = this.#document.purpose;
 		if (this.#view === "canvas") {
@@ -3869,9 +4344,15 @@ export class DiagramScreen implements Component {
 				const visible = Math.max(1, Math.min(height, 100) - 2);
 				view.offset = Math.min(view.offset, Math.max(0, view.lines.length - visible));
 				const last = Math.min(view.lines.length, view.offset + visible);
-				title = `source: ${view.title} · ${view.offset + 1}-${last}/${view.lines.length}`;
+				const [from, to] = sourceSelection(view);
+				const selection = view.anchor === undefined ? "" : ` · ${from}-${to} selected`;
+				title = `source: ${view.title} · ${view.offset + 1}-${last}/${view.lines.length} · line ${view.cursor}${selection}`;
 				const code = view.lines.slice(view.offset, last).join("\n");
-				content = renderSourceLines(theme, code, view.path ?? view.source.path, view.offset + 1, Math.max(10, boxWidth - 4));
+				content = renderSourceLines(theme, code, view.path ?? view.source.path, view.offset + 1, Math.max(10, boxWidth - 4), {
+					cursor: view.cursor,
+					from,
+					to,
+				});
 			}
 		} else if (modal?.kind === "edit") {
 			title = modal.title;

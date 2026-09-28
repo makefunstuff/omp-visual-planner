@@ -23,6 +23,7 @@ import {
 	findOwnedDiagram,
 } from "./model.ts";
 import { statusLabel, renderDispatch } from "./flow.ts";
+import { refKey, type SyncContext } from "./drift.ts";
 
 export interface ComposeOptions {
 	/** Present when the submission must come back through `visual_planner_propose`. */
@@ -38,6 +39,8 @@ export interface ComposeOptions {
 	returnVia?: "propose" | "output";
 	/** A change plan: the codebase map to orient by and the blocks marked on it as where the change begins. */
 	change?: { mapPath?: string; startingPoints: StartingPoint[] };
+	/** A Sync: the citations that no longer match the code they were made against. */
+	drift?: SyncContext;
 }
 
 /** A block marked on a codebase map as where a change begins. */
@@ -539,6 +542,32 @@ const PURPOSE_LINE: Record<Purpose, string> = {
 		"purpose: explore — a map of an existing codebase for learning and code archaeology. Ground every block in code you actually read.",
 };
 
+/** The purpose line; a brainstorm request that reads the code its block cites says so instead of forbidding it. */
+function purposeLine(purpose: Purpose, intent: Intent): string {
+	if (purpose === "brainstorm" && (intent === "clarify" || intent === "sync")) {
+		return "purpose: brainstorm — a mind map of ideas. This request reads the code the block cites; do not change code, and do not propose implementation steps.";
+	}
+	return PURPOSE_LINE[purpose];
+}
+
+/** The drifted citations inside the scope, still cited where the check found them. */
+function driftSection(document: DiagramDocument, resolution: ScopeResolution, drift: SyncContext): string | undefined {
+	const inScope = new Map(resolution.locations.map(location => [location.block.id, location.block]));
+	const rows = drift.citations.filter(check => {
+		const cited = inScope.get(check.blockId)?.sources[check.index];
+		return cited !== undefined && refKey(cited) === refKey(check.source);
+	});
+	if (rows.length === 0) return undefined;
+	const lines = rows.map(check => {
+		const moved = check.movedTo ? `; now at ${check.movedTo.startLine}-${check.movedTo.endLine}` : "";
+		return `- [${check.blockId}] ${check.title}: ${formatRange(check.source)} — ${check.state}: ${check.reason ?? ""}${moved}`;
+	});
+	if (drift.commit !== undefined) {
+		lines.push(`- baseline commit: ${drift.commit} — \`git diff ${drift.commit} -- <path>\` shows what changed`);
+	}
+	return `## Drift\nThese citations no longer match the code they were made against.\n\n<planner-data>\n${lines.join("\n")}\n</planner-data>`;
+}
+
 /** Restated by every replan and prune: the validator refuses to drop settled work, so must they. */
 const KEEP_SETTLED =
 	"Blocks the human already settled — any block whose status is not `open` — stay, under their ids.";
@@ -599,6 +628,10 @@ function briefFor(intent: Intent, document: DiagramDocument, scope: Scope): stri
 			return renderDispatch(document, scope);
 		case "change":
 			return "Plan the change described in the goal above against the existing code. Read the code the change touches before proposing anything. Top-level blocks are the parts of the codebase the change touches — an existing module, command or subsystem — each citing the files it changes in `sources` with evidence `observed`. Nest the concrete edits as `children`: what changes, the expected output, and acceptance criteria a reviewer can check. A part the change creates from nothing is a block with evidence `inferred` and no sources, placed under the part that will own it. Do not add a block for code the change does not touch. Change no code in the repository. Return the whole document.";
+		case "sync":
+			return "The code this block cites changed since it was cited; the changed citations are listed under Drift. Re-read them, and read what replaced them when a file is gone. Then update this block so it describes the code as it is now: rewrite description and expected output where they are wrong, re-cite current line ranges in `sources`, and set `evidence`. If cited code is gone and nothing replaced it, drop that source and set evidence to `inferred` or `unknown`. Keep the block's id and keep its children unless the code they describe is gone. Keep the block's intent: do not add scope. In `summary`, say for each acceptance criterion whether it holds in the code now. Change no code in the repository.";
+		case "clarify":
+			return "Answer the question in this block's description about the code it cites. Read the cited lines, and what they call or what calls them, until you can answer; do not guess. Keep the question as the first paragraph of `description` and add the answer below it, starting with `Answer:`. Cite every range you relied on in `sources`, and set `evidence` to `observed` when the answer rests on code you read, `inferred` otherwise. Do not add or remove blocks and do not change the title. Change no code in the repository.";
 	}
 }
 
@@ -629,13 +662,15 @@ export function composePrompt(
 		].join("\n"),
 	);
 	sections.push(
-		`## Task\nintent: ${intent}\n${briefFor(intent, document, resolution.scope)}\n${PURPOSE_LINE[document.purpose]}`,
+		`## Task\nintent: ${intent}\n${briefFor(intent, document, resolution.scope)}\n${purposeLine(document.purpose, intent)}`,
 	);
 	// A plan block that cites code gets the same evidence discipline as a map.
 	const readsCode =
 		intent === "discover" ||
 		intent === "investigate" ||
 		intent === "change" ||
+		intent === "sync" ||
+		intent === "clarify" ||
 		document.purpose === "explore" ||
 		(document.purpose === "plan" && resolution.sources.length > 0);
 	if (readsCode) {
@@ -644,6 +679,10 @@ export function composePrompt(
 	}
 	if (options.change) sections.push(...changeSections(options.change));
 	sections.push(`## Scope\n\n<planner-data>\n${renderScope(resolution, document, intent)}\n</planner-data>`);
+	if (options.drift) {
+		const section = driftSection(document, resolution, options.drift);
+		if (section) sections.push(section);
+	}
 	if (options.related) {
 		const section = relatedSection(document, options.related);
 		if (section) sections.push(section);

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent";
@@ -7,6 +7,8 @@ import { visibleWidth } from "@oh-my-pi/pi-tui";
 import { loadThemeSync } from "@oh-my-pi/pi-tui/theme/loader";
 import { type } from "@oh-my-pi/omptype";
 import { ActionRegistry, type BeginInput } from "../src/actions.ts";
+import type { CodeIntel } from "../src/code-intel.ts";
+import { stampMissing } from "../src/drift.ts";
 import { createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
 import type { RelatedOutcome, RelatedRanker } from "../src/relevance.ts";
 import { DocumentStore, serializeDocument } from "../src/store.ts";
@@ -47,6 +49,9 @@ async function harness(
 		view?: "outline" | "canvas";
 		editor?: (text: string, name: string) => Promise<string | null>;
 		rankRelated?: RelatedRanker;
+		/** The workspace citations resolve against; defaults to a path nothing reads. */
+		cwd?: string;
+		codeIntel?: CodeIntel;
 	} = {
 		width: 120,
 		rows: 24,
@@ -102,7 +107,7 @@ async function harness(
 			store,
 			registry,
 			arktype: type,
-			cwd: "/tmp/planner",
+			cwd: options.cwd ?? "/tmp/planner",
 			branchKey: "session:leaf",
 			documentPathHint: "/tmp/planner/.omp-visual-planner/architecture.json",
 			hasUI: true,
@@ -111,6 +116,7 @@ async function harness(
 			link,
 			externalEditor: options.editor,
 			rankRelated: options.rankRelated,
+			codeIntel: options.codeIntel,
 		},
 		value => {
 			result = value;
@@ -974,15 +980,16 @@ describe("inspector field editor", () => {
 		const rows = () => dialogRows(plain(h.screen.render(120)), "source:");
 		expect(rows().join("\n")).toContain("line-200");
 		const first = rows()[0];
+		expect(plain(h.screen.render(120)).join("\n")).toContain("· line 200");
 		h.screen.handleInput("j");
-		expect(rows()[0]).not.toBe(first);
-		const second = rows()[0];
+		expect(plain(h.screen.render(120)).join("\n")).toContain("· line 201");
+		expect(rows().find(row => row.includes("line-201"))).toContain("› ");
 		h.screen.handleInput("\x1b[6~");
-		expect(rows()[0]).not.toBe(second);
+		expect(rows()[0]).not.toBe(first);
+		const paged = rows()[0];
 		h.screen.handleInput("\x1b[5~");
-		expect(rows()[0]).toBe(second);
-		h.screen.handleInput("\x1b[B");
-		expect(rows()[0]).not.toBe(second);
+		expect(plain(h.screen.render(120)).join("\n")).toContain("· line 201");
+		expect(rows()[0]).not.toBe(paged);
 		h.screen.handleInput("G");
 		expect(rows().join("\n")).toContain("line-520");
 		h.screen.handleInput("g");
@@ -1160,9 +1167,8 @@ describe("shared focus with web mode", () => {
 
 describe("editing a block in the user's editor", () => {
 	/**
-	 * An editor stub whose result the test can await. The screen awaits the same
-	 * promise first and finishes synchronously after it, so once the test's own
-	 * await resumes, the edit has been applied.
+	 * An editor stub whose result the test can await. After it resolves the
+	 * screen still fingerprints the block's citations, so tests wait for the edit.
 	 */
 	function stubEditor(change: (text: string) => string | null) {
 		const calls: { text: string; done: Promise<string | null> }[] = [];
@@ -1183,6 +1189,7 @@ describe("editing a block in the user's editor", () => {
 		const revision = h.store.require().revision;
 		h.screen.handleInput("E");
 		await stub.calls[0]!.done;
+		for (let attempt = 0; attempt < 100 && h.store.require().revision === revision; attempt += 1) await Bun.sleep(5);
 		expect(stub.calls[0]!.text).toContain("# API");
 		expect(h.tui.stopped).toBe(1);
 		const api = h.store.require().root.blocks[0]!;
@@ -1234,5 +1241,97 @@ describe("progress while the agent works", () => {
 		h.registry.resolve("req-9", "discarded");
 		expect(plain(h.screen.render(120)).at(-2)).not.toContain("agent working");
 		h.screen.dispose();
+	});
+});
+
+/** A workspace with `src/app.ts` and the fixture's API block citing its first three lines. */
+async function citedWorkspace(stamp: boolean) {
+	const cwd = await mkdtemp(join(tmpdir(), "omp-visual-planner-cwd-"));
+	directories.push(cwd);
+	await mkdir(join(cwd, "src"));
+	await writeFile(join(cwd, "src", "app.ts"), "const one = 1;\nconst two = 2;\nconst three = 3;\nconst four = 4;\nconst five = 5;\n");
+	const source = { path: "src/app.ts", startLine: 1, endLine: 3 };
+	const document = fixture();
+	document.root.blocks[0]!.sources = stamp ? await stampMissing(cwd, [source]) : [source];
+	return { cwd, document };
+}
+
+async function until(check: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 200 && !check(); attempt += 1) await Bun.sleep(5);
+}
+
+function allBlocks(root: ReturnType<typeof fixture>["root"]): ReturnType<typeof createBlock>[] {
+	return root.blocks.flatMap(block => [block, ...(block.children ? allBlocks(block.children) : [])]);
+}
+
+describe("drift in the terminal", () => {
+	test("D lists a changed citation and Enter on Sync previews the block's Sync request", async () => {
+		const { cwd, document } = await citedWorkspace(true);
+		await writeFile(join(cwd, "src", "app.ts"), "const one = 1;\nconst TWO = 2;\nconst three = 3;\n");
+		const h = await harness({ width: 120, rows: 30, document, cwd });
+		h.screen.render(120);
+		h.screen.handleInput("D");
+		const text = () => plain(h.screen.render(120)).join("\n");
+		await until(() => text().includes("drift —"));
+		expect(text()).toContain("drift — 1 changed");
+		expect(text()).toContain('Sync "API"');
+		h.screen.handleInput("\r");
+		expect(text()).toContain('preview — block "API"');
+		expect(text()).toContain("intent: sync");
+	});
+});
+
+describe("source view line actions", () => {
+	/** Opens the page, moves to the block's citation (k wraps to "add", k again to it) and opens it. */
+	async function openCitation(h: Harness): Promise<() => string> {
+		const text = () => plain(h.screen.render(120)).join("\n");
+		h.screen.render(120);
+		h.screen.handleInput("\r");
+		h.screen.handleInput("k");
+		h.screen.handleInput("k");
+		h.screen.handleInput("\r");
+		await until(() => text().includes("source: src/app.ts"));
+		return text;
+	}
+
+	test("a selected range becomes a change block under the focused one, previewed as Refine", async () => {
+		const { cwd, document } = await citedWorkspace(false);
+		const h = await harness({ width: 120, rows: 30, document, cwd });
+		const text = await openCitation(h);
+		expect(text()).toContain("· line 1");
+		for (const key of ["j", "v", "j"]) h.screen.handleInput(key);
+		expect(text()).toContain("· 2-3 selected");
+		h.screen.handleInput("c");
+		h.screen.handleInput("retry");
+		h.screen.handleInput("\r");
+		await until(() => text().includes("preview — block"));
+		expect(text()).toContain("Refine this block's authored text");
+		const added = allBlocks(h.store.require().root).find(block => block.title === "retry");
+		expect(added?.sources.map(source => [source.path, source.startLine, source.endLine])).toEqual([["src/app.ts", 2, 3]]);
+		expect(added?.sources[0]!.digest).toBeString();
+	});
+
+	test("a question on the cursor line becomes a Q: block previewed as Ask", async () => {
+		const { cwd, document } = await citedWorkspace(false);
+		const h = await harness({ width: 120, rows: 30, document, cwd });
+		const text = await openCitation(h);
+		h.screen.handleInput("a");
+		h.screen.handleInput("why one?");
+		h.screen.handleInput("\r");
+		await until(() => text().includes("preview — block"));
+		expect(text()).toContain("intent: clarify");
+		expect(allBlocks(h.store.require().root).some(block => block.title === "Q: why one?")).toBe(true);
+	});
+
+	test("s picks an identifier and says when no language server is available", async () => {
+		const { cwd, document } = await citedWorkspace(false);
+		const h = await harness({ width: 120, rows: 30, document, cwd });
+		const text = await openCitation(h);
+		h.screen.handleInput("s");
+		expect(text()).toContain("symbol on line 1");
+		h.screen.handleInput("j");
+		h.screen.handleInput("\r");
+		await until(() => text().includes("language servers are not available in this session"));
+		expect(text()).toContain("language servers are not available in this session");
 	});
 });

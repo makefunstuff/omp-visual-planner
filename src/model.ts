@@ -26,6 +26,8 @@ export interface SourceRef {
 	path: string;
 	startLine?: number;
 	endLine?: number;
+	/** sha256 of the cited lines (trailing whitespace trimmed per line), recorded when the citation was made. Absent: never fingerprinted. Directories are never fingerprinted. */
+	digest?: string;
 }
 
 export interface BlockPosition {
@@ -85,6 +87,8 @@ export interface DiagramDocument {
 	goal: string;
 	purpose: Purpose;
 	revision: number;
+	/** Where uncited-change tracking starts: the git HEAD (absent outside a repository) and ISO time of the last Record baseline. */
+	baseline?: { commit?: string; at: string };
 	root: Diagram;
 }
 
@@ -94,7 +98,18 @@ export interface Scope {
 	id?: string;
 }
 
-export type Intent = "plan" | "discover" | "enhance" | "decompose" | "investigate" | "execute" | "replan" | "prune" | "change";
+export type Intent =
+	| "plan"
+	| "discover"
+	| "enhance"
+	| "decompose"
+	| "investigate"
+	| "execute"
+	| "replan"
+	| "prune"
+	| "change"
+	| "sync"
+	| "clarify";
 
 export type Direction = "h" | "j" | "k" | "l";
 
@@ -121,7 +136,7 @@ const DEFINITIONS = {
 	Venue: "'here'|'subagent'|'worktree'",
 	Surface: "'page'|'component'",
 	Purpose: "'brainstorm'|'plan'|'explore'",
-	SourceRef: { path: "string", "startLine?": "number", "endLine?": "number" },
+	SourceRef: { path: "string", "startLine?": "number", "endLine?": "number", "digest?": "string" },
 	BlockPosition: { x: "number", y: "number" },
 	BlockActions: { enhance: "string", execute: "string" },
 	Block: {
@@ -158,6 +173,7 @@ const DEFINITIONS = {
 		goal: "string",
 		"purpose?": "Purpose",
 		revision: "number",
+		"baseline?": { "commit?": "string", at: "string" },
 		root: "Diagram",
 	},
 } as const;

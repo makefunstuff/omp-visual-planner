@@ -12,6 +12,8 @@ import type { BeginInput, JournalEntry } from "./actions.ts";
 import { ActionRegistry, resumeBranchToken } from "./actions.ts";
 import type { ComposedBatch } from "./flow.ts";
 import { resolveScope } from "./compose.ts";
+import { lspCodeIntel } from "./code-intel.ts";
+import { type DriftReport, stampReplacement } from "./drift.ts";
 import { resolvePlannerJudge } from "./judge.ts";
 import type { Purpose, Scope } from "./model.ts";
 import { PURPOSES, toolSchemasFor } from "./model.ts";
@@ -47,6 +49,8 @@ interface PlannerSession {
 	branchToken: string;
 	/** Open overlays, told when something outside them (web mode, a staged proposal) changed the session. */
 	listeners: Set<() => void>;
+	/** The latest drift check, shared by the terminal and the browser. In memory only. */
+	drift?: DriftReport;
 }
 
 function notifyListeners(session: PlannerSession): void {
@@ -107,6 +111,7 @@ function webBinding(pi: ExtensionAPI, ctx: ExtensionContext): WebBinding {
 		cwd: ctx.cwd,
 		getSession: () => SESSIONS.get(key),
 		rankRelated: relatedRanker(() => resolvePlannerJudge(ctx)),
+		codeIntel: lspCodeIntel(ctx.cwd),
 		onChange: () => {
 			const session = SESSIONS.get(key);
 			if (!session) return;
@@ -257,6 +262,8 @@ async function runScreen(
 					hasPendingMessages: () => ctx.hasPendingMessages(),
 					rankRelated: relatedRanker(() => resolvePlannerJudge(ctx)),
 					initialSelection: session.selected,
+					driftHolder: session,
+					codeIntel: lspCodeIntel(ctx.cwd),
 					link: {
 						// Focus is shared: web mode reads it on its next poll.
 						publish: (selected, stack) => {
@@ -582,6 +589,7 @@ export default function ompVisualPlanner(pi: ExtensionAPI): void {
 					isError: true,
 				};
 			}
+			await stampReplacement(ctx.cwd, outcome.proposal.replacement);
 			persist(pi, session);
 			notifyListeners(session);
 			// The overlay closes when a request is submitted, so the human is

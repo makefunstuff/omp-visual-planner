@@ -16,6 +16,22 @@ import type { Server } from "bun";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { ActionKind, ActionRegistry, BeginInput, JournalEntry } from "./actions.ts";
 import type { RelatedContext } from "./compose.ts";
+import type { CodeIntel, IntelOutcome } from "./code-intel.ts";
+import {
+	type CitationCheck,
+	type CitationState,
+	type DriftReport,
+	type SyncContext,
+	changedCheck,
+	checkDrift,
+	currentDigest,
+	driftCounts,
+	prepareBaseline,
+	reanchorMoved,
+	stampMissing,
+	syncContext,
+	syncTargets,
+} from "./drift.ts";
 import {
 	BatchError,
 	type ComposedBatch,
@@ -43,6 +59,9 @@ import {
 	statusGlyph,
 	statusLabel,
 	useCandidates,
+	lineRequestBlock,
+	lineRequestVerb,
+	verbById,
 	verbsFor,
 } from "./flow.ts";
 import {
@@ -74,13 +93,22 @@ import {
 	findDiagram,
 	findDiagramPath,
 	formatSourceRef,
+	type SourceRef,
 	moveBlockInOrder,
 	removeBlock,
 	removeUse,
 } from "./model.ts";
 import { type RelatedRanker, batchRelatedSummary, relatedSummary, wantsRelated } from "./relevance.ts";
 import { type DocumentStore, defaultDocumentPath, displayPath } from "./store.ts";
-import { type DocumentDiff, acceptReplacement, diffDocuments, emptyDiff, placeNewBlock, tidyDiagram } from "./ui.ts";
+import {
+	type DocumentDiff,
+	acceptReplacement,
+	diffDocuments,
+	emptyDiff,
+	insertLineBlock,
+	placeNewBlock,
+	tidyDiagram,
+} from "./ui.ts";
 import { WEB_PAGE } from "./web-page.ts";
 import { highlightLines } from "./highlight.ts";
 import { inspectSource } from "./code-evidence.ts";
@@ -106,6 +134,8 @@ export interface WebSession {
 	related?: { key: string; context: RelatedContext };
 	/** The same, for the last batch preview: one ranking per member block. */
 	relatedBatch?: { key: string; contexts: Map<string, RelatedContext> };
+	/** The latest drift check, shared with the terminal. In memory only. */
+	drift?: DriftReport;
 }
 
 export interface WebBinding {
@@ -120,6 +150,8 @@ export interface WebBinding {
 	submitBatch: (batch: ComposedBatch) => Promise<{ ok: true; message: string } | { ok: false; error: string }>;
 	/** Ranks outside blocks for a previewed request; absent in tests and when no session context exists. */
 	rankRelated?: RelatedRanker;
+	/** Language-server lookups for the file viewer; absent in tests. */
+	codeIntel?: CodeIntel;
 }
 
 export interface WebHandle {
@@ -300,6 +332,21 @@ async function handle(entry: Entry, request: Request): Promise<Response> {
 		return insight.ok ? json(insight) : json({ error: insight.error }, insight.status);
 	}
 
+	if (url.pathname === "/api/outline" && request.method === "GET") {
+		const path = url.searchParams.get("path") ?? "";
+		return json(await (entry.binding.codeIntel?.outline(path, request.signal) ?? NO_INTEL));
+	}
+
+	if (url.pathname === "/api/symbol" && request.method === "GET") {
+		const path = url.searchParams.get("path") ?? "";
+		const line = Number(url.searchParams.get("line"));
+		const character = Number(url.searchParams.get("character"));
+		if (!Number.isInteger(line) || line < 1 || !Number.isInteger(character) || character < 0) {
+			return json({ error: "line and character must be whole numbers" }, 400);
+		}
+		return json(await (entry.binding.codeIntel?.symbolAt(path, line, character, request.signal) ?? NO_INTEL));
+	}
+
 	if (url.pathname === "/api/op" && request.method === "POST") {
 		if (request.headers.get("origin") !== origin) return json({ error: "cross-origin write refused" }, 403);
 		let body: unknown;
@@ -360,6 +407,28 @@ export interface WebFlow {
 	/** Every page and component, for the Screens board. */
 	screens: ScreenBoard;
 }
+export interface WebDrift {
+	checkedAt: string;
+	/** The document changed since this check. */
+	stale: boolean;
+	counts: Record<Exclude<CitationState, "fresh">, number>;
+	/** The citations that are not fresh, in document order. */
+	citations: CitationCheck[];
+	syncTargets: string[];
+	uncovered: DriftReport["uncovered"];
+}
+
+function driftOf(report: DriftReport | undefined, document: DiagramDocument | undefined): WebDrift | null {
+	if (report === undefined || document === undefined) return null;
+	return {
+		checkedAt: report.checkedAt,
+		stale: report.revision !== document.revision || report.documentId !== document.id,
+		counts: driftCounts(report),
+		citations: report.citations.filter(check => check.state !== "fresh"),
+		syncTargets: syncTargets(document, report),
+		uncovered: report.uncovered,
+	};
+}
 
 export interface WebState {
 	version: string;
@@ -378,6 +447,8 @@ export interface WebState {
 	reviews: WebReview[];
 	/** Every request this branch waits on — what, where, since when (ISO time) — for progress UI, oldest first. */
 	requests: { requestId: string; label: string; state: string; kind: string; since: string; blockId: string | undefined }[];
+	/** The latest drift check, or null before the first one. */
+	drift: WebDrift | null;
 }
 
 /** Every label the page shows comes from the shared flow, never from the page itself. */
@@ -501,6 +572,7 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 		stack.join("/"),
 		session.selected ?? "",
 		session.registry.entries.map(entry => `${entry.requestId}:${entry.state}`).join(","),
+		session.drift?.checkedAt ?? "",
 	].join("|");
 	return {
 		version,
@@ -524,6 +596,7 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 			since: entry.createdAt,
 			blockId: entry.scope.kind === "block" ? entry.scope.id : undefined,
 		})),
+		drift: driftOf(session.drift, document),
 	};
 }
 
@@ -532,8 +605,15 @@ export function stateOf(session: WebSession, binding: WebBinding): WebState {
 // ---------------------------------------------------------------------------
 
 type OpResult =
-	| { ok: true; changed: boolean; message: string; preview?: { label: string; text: string; size: number; related?: string } }
+	| {
+			ok: true;
+			changed: boolean;
+			message: string;
+			preview?: { label: string; text: string; size: number; related?: string; request?: { verb: string; id: string } };
+	  }
 	| { ok: false; error: string; status?: number; needsSave?: boolean };
+
+const NO_INTEL: IntelOutcome<never> = { ok: false, reason: "language servers are not available in this session" };
 
 /**
  * The identity a ranking belongs to. Saving does not bump `revision`, so a
@@ -569,6 +649,83 @@ function focusBlock(session: WebSession, document: DiagramDocument, id: string):
 
 function optionalId(value: unknown, name: string): string | undefined {
 	return value === undefined || value === null ? undefined : str(value, name);
+}
+
+/** What a Sync is told about the drift, from the session's last check. */
+function requireSyncContext(session: WebSession, document: DiagramDocument): SyncContext {
+	if (!session.drift) throw new OpError("check drift first");
+	return syncContext(document, session.drift);
+}
+
+/** A workspace file range an op names, validated. */
+function lineRange(value: Record<string, unknown>): SourceRef & { startLine: number; endLine: number } {
+	const path = workspacePath(str(value.path, "path").trim());
+	if (path === undefined) throw new OpError("path must be relative to the workspace");
+	const { startLine, endLine } = value;
+	if (
+		typeof startLine !== "number" ||
+		typeof endLine !== "number" ||
+		!Number.isInteger(startLine) ||
+		!Number.isInteger(endLine) ||
+		startLine < 1 ||
+		endLine < startLine
+	) {
+		throw new OpError("lines must be a range starting at 1");
+	}
+	return { path, startLine, endLine };
+}
+
+/** Rank related context (when a ranker exists) and compose the request a preview shows. */
+async function composePreview(
+	session: WebSession,
+	binding: WebBinding,
+	document: DiagramDocument,
+	verb: { kind: ActionKind; intent: Intent },
+	scope: Scope,
+	drift?: SyncContext,
+): Promise<OpResult & { ok: true }> {
+	const rank = binding.rankRelated;
+	let related: RelatedContext | undefined;
+	let summary: string | undefined;
+	if (rank && wantsRelated(verb.intent, scope)) {
+		const outcome = await rank(document, scope, new AbortController().signal);
+		summary = relatedSummary(outcome);
+		if (outcome.ok) {
+			related = outcome.context;
+			session.related = { key: relatedKey(document, verb.kind, scope), context: outcome.context };
+		} else {
+			session.related = undefined;
+		}
+	} else {
+		session.related = undefined;
+	}
+	const composed = composeRequest({
+		document,
+		kind: verb.kind,
+		intent: verb.intent,
+		scope,
+		branchKey: session.branchToken,
+		baseDigest: session.store.diskDigest,
+		codeRoot: codeRootFor(binding.cwd, undefined),
+		related,
+		drift,
+	});
+	return {
+		ok: true,
+		changed: false,
+		message: "",
+		preview: {
+			label: composed.label,
+			text: composed.prompt,
+			size: composed.size,
+			...(summary === undefined ? {} : { related: summary }),
+		},
+	};
+}
+
+function driftMessage(report: DriftReport): string {
+	const counts = driftCounts(report);
+	return `drift: ${counts.changed} changed · ${counts.missing} missing · ${counts.moved} moved · ${counts.unstamped} without a baseline`;
 }
 
 /**
@@ -638,41 +795,69 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 			}
 			case "preview": {
 				const { verb, scope } = requestScope(document, op);
-				const rank = binding.rankRelated;
-				let related: RelatedContext | undefined;
-				let summary: string | undefined;
-				if (rank && wantsRelated(verb.intent, scope)) {
-					const outcome = await rank(document, scope, new AbortController().signal);
-					summary = relatedSummary(outcome);
-					if (outcome.ok) {
-						related = outcome.context;
-						session.related = { key: relatedKey(document, verb.kind, scope), context: outcome.context };
-					} else {
-						session.related = undefined;
-					}
-				} else {
-					session.related = undefined;
-				}
-				const composed = composeRequest({
-					document,
-					kind: verb.kind,
-					intent: verb.intent,
-					scope,
-					branchKey: session.branchToken,
-					baseDigest: store.diskDigest,
-					codeRoot: codeRootFor(binding.cwd, undefined),
-					related,
+				const drift = verb.kind === "sync" ? requireSyncContext(session, document) : undefined;
+				return await composePreview(session, binding, document, verb, scope, drift);
+			}
+			case "checkDrift": {
+				session.drift = await checkDrift(binding.cwd, document);
+				return { ok: true, changed: false, message: driftMessage(session.drift) };
+			}
+			case "reanchor": {
+				const report = session.drift;
+				if (!report) throw new OpError("check drift first");
+				let count = 0;
+				store.transact(draft => {
+					count = reanchorMoved(draft, report);
+					if (count === 0) throw new OpError("no moved citations");
 				});
+				session.drift = await checkDrift(binding.cwd, store.require());
+				return { ok: true, changed: true, message: `re-anchored ${count} moved citation${count === 1 ? "" : "s"}` };
+			}
+			case "stillTrue": {
+				const id = str(op.id, "id");
+				const index = num(op.index, "index");
+				const check = changedCheck(session.drift, id, index);
+				if (!check) throw new OpError("only a changed citation can be marked still true");
+				const digest = await currentDigest(binding.cwd, check.source);
+				if (digest === undefined) throw new OpError("that citation cannot be read");
+				store.transact(draft => {
+					const source = findBlockLocation(draft.root, id)?.block.sources[index];
+					if (!source) throw new OpError(`no source ${index} on block ${id}`);
+					source.digest = digest;
+				});
+				session.drift = await checkDrift(binding.cwd, store.require());
+				return { ok: true, changed: true, message: `still true: ${formatSourceRef(check.source)}` };
+			}
+			case "recordBaseline": {
+				const baseline = await prepareBaseline(binding.cwd, document);
+				store.transact(baseline.apply);
+				session.drift = await checkDrift(binding.cwd, store.require());
+				const at = baseline.commit === undefined ? "" : ` at ${baseline.commit.slice(0, 12)}`;
+				return { ok: true, changed: true, message: `baseline recorded${at}; changed citations keep their flag` };
+			}
+			case "lineRequest": {
+				const kind = op.kind;
+				if (kind !== "change" && kind !== "ask") throw new OpError("kind must be change or ask");
+				const text = str(op.text ?? "", "text");
+				if (text.trim().length === 0) throw new OpError(kind === "change" ? "a change request needs text" : "a question needs text");
+				const range = lineRange(op);
+				if (kind === "change" && document.purpose === "explore") {
+					throw new OpError("in an explore map a change request starts a change plan");
+				}
+				const [source] = await stampMissing(binding.cwd, [range]);
+				const block = lineRequestBlock({ kind, text, source: source! });
+				const parentId =
+					session.selected !== undefined && findBlockLocation(document.root, session.selected) ? session.selected : undefined;
+				store.transact(draft => insertLineBlock(draft.root, block, parentId, diagramId));
+				const current = store.require();
+				focusBlock(session, current, block.id);
+				const verb = lineRequestVerb(current.purpose, kind);
+				const result = await composePreview(session, binding, current, verb, { kind: "block", id: block.id });
 				return {
-					ok: true,
-					changed: false,
-					message: "",
-					preview: {
-						label: composed.label,
-						text: composed.prompt,
-						size: composed.size,
-						...(summary === undefined ? {} : { related: summary }),
-					},
+					...result,
+					changed: true,
+					message: `added "${block.title}" — review the ${verb.label} request before sending it`,
+					preview: { ...result.preview!, request: { verb: verb.id, id: block.id } },
 				};
 			}
 			case "submit": {
@@ -691,6 +876,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					baseDigest: store.diskDigest,
 					codeRoot: codeRootFor(binding.cwd, undefined),
 					related,
+					drift: verb.kind === "sync" ? requireSyncContext(session, current) : undefined,
 				});
 				const outcome = binding.submit(composed.request, composed.prompt);
 				if (!outcome.ok) return { ok: false, error: outcome.error };
@@ -719,6 +905,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					baseDigest: store.diskDigest,
 					codeRoot: codeRootFor(binding.cwd, undefined),
 					related: contexts,
+					drift: verb.kind === "sync" ? requireSyncContext(session, document) : undefined,
 				});
 				return {
 					ok: true,
@@ -747,6 +934,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 					baseDigest: store.diskDigest,
 					codeRoot: codeRootFor(binding.cwd, undefined),
 					related,
+					drift: verb.kind === "sync" ? requireSyncContext(session, current) : undefined,
 				});
 				const outcome = await binding.submitBatch(batch);
 				if (!outcome.ok) return { ok: false, error: outcome.error };
@@ -945,13 +1133,13 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 				if (startLine !== undefined && (startLine < 1 || endLine === undefined || endLine < startLine)) {
 					throw new OpError("lines must be a range starting at 1");
 				}
-				const source = startLine === undefined ? { path } : { path, startLine, endLine };
+				const [source] = await stampMissing(binding.cwd, [startLine === undefined ? { path } : { path, startLine, endLine }]);
 				store.transact(draft => {
 					const target = findBlockLocation(draft.root, id);
 					if (!target) throw new OpError(`no block ${id}`);
-					target.block.sources.push(source);
+					target.block.sources.push(source!);
 				});
-				return { ok: true, changed: true, message: `anchored to ${formatSourceRef(source)}` };
+				return { ok: true, changed: true, message: `anchored to ${formatSourceRef(source!)}` };
 			}
 			case "removeSource": {
 				const id = str(op.id, "id");
@@ -1066,7 +1254,7 @@ export async function applyOp(session: WebSession, binding: WebBinding, body: un
 /** The verb and block an op names, checked against what the document's purpose offers. */
 function verbRequest(document: DiagramDocument, op: Record<string, unknown>) {
 	const verbId = str(op.verb, "verb");
-	const verb = verbsFor(document.purpose).find(candidate => candidate.id === verbId);
+	const verb = verbById(document.purpose, verbId);
 	if (!verb) throw new OpError(`no ${verbId} action for a ${document.purpose} document`);
 	const id = str(op.id, "id");
 	if (!findBlockLocation(document.root, id)) throw new OpError(`no block ${id}`);
@@ -1092,7 +1280,8 @@ function requestScope(document: DiagramDocument, op: Record<string, unknown>): {
 /** The verb and marked blocks a batch op names; execute never runs as a batch. */
 function batchRequest(document: DiagramDocument, op: Record<string, unknown>) {
 	const verbId = str(op.verb, "verb");
-	const verb = verbsFor(document.purpose).find(candidate => candidate.id === verbId && candidate.kind !== "execute");
+	const found = verbById(document.purpose, verbId);
+	const verb = found?.kind === "execute" ? undefined : found;
 	if (!verb) throw new OpError(`no ${verbId} batch for a ${document.purpose} document`);
 	if (!Array.isArray(op.ids) || op.ids.some(id => typeof id !== "string")) throw new OpError("ids must be a list of block ids");
 	return { verb, ids: op.ids as string[] };
@@ -1135,8 +1324,18 @@ async function submitStart(session: WebSession, binding: WebBinding, op: Record<
 	if (marked !== undefined && (!Array.isArray(marked) || marked.some(id => typeof id !== "string"))) {
 		throw new OpError("start.marked must be a list of block ids");
 	}
+	const rawLines = (op.start as Record<string, unknown>).lines;
+	if (rawLines !== undefined && (typeof rawLines !== "object" || rawLines === null)) {
+		throw new OpError("start.lines must be an object with path, startLine and endLine");
+	}
+	const lines =
+		start.kind === "change" && rawLines !== undefined
+			? await stampMissing(binding.cwd, [lineRange(rawLines as Record<string, unknown>)])
+			: [];
 	const change =
-		start.kind === "change" ? changeContext(store.document, store.path, binding.cwd, (marked as string[] | undefined) ?? []) : undefined;
+		start.kind === "change"
+			? changeContext(store.document, store.path, binding.cwd, (marked as string[] | undefined) ?? [], lines)
+			: undefined;
 	const started = startDocument(store, binding.cwd, start);
 	session.stack = [started.document.root.id];
 	session.selected = undefined;

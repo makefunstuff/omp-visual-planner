@@ -327,6 +327,20 @@ body.busy, body.busy * { cursor: progress; }
 .viewer tr.mine td { background: var(--accent-soft); }
 .viewer tr.mine td.n { color: var(--accent); }
 .viewer tr.sel td { background: rgba(0,122,255,0.28); }
+.viewer .ident { cursor: pointer; }
+.viewer .ident:hover { text-decoration: underline; }
+.viewer .intel { max-height: 40%; overflow: auto; border-bottom: 1px solid var(--line); padding: 6px 8px; font-size: 12px; }
+.viewer .intel pre { white-space: pre-wrap; margin: 4px 0; }
+.viewer .intel .head { display: flex; align-items: center; gap: 6px; }
+.viewer .intel .head .name { flex: 1; font-weight: 700; }
+.viewer .intel button.loc { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 1px 4px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.viewer .intel button.loc:hover { background: var(--soft); }
+.viewer .who .syntax { color: var(--muted); }
+.rail .row .drift, .drift-state { color: var(--warn); font-size: 12px; }
+.drift-panel .rows { overflow: auto; max-height: 55vh; display: flex; flex-direction: column; gap: 2px; }
+.drift-panel .cite { display: flex; align-items: baseline; gap: 10px; font-size: 12px; }
+.drift-panel .cite .path { color: var(--muted); white-space: nowrap; }
+.drift-panel .cite button { font-size: 12px; line-height: 1.6; padding: 0 6px; }
 .node .srcs li { cursor: pointer; }
 .node .srcs li:hover { color: var(--accent); }
 
@@ -390,6 +404,7 @@ body.busy, body.busy * { cursor: progress; }
     <button class="ghost" id="redo" title="Redo (⇧⌘Z)">Redo</button>
     <span class="sep"></span>
     <button class="ghost" id="filesToggle" title="Files in this workspace (/)">Files</button>
+    <button class="ghost" id="driftToggle" title="Check cited code against the diagram (D)">Drift</button>
     <button class="ghost" id="screensToggle" title="Every page and component, drawn (S)">Screens</button>
     <button class="ghost" id="mapToggle" title="Switch between the block page and the map (v)">Map</button>
     <button class="ghost" id="tidy" title="Lay this level out on the grid (T)" hidden>Tidy</button>
@@ -425,7 +440,9 @@ let state = null, message = "", messageIsError = false, opCount = 0;
 let purposeOpen = false, newPurpose = "plan", confirming = false, keysOpen = false;
 let selectedEdge = null, preview = null, gesture = null, editTitleOf = null, editBodyOf = null, centerOn = null;
 let surface = "page"; // "page", "map" or "screens"
-let marked = new Set(), reviewIndex = 0, mockupOpen = false, goalOpen = false;
+let marked = new Set(), reviewIndex = 0, mockupOpen = false, goalOpen = false, driftOpen = false;
+/** Tree-sitter answers for `path:line`, fetched once each. */
+const insights = new Map();
 const views = new Map(); // diagram id -> map pan and zoom, not document content
 const $ = id => document.getElementById(id);
 function choices(values, current, onPick) {
@@ -460,7 +477,7 @@ function svg(tag, attrs) {
 }
 
 // ---------------------------------------------------------------- server
-const BUSY_WORDS = { save: "saving", submit: "sending to the agent", accept: "applying", preview: "composing and ranking context", previewBatch: "composing and ranking context", submitBatch: "sending to the agent", tidy: "tidying", undo: "undoing", redo: "redoing" };
+const BUSY_WORDS = { save: "saving", submit: "sending to the agent", accept: "applying", preview: "composing and ranking context", previewBatch: "composing and ranking context", submitBatch: "sending to the agent", tidy: "tidying", undo: "undoing", redo: "redoing", checkDrift: "checking drift", reanchor: "re-anchoring", recordBaseline: "recording baseline", stillTrue: "re-fingerprinting", lineRequest: "adding the block" };
 let inFlight = 0, inFlightWord = "";
 /** Every write goes through here. Resolves to { ok, status, data } and never throws. */
 async function op(body) {
@@ -590,6 +607,7 @@ function render() {
   } else if (surface === "map") {
     if (!editing() && !gesture) renderCanvas();
   } else renderScreens();
+  if (driftOpen) renderDriftPanel();
 }
 /** Brainstorm is always a walk. Explore walks until a block is settled; plan stays a page. */
 function walking() {
@@ -806,7 +824,7 @@ function renderRail() {
     if (n >= 2) for (const verb of state.flow.verbs) {
       if (verb.id !== "execute") bar.append(el("button", { text: verb.label + " ×" + n + "…", title: "One subagent per block; each proposal is reviewed on its own", onclick: () => openBatchPreview(verb.id) }));
     }
-    if (change) bar.append(el("button", { text: "Plan a change from " + n + " marked…", title: "A new plan that starts reading from these blocks", onclick: () => openGoalDialog("Plan a change to this codebase", goal => startProject("change", goal)) }));
+    if (change) bar.append(el("button", { text: "Plan a change from " + n + " marked…", title: "A new plan that starts reading from these blocks", onclick: () => openTextDialog(CHANGE_DIALOG, goal => startProject("change", goal)) }));
     bar.append(el("button", { class: "ghost", text: "clear", onclick: () => { marked.clear(); render(); } }));
     if (n === 1 && !change) bar.append(el("span", { class: "subtle", text: "mark one more to run in parallel" }));
     rail.append(bar);
@@ -821,6 +839,7 @@ function renderRail() {
         ? (request.state === "pending" ? el("span", { class: "mark", title: "the agent is working on this block" }, spinner()) : el("span", { class: "mark", text: "◆", title: "proposal ready to review" }))
         : null;
       const reused = counts.get(block.id) || 0;
+      const drifted = driftStates(block.id).filter(kind => kind === "changed" || kind === "missing" || kind === "moved");
       rail.append(el("button", {
         class: "row" + (block.id === state.selected ? " current" : "") + (uncited(block) ? " dim" : "") + (marked.has(block.id) ? " marked" : ""),
         style: "padding-left:" + (8 + depth * 16) + "px",
@@ -828,6 +847,7 @@ function renderRail() {
         onclick: event => { if (event.shiftKey) toggleMark(block.id); else op({ op: "focus", id: block.id }); },
       }, status ? el("span", { class: "glyph", text: status.glyphs[block.status] }) : null,
         el("span", { class: "name", text: block.title || "(untitled)" }),
+        drifted.length ? el("span", { class: "drift", text: "≠", title: "cited code " + [...new Set(drifted)].join(", ") + " — Drift (D)" }) : null,
         marked.has(block.id) ? el("span", { class: "check", text: "✓", title: "marked for a parallel batch (m)" }) : null,
         reused > 0 ? el("span", { class: "reuse", text: "×" + reused, title: "used by " + reused + (reused === 1 ? " block" : " blocks") }) : null,
         mark));
@@ -959,7 +979,7 @@ function renderWorkspace() {
       el("p", { class: "subtle", text: state.flow.progress }),
       el("div", { class: "actions" }, stepButton(null),
         ...project.map(action => action.kind === "change"
-          ? el("button", { title: "A new plan for a change to this codebase; the agent reads the code first", onclick: () => openGoalDialog("Plan a change to this codebase", goal => startProject("change", goal)) }, action.label + "…")
+          ? el("button", { title: "A new plan for a change to this codebase; the agent reads the code first", onclick: () => openTextDialog(CHANGE_DIALOG, goal => startProject("change", goal)) }, action.label + "…")
           : el("button", { title: "Previews the request first", onclick: () => openPreview(action.kind) }, action.label + "…")),
         el("button", { text: "+ block", onclick: () => op({ op: "addBlock" }) })),
       stepDetail(),
@@ -1002,16 +1022,19 @@ function renderWorkspace() {
   }
   if (block.sources.length) {
     const sources = el("section", { class: "sources" }, el("div", { class: "section-head", text: "Code evidence · " + block.sources.length }));
-    for (const source of block.sources) {
+    block.sources.forEach((source, index) => {
       const line = source.startLine || 1, key = source.path + ":" + line, insight = insights.get(key);
       const range = source.path + (source.startLine ? ":" + source.startLine + (source.endLine && source.endLine !== source.startLine ? "-" + source.endLine : "") : "");
+      const check = citationCheck(block.id, index, source);
       sources.append(el("div", { class: "srcrow" },
         el("button", { class: "path", text: range, title: "Open in the file viewer", onclick: () => openFile(source.path, source.startLine) }),
-        el("button", { class: "ghost", text: "inspect syntax", title: "Tree-sitter range and node kinds; no language server", onclick: () => inspectAnchor(source.path, line) })));
+        el("button", { class: "ghost", text: "inspect syntax", title: "Tree-sitter range and node kinds; no language server", onclick: () => inspectAnchor(source.path, line) }),
+        check ? el("span", { class: "drift-state", text: check.state, title: check.reason || "" }) : null,
+        check && check.state === "changed" ? el("button", { class: "ghost", text: "Still true", title: "The code changed but this block still describes it: take the new lines as its fingerprint", onclick: () => op({ op: "stillTrue", id: block.id, index }) }) : null));
       if (insight) sources.append(el("div", { class: "insight", text: insight.error || (
         (insight.range ? "syntax block " + insight.range.startLine + "–" + insight.range.endLine + " · " : "") +
         (insight.symbols?.map(node => node.kind).join(" › ") || "no enclosing syntax nodes") + " · " + insight.limitation) }));
-    }
+    });
     content.append(sources);
   }
   page.scrollTop = pageScroll;
@@ -1228,7 +1251,7 @@ async function openFile(path, line) {
   // Reveal the file in the tree, too.
   const parts = path.split("/");
   for (let i = 1; i < parts.length; i += 1) openDirs.add(parts.slice(0, i).join("/") + "/");
-  viewer = { path: data.path, lines: data.lines, tokens: data.tokens, truncated: data.truncated, line: line || null, selection: null, wide: viewer ? viewer.wide : false };
+  viewer = { path: data.path, lines: data.lines, tokens: data.tokens, truncated: data.truncated, line: line || null, selection: null, wide: viewer ? viewer.wide : false, intel: null };
   // The viewer takes the right side: keep the focused block in what is left.
   if (state.selected) centerOn = state.selected;
   render();
@@ -1250,18 +1273,41 @@ function renderViewer() {
   const keepTop = scroll ? scroll.scrollTop : 0;
   host.replaceChildren();
   const range = sel ? ":" + Math.min(sel.a, sel.b) + "-" + Math.max(sel.a, sel.b) : "";
+  const lines = sel ? { path: current.path, startLine: Math.min(sel.a, sel.b), endLine: Math.max(sel.a, sel.b) } : null;
+  const explore = !!state.document && state.document.purpose === "explore";
   host.append(el("div", { class: "bar" },
     el("span", { class: "name", text: current.path, title: current.path }),
     focused ? el("button", { class: "primary", title: "Anchor the focused block to this file" + (sel ? " range" : ""), text: "anchor “" + focused.title + "” → " + current.path.split("/").pop() + range,
       onclick: () => op(sel ? { op: "addSource", id: focused.id, path: current.path, startLine: Math.min(sel.a, sel.b), endLine: Math.max(sel.a, sel.b) } : { op: "addSource", id: focused.id, path: current.path }) }) : null,
+    lines && state.document ? el("button", { text: "Request a change…", title: explore ? "Start a change plan from these lines" : "Add a block citing these lines, then preview Refine on it", onclick: () => openTextDialog({
+      title: "Request a change to " + lines.path + ":" + lines.startLine + "-" + lines.endLine,
+      placeholder: "What should change in these lines?",
+      hint: explore ? "Starts a new change plan from these lines." : "Adds a block citing these lines under the focused block, then previews Refine on it.",
+    }, text => explore
+      ? op({ op: "submit", start: { kind: "change", goal: text, marked: [...marked], lines } }).then(result => { if (result.ok) marked.clear(); })
+      : lineRequest("change", text, lines)) }) : null,
+    lines && state.document ? el("button", { text: "Ask…", title: "Add a question block citing these lines; the agent answers into it", onclick: () => openTextDialog({
+      title: "Ask about " + lines.path + ":" + lines.startLine + "-" + lines.endLine,
+      placeholder: "What do you want to know about these lines?",
+      hint: "Adds a question block citing these lines; the agent answers into its notes and you review the answer.",
+    }, text => lineRequest("ask", text, lines)) }) : null,
+    el("button", { class: "ghost", text: "Outline", title: "Symbols in this file, from its language server", onclick: () => openOutline(current.path) }),
     el("span", { class: "meta", text: current.lines.length + " lines" + (current.tokens ? "" : " · plain text") }),
     el("button", { class: "ghost", text: current.wide ? "⤡" : "⤢", title: current.wide ? "Narrow the viewer" : "Widen the viewer over the canvas", onclick: () => { current.wide = !current.wide; renderViewer(); } }),
     el("button", { class: "ghost", text: "×", title: "Close (Esc)", onclick: () => { viewer = null; renderViewer(); } })));
   host.append(el("div", { class: "who" }, ...(cites.length === 0
     ? [el("span", { class: "none", text: "no block anchors here yet" + (focused ? " — click a line number (shift-click extends) to pick a range" : "") })]
     : cites.map(({ block, source }) => el("button", { title: "Go to this block", onclick: () => { centerOn = block.id; op({ op: "focus", id: block.id }); if (source.startLine) { current.line = source.startLine; } } },
-        block.title + (source.startLine ? " :" + source.startLine + (source.endLine && source.endLine !== source.startLine ? "-" + source.endLine : "") : ""))))));
+        block.title + (source.startLine ? " :" + source.startLine + (source.endLine && source.endLine !== source.startLine ? "-" + source.endLine : "") : "")))),
+    lines ? el("span", { class: "syntax", text: syntaxLine(current.path, lines.startLine) }) : null));
+  if (current.intel) host.append(intelPane(current));
   const table = el("table");
+  // One listener for every identifier: clicking one asks the language server about it.
+  table.addEventListener("click", event => {
+    const ident = event.target.closest && event.target.closest(".ident");
+    if (!ident) return;
+    openSymbol(current.path, Number(ident.closest("tr").dataset.n), Number(ident.dataset.col), ident.textContent);
+  });
   current.lines.forEach((text, index) => {
     const n = index + 1;
     const hit = ranges.filter(r => r.a && n >= r.a && n <= r.b);
@@ -1271,9 +1317,7 @@ function renderViewer() {
         current.selection = event.shiftKey && current.selection ? { a: current.selection.a, b: n } : { a: n, b: n };
         renderViewer();
       } }),
-      el("td", { class: "t" }, ...(current.tokens && current.tokens[index]
-        ? current.tokens[index].map(([kind, part]) => kind ? el("span", { class: "tk-" + kind, text: part }) : part)
-        : [text])));
+      el("td", { class: "t" }, ...codeCell(current.tokens && current.tokens[index] ? current.tokens[index] : [[null, text]])));
     table.append(row);
   });
   const body = el("div", { class: "scroll" }, table);
@@ -1284,6 +1328,92 @@ function renderViewer() {
     current.line = null;
     requestAnimationFrame(() => { const row = body.querySelector('tr[data-n="' + target + '"]'); if (row) row.scrollIntoView({ block: "center" }); });
   } else body.scrollTop = keepTop;
+}
+/** A line's parts as nodes, each identifier a clickable span that knows its 0-based column. */
+function codeCell(parts) {
+  const nodes = [];
+  let col = 0;
+  for (const [kind, part] of parts) {
+    part.split(/([A-Za-z_$][\w$]*)/).forEach((piece, index) => {
+      if (!piece) return;
+      if (index % 2 === 1) nodes.push(el("span", { class: (kind ? "tk-" + kind + " " : "") + "ident", "data-col": String(col), text: piece }));
+      else nodes.push(kind ? el("span", { class: "tk-" + kind, text: piece }) : piece);
+      col += piece.length;
+    });
+  }
+  return nodes;
+}
+/** Tree-sitter context for a line, fetched once per `path:line`; the viewer redraws when it lands. */
+const pendingInsights = new Set();
+function syntaxLine(path, line) {
+  const key = path + ":" + line;
+  const insight = insights.get(key);
+  if (!insight) {
+    if (!pendingInsights.has(key)) {
+      pendingInsights.add(key);
+      fetch("/api/insight?path=" + encodeURIComponent(path) + "&line=" + line).catch(() => null)
+        .then(response => response ? response.json().catch(() => ({ error: "could not read source insight" })) : { error: "offline" })
+        .then(result => { pendingInsights.delete(key); insights.set(key, result); if (viewer && viewer.path === path) renderViewer(); });
+    }
+    return "syntax: …";
+  }
+  if (insight.error) return insight.error;
+  if (insight.symbols && insight.symbols.length) return "syntax: " + insight.symbols.map(node => node.kind).join(" › ") + (insight.range ? " · block " + insight.range.startLine + "–" + insight.range.endLine : "");
+  return insight.limitation;
+}
+/** A language-server answer; a failed request reads as `{ ok: false, reason }`. */
+async function intelFetch(url) {
+  const response = await fetch(url).catch(() => null);
+  if (!response) return { ok: false, reason: "offline" };
+  const data = await response.json().catch(() => ({ ok: false, reason: "could not read the answer" }));
+  return data.error ? { ok: false, reason: data.error } : data;
+}
+async function openOutline(path) {
+  const intel = { mode: "outline", title: "Outline", loading: true, data: null };
+  viewer.intel = intel;
+  renderViewer();
+  const data = await intelFetch("/api/outline?path=" + encodeURIComponent(path));
+  if (!viewer || viewer.path !== path || viewer.intel !== intel) return;
+  viewer.intel = { mode: "outline", title: "Outline" + (data.ok ? " · " + data.server : ""), loading: false, data };
+  renderViewer();
+}
+async function openSymbol(path, line, character, name) {
+  const intel = { mode: "symbol", title: name, loading: true, data: null };
+  viewer.intel = intel;
+  renderViewer();
+  const data = await intelFetch("/api/symbol?path=" + encodeURIComponent(path) + "&line=" + line + "&character=" + character);
+  if (!viewer || viewer.path !== path || viewer.intel !== intel) return;
+  viewer.intel = { mode: "symbol", title: name + (data.ok ? " · " + data.server : ""), loading: false, data };
+  renderViewer();
+}
+/** The symbol or outline pane above the code. */
+function intelPane(current) {
+  const intel = current.intel;
+  const pane = el("div", { class: "intel" }, el("div", { class: "head" },
+    el("span", { class: "name", text: intel.title }),
+    el("button", { class: "ghost", text: "×", title: "Close", onclick: () => { current.intel = null; renderViewer(); } })));
+  if (intel.loading) { pane.append(el("div", { class: "subtle" }, spinner(), " asking the language server…")); return pane; }
+  const data = intel.data;
+  if (!data.ok) { pane.append(el("div", { class: "subtle", text: data.reason })); return pane; }
+  const location = loc => el("button", { class: "loc", text: loc.path + ":" + loc.line + "  " + loc.preview, title: "Open " + loc.path, onclick: () => openFile(loc.path, loc.line) });
+  if (intel.mode === "outline") {
+    if (!data.value.length) pane.append(el("div", { class: "subtle", text: "no symbols" }));
+    for (const symbol of data.value) pane.append(el("button", { class: "loc", text: "  ".repeat(symbol.depth) + symbol.kind + " " + symbol.name + "  :" + symbol.startLine,
+      onclick: () => { current.selection = { a: symbol.startLine, b: symbol.endLine }; current.line = symbol.startLine; renderViewer(); } }));
+    return pane;
+  }
+  const facts = data.value;
+  if (facts.hover) pane.append(el("pre", { text: facts.hover.split("\n").slice(0, 12).join("\n") }));
+  pane.append(el("div", { class: "section-head", text: "Definition" }), ...facts.definitions.map(location));
+  pane.append(el("div", { class: "section-head", text: "References · " + facts.references.length + (facts.truncated ? "+" : "") }), ...facts.references.map(location));
+  return pane;
+}
+/** Add a block for selected lines — a change or a question — and open the preview of its request. */
+async function lineRequest(kind, text, range) {
+  const result = await op({ op: "lineRequest", kind, text, ...range });
+  if (!result.ok || !result.data.preview || !result.data.preview.request) return;
+  preview = { verb: result.data.preview.request.verb, id: result.data.preview.request.id, ...result.data.preview };
+  renderModal();
 }
 
 function renderHud() {
@@ -1829,9 +1959,8 @@ async function openPreview(verb, id) {
   renderModal();
 }
 function closeModal() { preview = null; renderModal(); }
-/** The marked blocks as one batch: the parent prompt and every subagent's instructions, previewed first. */
-async function openBatchPreview(verb) {
-  const ids = [...marked];
+/** Blocks as one batch — the marked ones unless named: the parent prompt and every subagent's instructions, previewed first. */
+async function openBatchPreview(verb, ids = [...marked]) {
   const result = await op({ op: "previewBatch", verb, ids });
   if (!result.ok || !result.data.preview) return;
   preview = { batch: true, verb, ids, ...result.data.preview };
@@ -1865,20 +1994,80 @@ function renderModal() {
         ? "Submit sends this to the OMP session, which runs one subagent per block. Each proposal comes back here for review."
         : "Submit sends this to the OMP session. Its proposal comes back here for review." }))));
 }
-/** A modal with one text box for a goal; Submit stays off while it is empty. */
+/** A modal with one text box; Submit stays off while it is empty. */
 function closeGoal() { goalOpen = false; const host = $("modal"); host.hidden = true; host.replaceChildren(); }
-function openGoalDialog(title, onSubmit) {
+const CHANGE_DIALOG = { title: "Plan a change to this codebase", placeholder: "What should change? e.g. add a JSON export to the report command", hint: "Opens a new plan under .omp-visual-planner/changes/. The agent reads the code before it proposes anything." };
+function openTextDialog({ title, placeholder, hint }, onSubmit) {
   goalOpen = true;
   const host = $("modal");
   host.hidden = false;
-  const input = el("textarea", { rows: 4, placeholder: "What should change? e.g. add a JSON export to the report command", spellcheck: "false", style: "min-height:6em;overflow:auto" });
-  const submit = el("button", { class: "primary", text: "Submit", disabled: true, onclick: () => { const goal = input.value.trim(); if (!goal) return; closeGoal(); onSubmit(goal); } });
+  const input = el("textarea", { rows: 4, placeholder, spellcheck: "false", style: "min-height:6em;overflow:auto" });
+  const submit = el("button", { class: "primary", text: "Submit", disabled: true, onclick: () => { const text = input.value.trim(); if (!text) return; closeGoal(); onSubmit(text); } });
   input.addEventListener("input", () => { submit.disabled = !input.value.trim(); });
   host.replaceChildren(el("div", { class: "modal", role: "dialog", "aria-label": title },
     el("h3", { text: title }), input,
     el("div", { class: "row" }, submit, el("button", { text: "Cancel", onclick: closeGoal }),
-      el("span", { class: "hint", text: "Opens a new plan under .omp-visual-planner/changes/. The agent reads the code before it proposes anything." }))));
+      el("span", { class: "hint", text: hint }))));
   requestAnimationFrame(() => input.focus());
+}
+
+// ---------------------------------------------------------------- drift
+/** The states of a block's citations that are not fresh, from the last check. */
+function driftStates(blockId) {
+  return state.drift ? state.drift.citations.filter(check => check.blockId === blockId).map(check => check.state) : [];
+}
+/** The last check's verdict on one citation, when it is not fresh and still names this ref. */
+function citationCheck(blockId, index, source) {
+  if (!state.drift) return null;
+  const check = state.drift.citations.find(candidate => candidate.blockId === blockId && candidate.index === index);
+  if (!check) return null;
+  const same = check.source.path === source.path && check.source.startLine === source.startLine && check.source.endLine === source.endLine;
+  return same ? check : null;
+}
+async function openDrift() {
+  const result = await op({ op: "checkDrift" });
+  if (!result.ok) return;
+  driftOpen = true;
+  renderDriftPanel();
+}
+function closeDrift() { driftOpen = false; const host = $("modal"); host.hidden = true; host.replaceChildren(); }
+function renderDriftPanel() {
+  const d = state && state.drift;
+  if (!driftOpen || !d) return;
+  const host = $("modal");
+  host.hidden = false;
+  const c = d.counts;
+  const buttons = el("div", { class: "row" },
+    c.moved ? el("button", { text: "Re-anchor " + c.moved + " moved", title: "Point each moved citation at where its lines are now", onclick: () => op({ op: "reanchor" }) }) : null,
+    d.syncTargets.length ? el("button", { class: "primary", text: "Sync…", title: "One request per drifted block; each proposal is reviewed on its own", onclick: () => {
+      const targets = d.syncTargets;
+      closeDrift();
+      if (targets.length === 1) openPreview("sync", targets[0]); else openBatchPreview("sync", targets);
+    } }) : null,
+    el("button", { text: "Record baseline", title: "Fingerprint citations that have none; uncited changes restart from now", onclick: () => op({ op: "recordBaseline" }) }),
+    el("button", { text: "Check again", onclick: openDrift }),
+    el("button", { text: "Close", title: "Esc", onclick: closeDrift }));
+  const rows = el("div", { class: "rows" });
+  for (const check of d.citations) {
+    const range = check.source.path + (check.source.startLine ? ":" + check.source.startLine + "-" + (check.source.endLine || check.source.startLine) : "");
+    const moved = check.movedTo ? "; now at " + check.movedTo.startLine + "-" + check.movedTo.endLine : "";
+    rows.append(el("div", { class: "cite" },
+      el("button", { class: "ghost", text: check.title, title: "Go to this block", onclick: () => { closeDrift(); surface = "page"; centerOn = check.blockId; op({ op: "focus", id: check.blockId }); } }),
+      el("span", { class: "path", text: range }),
+      el("span", { class: "drift-state", text: check.state + (check.reason ? ": " + check.reason : "") + moved }),
+      check.state === "changed" ? el("button", { text: "Still true", onclick: () => op({ op: "stillTrue", id: check.blockId, index: check.index }) }) : null));
+  }
+  const uncovered = d.uncovered;
+  if (uncovered.ok) for (const file of uncovered.files) {
+    rows.append(el("div", { class: "cite" }, el("button", { class: "ghost", text: "+ " + file, title: "Open it; no block cites it", onclick: () => { closeDrift(); openFile(file); } }), el("span", { class: "path", text: "no block cites it" })));
+  } else rows.append(el("div", { class: "cite" }, el("span", { class: "path", text: "uncited changes: " + uncovered.reason })));
+  const counts = c.changed + " changed · " + c.missing + " missing · " + c.moved + " moved · " + c.unstamped + " without a baseline · " + c.unchecked + " unchecked · " + (uncovered.ok ? uncovered.files.length + (uncovered.truncated ? "+" : "") : "?") + " uncited changes";
+  host.replaceChildren(el("div", { class: "modal drift-panel", role: "dialog", "aria-label": "drift" },
+    el("h3", { text: "Drift — checked " + new Date(d.checkedAt).toLocaleTimeString() }),
+    d.stale ? el("p", { class: "hint", text: "The document changed since this check — check again." }) : null,
+    el("p", { class: "subtle", text: counts }),
+    buttons,
+    rows));
 }
 /** Every key the page answers to, grouped the way the terminal's `?` sheet is. */
 function openKeys() {
@@ -1894,7 +2083,7 @@ function openKeys() {
     el("div", { class: "keys" },
       group("Move", [["j / k", "next / previous block"], ["← ↑ → ↓", "walk the focus diagram (brainstorm, explore)"], ["Enter", "go to the highlighted block"], ["n", "next open block"], ["Esc", "back out: block → overview"], ["v", "switch page ⇄ map"], ["S", "screens: every page and component"], ["/", "find a file"]]),
       group("Edit", [["space", "step the status"], ["o / O", "add a block after / inside"], ["U", "uses: link to a reusable block anywhere"], ["M", "extract: move up a level to share it"], ["⌫", "delete the focused block"], ["⌘Z / ⇧⌘Z", "undo / redo"], ["⌘S", "save"], ["g", "grounded: hide uncited blocks (explore)"]]),
-      group("Ask the agent", [...verbs, ["m", "mark / unmark for a parallel batch"], ["⇧-click", "mark a row in the outline"], ["Enter", "submit an open preview"]]),
+      group("Ask the agent", [...verbs, ["m", "mark / unmark for a parallel batch"], ["⇧-click", "mark a row in the outline"], ["Enter", "submit an open preview"], ["D", "check drift: cited code vs the diagram"]]),
       group("Map", [["drag", "move a block, or pan"], ["dbl-click", "add a block there"], ["Enter", "go inside the focused block"], ["F2", "rename"], ["F / T", "fit / tidy"]])),
     el("div", { class: "row" }, el("button", { class: "primary", text: "Close", onclick: close }), el("span", { class: "hint", text: "? toggles this sheet" }))));
 }
@@ -1919,10 +2108,10 @@ async function submitVerb(verb, id) {
 async function submitBatchVerb(verb, ids) {
   const result = await op({ op: "submitBatch", verb, ids });
   if (result.status === 409 && result.data.needsSave) {
-    ask("This document has unsaved edits. Save them and submit?", "Save and submit", () => op({ op: "submitBatch", verb, ids, saveFirst: true }).then(next => { if (next.ok) { marked.clear(); closeModal(); } }));
+    ask("This document has unsaved edits. Save them and submit?", "Save and submit", () => op({ op: "submitBatch", verb, ids, saveFirst: true }).then(next => { if (next.ok) { if (verb !== "sync") marked.clear(); closeModal(); } }));
     return;
   }
-  if (result.ok) { marked.clear(); closeModal(); }
+  if (result.ok) { if (verb !== "sync") marked.clear(); closeModal(); }
 }
 function startProject(kind, text) {
   if (kind === "prune" || kind === "replan" || kind === "execute") { openPreview(kind); return; }
@@ -2175,6 +2364,7 @@ $("fit").addEventListener("click", fit);
 function toggleMap() { surface = surface === "map" ? "page" : "map"; render(); if (surface === "map") fit(); }
 $("mapToggle").addEventListener("click", toggleMap);
 $("screensToggle").addEventListener("click", toggleScreens);
+$("driftToggle").addEventListener("click", () => { if (state && state.document) openDrift(); });
 $("filesToggle").addEventListener("click", () => { filesOpen = !filesOpen; if (filesOpen) loadFiles(); render(); });
 $("keysToggle").addEventListener("click", () => { if (keysOpen) { keysOpen = false; $("modal").hidden = true; } else openKeys(); });
 $("docTitle").addEventListener("keydown", event => { if (event.key === "Enter" || event.key === "Escape") event.target.blur(); });
@@ -2189,6 +2379,7 @@ document.addEventListener("keydown", event => {
   if (event.key === "Escape" && keysOpen) { keysOpen = false; $("modal").hidden = true; return; }
   if (event.key === "Escape" && mockupOpen) { closeMockup(); return; }
   if (event.key === "Escape" && goalOpen) { closeGoal(); return; }
+  if (event.key === "Escape" && driftOpen) { closeDrift(); return; }
   if (event.key === "Escape" && (preview || confirming)) { if (confirming) { confirming = false; } closeModal(); return; }
   if (event.key === "Escape" && purposeOpen) { purposeOpen = false; render(); return; }
   if (event.key === "Escape" && viewer && !typing) { viewer = null; renderViewer(); return; }
@@ -2199,7 +2390,7 @@ document.addEventListener("keydown", event => {
   }
   if (event.key === "/" && !typing) { event.preventDefault(); filesOpen = true; loadFiles(); render(); requestAnimationFrame(() => { const input = document.querySelector("#files input"); if (input) input.focus(); }); return; }
   if (event.key === "?" && !typing) { event.preventDefault(); if (keysOpen) { keysOpen = false; $("modal").hidden = true; } else if (state) openKeys(); return; }
-  if (typing || preview || keysOpen || pickerOpen || mockupOpen || goalOpen) return;
+  if (typing || preview || keysOpen || pickerOpen || mockupOpen || goalOpen || driftOpen) return;
   if (mod && event.key.toLowerCase() === "z") { event.preventDefault(); op({ op: event.shiftKey ? "redo" : "undo" }); return; }
   if (mod || !state || !state.document) return;
   const block = selectedBlock();
@@ -2252,6 +2443,7 @@ document.addEventListener("keydown", event => {
     }
     case "v": toggleMap(); return;
     case "S": toggleScreens(); return;
+    case "D": openDrift(); return;
     case "m": if (state.selected) toggleMark(state.selected); else { flash("select a block first", true); render(); } return;
     case "U": if (block) openUsesPicker(block); return;
     case "M": if (block && state.flow.extractTargets.length) openExtract(block); return;

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { ScopeError, composePrompt, resolveScope } from "../src/compose.ts";
+import { CLARIFY, SYNC, verbById, verbsFor } from "../src/flow.ts";
 import { createBlock, createDiagram, createDocument, createEdge } from "../src/model.ts";
 
 /**
@@ -438,5 +439,46 @@ describe("change plans", () => {
 		);
 		expect(composePrompt(document, { kind: "block", id: "cited" }, "enhance").text).toContain("## Evidence rules");
 		expect(composePrompt(document, { kind: "block", id: "bare" }, "enhance").text).not.toContain("## Evidence rules");
+	});
+});
+
+describe("sync and ask requests", () => {
+	const changed = (blockId: string, title: string, source: { path: string; startLine: number; endLine: number }) =>
+		({ blockId, title, index: 0, source, state: "changed", reason: "the cited lines changed" }) as const;
+
+	test("a Sync names the drifted citations in scope and how to see what changed", () => {
+		const document = fixture();
+		const apiSource = { path: "src/api.ts", startLine: 1, endLine: 5 };
+		document.root.blocks[0]!.sources = [{ ...apiSource, digest: "d" }];
+		document.root.blocks[1]!.sources = [{ path: "src/db.ts", startLine: 1, endLine: 2, digest: "e" }];
+		const text = composePrompt(document, { kind: "block", id: "api" }, "sync", {
+			drift: {
+				commit: "abc",
+				citations: [changed("api", "API", apiSource), changed("db", "Database", { path: "src/db.ts", startLine: 1, endLine: 2 })],
+			},
+		}).text;
+		expect(text).toContain("intent: sync");
+		expect(text).toContain("## Evidence rules");
+		expect(text).toContain("## Drift\nThese citations no longer match the code they were made against.");
+		expect(text).toContain("[api] API: src/api.ts:1-5 — changed: the cited lines changed");
+		expect(text).toContain("`git diff abc -- <path>`");
+		expect(text).not.toContain("src/db.ts");
+	});
+
+	test("Ask on a brainstorm idea reads the cited code instead of forbidding it", () => {
+		const document = fixture();
+		document.purpose = "brainstorm";
+		const text = composePrompt(document, { kind: "block", id: "auth" }, "clarify").text;
+		expect(text).toContain("intent: clarify");
+		expect(text).toContain("Keep the question as the first paragraph");
+		expect(text).toContain("## Evidence rules");
+		expect(text).toContain("This request reads the code the block cites");
+		expect(text).not.toContain("Do not read or change code");
+	});
+
+	test("Sync and Ask resolve by id without being offered as block verbs", () => {
+		expect(verbById("plan", "clarify")).toBe(CLARIFY);
+		expect(verbById("plan", "sync")).toBe(SYNC);
+		expect(verbsFor("plan").map(verb => verb.id)).not.toContain("sync");
 	});
 });

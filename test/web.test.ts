@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { ActionRegistry, type BeginInput } from "../src/actions.ts";
+import type { CodeIntel } from "../src/code-intel.ts";
+import { linesDigest } from "../src/drift.ts";
 import { createBlock, createDocument, findBlockLocation } from "../src/model.ts";
 import type { RelatedRanker } from "../src/relevance.ts";
 import { DocumentStore, serializeDocument } from "../src/store.ts";
@@ -15,7 +17,7 @@ afterEach(async () => {
 	for (const step of cleanup.splice(0).reverse()) await step();
 });
 
-async function harness(options: { rankRelated?: RelatedRanker } = {}) {
+async function harness(options: { rankRelated?: RelatedRanker; codeIntel?: CodeIntel } = {}) {
 	const dir = await mkdtemp(join(tmpdir(), "omp-visual-planner-web-"));
 	cleanup.push(() => rm(dir, { recursive: true, force: true }));
 	const document = createDocument({ title: "Service" });
@@ -41,6 +43,7 @@ async function harness(options: { rankRelated?: RelatedRanker } = {}) {
 		getSession: () => session,
 		onChange: () => (changes += 1),
 		rankRelated: options.rankRelated,
+		codeIntel: options.codeIntel,
 		// What the extension does, minus the agent: register the request.
 		submit: (request, prompt) => {
 			const began = session.registry.begin(request);
@@ -408,7 +411,9 @@ describe("web mode files", () => {
 		expect((await fetch(`${origin}/api/files`)).status).toBe(401);
 
 		expect((await op({ op: "addSource", id: "api", path: "src/app.ts", startLine: 2, endLine: 2 })).status).toBe(200);
-		expect(findBlockLocation(store.require().root, "api")!.block.sources).toEqual([{ path: "src/app.ts", startLine: 2, endLine: 2 }]);
+		expect(findBlockLocation(store.require().root, "api")!.block.sources).toEqual([
+			{ path: "src/app.ts", startLine: 2, endLine: 2, digest: linesDigest(["line two"]) },
+		]);
 		expect((await op({ op: "addSource", id: "api", path: "../x.ts" })).status).toBe(400);
 		expect((await op({ op: "removeSource", id: "api", index: 0 })).status).toBe(200);
 		expect(findBlockLocation(store.require().root, "api")!.block.sources).toEqual([]);
@@ -509,5 +514,112 @@ describe("web mode batches, mockups and change plans", () => {
 		expect(submitted.at(-1)!.request).toMatchObject({ kind: "change", intent: "change", scope: { kind: "project" } });
 		expect(submitted.at(-1)!.prompt).toContain("## Task\nintent: change");
 		expect((await op({ op: "submit", start: { kind: "change", goal: "  " } })).status).toBe(400);
+	});
+});
+
+describe("web mode drift", () => {
+	test("check, still true and record baseline work on the citations the page added", async () => {
+		const { dir, op, store } = await harness();
+		const refused = await op({ op: "preview", verb: "sync", id: "api" });
+		expect(refused.status).toBe(400);
+		expect(((await refused.json()) as { error: string }).error).toBe("check drift first");
+
+		const checked = await op({ op: "checkDrift" });
+		expect(checked.status).toBe(200);
+		expect(((await checked.json()) as { state: WebState }).state.drift!.citations).toEqual([]);
+
+		await mkdir(join(dir, "src"));
+		await writeFile(join(dir, "src", "app.ts"), "one\ntwo\nthree\n", "utf8");
+		expect((await op({ op: "addSource", id: "api", path: "src/app.ts", startLine: 2, endLine: 2 })).status).toBe(200);
+		await writeFile(join(dir, "src", "app.ts"), "one\nTWO\nthree\n", "utf8");
+		const drifted = (await (await op({ op: "checkDrift" })).json()) as { state: WebState; message: string };
+		expect(drifted.state.drift!.counts.changed).toBe(1);
+		expect(drifted.state.drift!.syncTargets).toEqual(["api"]);
+
+		const preview = (await (await op({ op: "preview", verb: "sync", id: "api" })).json()) as { preview: { text: string } };
+		expect(preview.preview.text).toContain("## Drift");
+
+		const still = (await (await op({ op: "stillTrue", id: "api", index: 0 })).json()) as { state: WebState };
+		expect(still.state.drift!.counts.changed).toBe(0);
+		expect((await op({ op: "stillTrue", id: "api", index: 0 })).status).toBe(400);
+
+		expect((await op({ op: "recordBaseline" })).status).toBe(200);
+		expect(store.require().baseline!.at).toBeString();
+	});
+});
+
+describe("web mode code-line requests", () => {
+	async function withApp(options: Parameters<typeof harness>[0] = {}) {
+		const h = await harness(options);
+		await mkdir(join(h.dir, "src"));
+		await writeFile(join(h.dir, "src", "app.ts"), "a\nb\nc\nd\ne\n", "utf8");
+		return h;
+	}
+	type Answer = { error?: string; preview?: { text: string; request?: { verb: string; id: string } } };
+
+	test("a change request adds a cited block under the focused one and previews Refine", async () => {
+		const { op, store } = await withApp();
+		expect((await op({ op: "focus", id: "api" })).status).toBe(200);
+		const response = await op({ op: "lineRequest", kind: "change", path: "src/app.ts", startLine: 2, endLine: 3, text: "retry on timeout" });
+		expect(response.status).toBe(200);
+		const answer = (await response.json()) as Answer;
+		expect(answer.preview!.request!.verb).toBe("refine");
+		expect(answer.preview!.text).toContain("intent: enhance");
+		const child = findBlockLocation(store.require().root, "api")!.block.children!.blocks[0]!;
+		expect(child.id).toBe(answer.preview!.request!.id);
+		expect(child.title).toBe("retry on timeout");
+		expect(child.evidence).toBe("observed");
+		expect(child.sources).toEqual([{ path: "src/app.ts", startLine: 2, endLine: 3, digest: linesDigest(["b", "c"]) }]);
+	});
+
+	test("a question adds a Q: block whose Ask request can be submitted", async () => {
+		const { op, store, submitted } = await withApp();
+		const answer = (await (await op({ op: "lineRequest", kind: "ask", path: "src/app.ts", startLine: 1, endLine: 1, text: "why a?" })).json()) as Answer;
+		expect(answer.preview!.request!.verb).toBe("clarify");
+		expect(answer.preview!.text).toContain("intent: clarify");
+		const id = answer.preview!.request!.id;
+		expect(findBlockLocation(store.require().root, id)!.block.title).toStartWith("Q: ");
+		expect((await op({ op: "submit", verb: "clarify", id, saveFirst: true })).status).toBe(200);
+		expect(submitted.at(-1)!.request.kind).toBe("clarify");
+	});
+
+	test("bad line requests are refused by name", async () => {
+		const { op } = await withApp();
+		const error = async (body: Record<string, unknown>) => {
+			const response = await op({ op: "lineRequest", path: "src/app.ts", startLine: 1, endLine: 1, text: "x", ...body });
+			expect(response.status).toBe(400);
+			return ((await response.json()) as Answer).error;
+		};
+		expect(await error({ kind: "ask", text: "  " })).toBe("a question needs text");
+		expect(await error({ kind: "change", path: "../x.ts" })).toBe("path must be relative to the workspace");
+		expect(await error({ kind: "change", startLine: 3, endLine: 2 })).toBe("lines must be a range starting at 1");
+		expect((await op({ op: "setPurpose", purpose: "explore" })).status).toBe(200);
+		expect(await error({ kind: "change" })).toBe("in an explore map a change request starts a change plan");
+	});
+
+	test("a change plan started from selected lines names them as a starting point", async () => {
+		const { op, submitted } = await withApp();
+		const response = await op({ op: "submit", start: { kind: "change", goal: "Add retry", lines: { path: "src/app.ts", startLine: 2, endLine: 3 } } });
+		expect(response.status).toBe(200);
+		expect(submitted.at(-1)!.prompt).toContain("## Starting points");
+		expect(submitted.at(-1)!.prompt).toContain("src/app.ts:2-3");
+	});
+
+	test("symbol lookups answer unavailable without a language server, and pass a server's answer through", async () => {
+		const plain = await withApp();
+		const get = (h: typeof plain, path: string) => fetch(`${h.origin}${path}`, { headers: { cookie: h.cookie } });
+		expect(await (await get(plain, "/api/symbol?path=src/app.ts&line=1&character=0")).json()).toEqual({
+			ok: false,
+			reason: "language servers are not available in this session",
+		});
+		const facts = { hover: "h", definitions: [], references: [{ path: "src/app.ts", line: 1, preview: "x" }], truncated: false };
+		const stubbed = await withApp({
+			codeIntel: {
+				outline: async () => ({ ok: true, server: "stub", value: [] }),
+				symbolAt: async () => ({ ok: true, server: "stub", value: facts }),
+			},
+		});
+		expect(await (await get(stubbed, "/api/symbol?path=src/app.ts&line=1&character=0")).json()).toEqual({ ok: true, server: "stub", value: facts });
+		expect((await get(stubbed, "/api/symbol?path=src/app.ts&line=0&character=0")).status).toBe(400);
 	});
 });

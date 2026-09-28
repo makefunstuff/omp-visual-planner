@@ -14,7 +14,7 @@ import { MAX_VIEWER_FILE_BYTES, PROJECT_DIR } from "./store.ts";
 export const MAX_LISTED_FILES = 5000;
 export const MAX_SERVED_LINES = 5000;
 
-const SKIPPED_DIRECTORIES = new Set([
+export const SKIPPED_DIRECTORIES = new Set([
 	".git",
 	"node_modules",
 	"vendor",

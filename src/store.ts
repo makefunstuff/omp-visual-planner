@@ -96,9 +96,10 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 			acceptanceCriteria: [...block.acceptanceCriteria],
 			position: { x: block.position.x, y: block.position.y },
 			sources: block.sources.map(source => {
-				const entry: { path: string; startLine?: number; endLine?: number } = { path: source.path };
+				const entry: { path: string; startLine?: number; endLine?: number; digest?: string } = { path: source.path };
 				if (source.startLine !== undefined) entry.startLine = source.startLine;
 				if (source.endLine !== undefined) entry.endLine = source.endLine;
+				if (source.digest !== undefined) entry.digest = source.digest;
 				return entry;
 			}),
 			evidence: block.evidence,
@@ -128,6 +129,14 @@ function normalizeDocument(document: DiagramDocument): DiagramDocument {
 		goal: document.goal,
 		purpose: document.purpose,
 		revision: document.revision,
+		...(document.baseline
+			? {
+					baseline: {
+						...(document.baseline.commit !== undefined ? { commit: document.baseline.commit } : {}),
+						at: document.baseline.at,
+					},
+				}
+			: {}),
 		root: normalizeDiagram(document.root),
 	};
 }
