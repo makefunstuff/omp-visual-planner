@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "id": "b73fe3d5-9479-4913-bd4d-94f49dae4fc9",
+  "id": "e7fecdcd-aecb-44ad-88ef-a822f37427bf",
   "title": "Discovery: omp-visual-planner",
   "goal": "Map the codebase under .",
-  "purpose": "explore",
-  "revision": 12,
+  "purpose": "plan",
+  "revision": 18,
   "root": {
-    "id": "b73fe3d5-root",
+    "id": "217aa45c-5299-4992-be4b-c358124ef149",
     "blocks": [
       {
-        "id": "ext-entry",
+        "id": "entry",
         "title": "Extension entry & session lifecycle",
-        "description": "Registers the `/diagram` command and the two planner tools on one ExtensionAPI; owns the process-wide session map, branch-position request tokens, persisted resume state, and the submit path shared by overlay and web.",
+        "description": "package.json registers src/index.ts as the OMP extension. The default export wires one PlannerSession per OMP session (document store, request journal, navigation state persisted in the extension's session-metadata namespace), registers the /diagram command and the visual_planner_read / visual_planner_propose tools, and follows session_start/branch/tree/switch/shutdown. It also binds the session's judge-backed related-context ranker, OMP's LSP client and $EDITOR into both surfaces.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
@@ -20,63 +20,73 @@
         },
         "sources": [
           {
-            "path": "src/index.ts",
-            "startLine": 342,
-            "endLine": 345
+            "path": "package.json",
+            "startLine": 6,
+            "endLine": 12,
+            "digest": "6730502f2429455f764809fcd39b3cf4dacf5c0a065af495b434f2ed08795d63"
           },
           {
             "path": "src/index.ts",
-            "startLine": 433,
-            "endLine": 437
+            "startLine": 1,
+            "endLine": 24,
+            "digest": "6df3d41b28e89a65759c7c03b30ace86ea2b8e74c4209fa0981b525706df3df1"
           },
           {
             "path": "src/index.ts",
-            "startLine": 487,
-            "endLine": 491
+            "startLine": 405,
+            "endLine": 636,
+            "digest": "32bde12ebfd7a64a7697f53c0337a7771a8c7cff080099ca6cdd3643223c1140"
           }
         ],
         "evidence": "observed",
         "status": "open",
+        "uses": [
+          "related-judge",
+          "related-ranker",
+          "insight-lsp",
+          "editing-editor"
+        ],
         "actions": {
           "enhance": "",
           "execute": ""
         },
         "children": {
-          "id": "ext-entry-inner",
+          "id": "entry-inside",
           "blocks": [
             {
-              "id": "ext-command",
-              "title": "`/diagram` command router",
-              "description": "Parses new / open <path> / draft [purpose] / discover [path] / web, opens or creates the document, and runs the screen.",
+              "id": "entry-command",
+              "title": "/diagram command router",
+              "description": "Parses `web`, `web stop`, `help`, `new [purpose]`, `open <path>`, `draft [brainstorm|plan]`, `discover [path]` and `change [goal]`; everything except web needs an interactive TUI and ends in runScreen with an optional ScreenStart.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
-                "x": 0,
-                "y": 1
+                "x": 2,
+                "y": 2
               },
               "sources": [
                 {
                   "path": "src/index.ts",
-                  "startLine": 399,
-                  "endLine": 430
+                  "startLine": 408,
+                  "endLine": 500,
+                  "digest": "ef395ab4107c4977d489295358c42144f730b84d7cee12f7a12c2fe76db2f75b"
                 }
               ],
               "evidence": "observed",
               "status": "open",
+              "uses": [
+                "store-class",
+                "store-paths"
+              ],
               "actions": {
                 "enhance": "",
                 "execute": ""
               },
-              "children": {
-                "id": "cafd9f09-5651-41d6-98cd-994f8d222a51",
-                "blocks": [],
-                "edges": []
-              }
+              "children": null
             },
             {
-              "id": "ext-tools",
-              "title": "Planner tools (read / propose)",
-              "description": "Two discoverable agent tools: `read` exposes the active document or one scope; `propose` stages a replacement checked against the request token and revision.",
+              "id": "entry-submit",
+              "title": "Request submission",
+              "description": "submitRequest registers one request and hands its prompt to the agent; submitBatch registers a batch, writes each member's instructions where its subagent reads them, and hands the parent prompt over. Shared by the overlay and web mode.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
@@ -86,8 +96,330 @@
               "sources": [
                 {
                   "path": "src/index.ts",
-                  "startLine": 433,
-                  "endLine": 503
+                  "startLine": 321,
+                  "endLine": 375,
+                  "digest": "f0df887dab27e263290ba8f7b7938abec181340db7aafcc78ca3136b0262d74e"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "actions-registry",
+                "flow-requests"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "entry-read-tool",
+              "title": "visual_planner_read tool",
+              "description": "Resolves a block/diagram/project scope (default: the diagram on top of the navigation stack) and lists the document id, revision, dirty flag and each block's id, title, evidence and uses.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 59,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/index.ts",
+                  "startLine": 502,
+                  "endLine": 558,
+                  "digest": "df433064e9d1ecfbd80f0cc52d954e6e0d804ed0aceb5675341d4ea3e700d69c"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "compose-scope",
+                "model-schemas"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "entry-propose-tool",
+              "title": "visual_planner_propose tool",
+              "description": "Stages a proposal via ActionRegistry.stage with the branch token, document id, live document and current on-disk digest; on success fingerprints the replacement's citations (stampReplacement), persists, notifies listeners and tells the model the proposal is NOT applied.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/index.ts",
+                  "startLine": 560,
+                  "endLine": 618,
+                  "digest": "dd5f1f3e4232a974cb0430e9f7a82e1087d074351c88722f32fd82b20a949b5a"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "actions-registry",
+                "drift-fingerprint",
+                "model-schemas",
+                "store-class"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "entry-session",
+              "title": "Session state & branch tracking",
+              "description": "SESSIONS map keyed by OMP session id; a request's branch token is `<session>:<leafId>`. adoptSession reloads branch metadata and the project file on session events so requests owned by another branch position are invalidated, not inherited; session_shutdown stops the web server and drops the session.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 37,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/index.ts",
+                  "startLine": 56,
+                  "endLine": 84,
+                  "digest": "8288872a1406356cc355187d5337f5c51841c201b51ebfc1bcc3a4c3d1b6efe2"
+                },
+                {
+                  "path": "src/index.ts",
+                  "startLine": 196,
+                  "endLine": 222,
+                  "digest": "8d7116b4cb37c4ae7fbf5759dd200cea1d916585546240e4d6803a210c622e2e"
+                },
+                {
+                  "path": "src/index.ts",
+                  "startLine": 620,
+                  "endLine": 635,
+                  "digest": "fddeab640219ff5474072524914e5fdb31ebcce06d570fab2f563708f5348324"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "actions-registry"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            }
+          ],
+          "edges": [
+            {
+              "id": "e-entry-cmd-submit",
+              "from": "entry-command",
+              "to": "entry-submit",
+              "label": "screen result submits",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            },
+            {
+              "id": "e-entry-submit-propose",
+              "from": "entry-submit",
+              "to": "entry-propose-tool",
+              "label": "requestId token awaited",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            }
+          ]
+        }
+      },
+      {
+        "id": "model",
+        "title": "Document model & schema",
+        "description": "Durable nested-diagram contract (schema version 1): DiagramDocument → root Diagram → Blocks (with optional children Diagram) and labelled Edges between siblings, plus purposes, statuses, evidence, venues, surfaces and intents. Pure functions for construction, traversal, mutation, reuse links, validation and legacy import.",
+        "expectedOutput": "",
+        "acceptanceCriteria": [],
+        "position": {
+          "x": 38,
+          "y": 2
+        },
+        "sources": [
+          {
+            "path": "src/model.ts",
+            "startLine": 11,
+            "endLine": 126,
+            "digest": "6ecd9d7fb2ba17e11ffe33bb1983e465d67223599b61f7818d16a0a2d03e2889"
+          }
+        ],
+        "evidence": "observed",
+        "status": "open",
+        "actions": {
+          "enhance": "",
+          "execute": ""
+        },
+        "children": {
+          "id": "model-inside",
+          "blocks": [
+            {
+              "id": "model-types",
+              "title": "Types & enumerations",
+              "description": "Block (title, description, expectedOutput, acceptanceCriteria, position, sources with sha256 digest, evidence, status, venue, surface, mockup ≤40 000 chars, uses, actions, children), Edge, Diagram, DiagramDocument (optional git baseline), Scope and the Intent union.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/model.ts",
+                  "startLine": 11,
+                  "endLine": 126,
+                  "digest": "6ecd9d7fb2ba17e11ffe33bb1983e465d67223599b61f7818d16a0a2d03e2889"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "model-schemas",
+              "title": "ArkType schemas & tool parameters",
+              "description": "Recursive schemas built from the host-injected arktype builder and cached per namespace; toolSchemasFor yields the read/propose tool parameter schemas.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 30,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/model.ts",
+                  "startLine": 181,
+                  "endLine": 268,
+                  "digest": "53b2bdd03edec90bc1b6180678b7bd587e2f4e0600837f1a34b5f1256166d17b"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "model-tree",
+              "title": "Construction, traversal & mutation",
+              "description": "createBlock/Edge/Diagram/Document; eachDiagram/eachBlock/findBlockLocation/findDiagramPath/findOwnedDiagram; removeBlock (drops incident edges and uses), addBlock, moveBlockInOrder, addEdge; spatial nearestBlock, cycleBlock and `path:10-40` source-ref parsing.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 66,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/model.ts",
+                  "startLine": 274,
+                  "endLine": 415,
+                  "digest": "f39801989ff99065282078e59ba04c25b5ca965631f608bd192508c28293e601"
+                },
+                {
+                  "path": "src/model.ts",
+                  "startLine": 545,
+                  "endLine": 645,
+                  "digest": "6889378edbbfe8ddadfa8a416b9985be0474b1778e4874462d7f4e08025728b6"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "model-reuse",
+              "title": "Reuse links & extract",
+              "description": "addUse/removeUse, usersOutside (links a deletion would cut), extractTargets, and extractBlock: lift a block with its subtree to a containing level, the old parent now uses it and every former sibling edge becomes a use.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/model.ts",
+                  "startLine": 417,
+                  "endLine": 543,
+                  "digest": "fef6ccfd736dc6f599eaa8606f1f25eb3739de16b7fb8d5e651f2115d1a94add"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "model-validate",
+              "title": "Validation",
+              "description": "validateDocument: version check first, structural parse, then graph checks — id ledger, per-block and per-diagram checks, and uses refusal (self, ancestor, descendant, unknown, duplicate); validateBlock/validateDiagram for scoped replacements; missing status defaults to open.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 31,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/model.ts",
+                  "startLine": 647,
+                  "endLine": 829,
+                  "digest": "8cd340e5aaf57eaa87fb6241964fc79c6e8d96e0e011c2ebc7c390731a484c72"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "model-legacy",
+              "title": "Legacy board import",
+              "description": "Converts ratatui-era `{ boxes, edges }` boards into one diagram: first text line is the title, the rest the description; endpoint indexes validated.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 49,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/model.ts",
+                  "startLine": 831,
+                  "endLine": 908,
+                  "digest": "119ad6f86e26bb745c4b813ed0525bf595fb49fbdd988bb400b5588355b8c2d3"
                 }
               ],
               "evidence": "observed",
@@ -103,173 +435,27 @@
         }
       },
       {
-        "id": "model",
-        "title": "Document model, schema & validation",
-        "description": "Durable nested-diagram contract: typed Block/Edge/Diagram/DiagramDocument plus arktype schemas, recursive traversal and mutation helpers, structural validation, and legacy `{boxes,edges}` board import.",
-        "expectedOutput": "",
-        "acceptanceCriteria": [],
-        "position": {
-          "x": 38,
-          "y": 2
-        },
-        "sources": [
-          {
-            "path": "src/model.ts",
-            "startLine": 11,
-            "endLine": 92
-          },
-          {
-            "path": "src/model.ts",
-            "startLine": 181,
-            "endLine": 206
-          },
-          {
-            "path": "src/model.ts",
-            "startLine": 316,
-            "endLine": 467
-          }
-        ],
-        "evidence": "observed",
-        "status": "open",
-        "actions": {
-          "enhance": "",
-          "execute": ""
-        },
-        "children": {
-          "id": "model-inner",
-          "blocks": [
-            {
-              "id": "model-schema",
-              "title": "Schema & types",
-              "description": "Block, Edge, Diagram and DiagramDocument shapes plus the arktype definitions and the recursive scope the host builder exports.",
-              "expectedOutput": "",
-              "acceptanceCriteria": [],
-              "position": {
-                "x": 2,
-                "y": 2
-              },
-              "sources": [
-                {
-                  "path": "src/model.ts",
-                  "startLine": 11,
-                  "endLine": 92
-                },
-                {
-                  "path": "src/model.ts",
-                  "startLine": 181,
-                  "endLine": 206
-                }
-              ],
-              "evidence": "observed",
-              "status": "open",
-              "actions": {
-                "enhance": "",
-                "execute": ""
-              },
-              "children": {
-                "id": "88eed356-8d7a-4221-85bf-1aecb795806b",
-                "blocks": [],
-                "edges": []
-              }
-            },
-            {
-              "id": "model-graph",
-              "title": "Traversal & mutation helpers",
-              "description": "eachBlock/eachDiagram/find*, subtree removal, ordered insert, nearest-block and cycle selection, and `path:start-end` source-ref parsing.",
-              "expectedOutput": "",
-              "acceptanceCriteria": [],
-              "position": {
-                "x": 22,
-                "y": 2
-              },
-              "sources": [
-                {
-                  "path": "src/model.ts",
-                  "startLine": 316,
-                  "endLine": 467
-                }
-              ],
-              "evidence": "observed",
-              "status": "open",
-              "actions": {
-                "enhance": "",
-                "execute": ""
-              },
-              "children": null
-            },
-            {
-              "id": "model-validate",
-              "title": "Validation & legacy import",
-              "description": "validateDocument/Block/Diagram run the schema then graph-level checks (id ledger, edge endpoints); `importLegacyBoard` converts a ratatui-era board into one diagram.",
-              "expectedOutput": "",
-              "acceptanceCriteria": [],
-              "position": {
-                "x": 56,
-                "y": 2
-              },
-              "sources": [
-                {
-                  "path": "src/model.ts"
-                }
-              ],
-              "evidence": "observed",
-              "status": "open",
-              "actions": {
-                "enhance": "",
-                "execute": ""
-              },
-              "children": null
-            }
-          ],
-          "edges": [
-            {
-              "id": "mi1",
-              "from": "model-schema",
-              "to": "model-graph",
-              "label": "types",
-              "direction": "forward",
-              "routing": "auto",
-              "fromPort": "auto",
-              "toPort": "auto"
-            },
-            {
-              "id": "mi2",
-              "from": "model-schema",
-              "to": "model-validate",
-              "label": "types",
-              "direction": "forward",
-              "routing": "auto",
-              "fromPort": "auto",
-              "toPort": "auto"
-            }
-          ]
-        }
-      },
-      {
         "id": "store",
-        "title": "Document store (disk, digest, atomic save)",
-        "description": "Project/discovery path resolution, deterministic field-ordered serialization, sha256 digests, and the DocumentStore class that opens, saves atomically and reports external-edit conflicts.",
+        "title": "Document store",
+        "description": "The only writer of project documents. Keeps the last on-disk digest so an outside edit is refused rather than overwritten, and holds the in-memory undo/redo history.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 74,
+          "x": 69,
           "y": 2
         },
         "sources": [
           {
             "path": "src/store.ts",
-            "startLine": 27,
-            "endLine": 33
+            "startLine": 1,
+            "endLine": 11,
+            "digest": "a49dad57e3ae0db1dfc199e52b65fed01946c9aee5b7042a8aba97c2a8696a04"
           },
           {
             "path": "src/store.ts",
-            "startLine": 112,
-            "endLine": 134
-          },
-          {
-            "path": "src/store.ts",
-            "startLine": 367,
-            "endLine": 397
+            "startLine": 166,
+            "endLine": 403,
+            "digest": "ef21ee2c5c2454932339ff33ed190eef3785264586f0c610e19b08e0d5d7e261"
           }
         ],
         "evidence": "observed",
@@ -279,12 +465,12 @@
           "execute": ""
         },
         "children": {
-          "id": "store-inner",
+          "id": "store-inside",
           "blocks": [
             {
               "id": "store-paths",
-              "title": "Paths, serialization & digest",
-              "description": "`.omp-visual-planner/architecture.json` defaults, per-target discovery paths, `normalizeDocument` field order for byte-identical output, and sha256 text digests.",
+              "title": "Project paths",
+              "description": "`.omp-visual-planner/architecture.json` by default, `discovery/<target>` drafts, `changes/<slug>` plans suffixed -2, -3… so they never overwrite; the discover-. codebase map; the session-metadata namespace and the 2 MiB viewer cap.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
@@ -294,13 +480,35 @@
               "sources": [
                 {
                   "path": "src/store.ts",
-                  "startLine": 27,
-                  "endLine": 63
-                },
+                  "startLine": 28,
+                  "endLine": 82,
+                  "digest": "1a36bfacf382e018e19647a707f7793a534929980e5b3a62562b03bf4d727d47"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "store-serialize",
+              "title": "Canonical serialization & digest",
+              "description": "normalizeDocument fixes field order so structurally equal documents serialize byte-identically; digestOfText is sha256 over the text.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 23,
+                "y": 2
+              },
+              "sources": [
                 {
                   "path": "src/store.ts",
-                  "startLine": 112,
-                  "endLine": 118
+                  "startLine": 84,
+                  "endLine": 150,
+                  "digest": "7e64103d3636c7e7800779d04366d3458d6bfa68181d58f526b9416c71877b3e"
                 }
               ],
               "evidence": "observed",
@@ -313,28 +521,57 @@
             },
             {
               "id": "store-class",
-              "title": "DocumentStore & applyReplacement",
-              "description": "One validated transaction per change: open/save with conflict detection, and `applyReplacement`, which keeps the document id and the id of a replaced block or diagram.",
+              "title": "DocumentStore",
+              "description": "open() (legacy boards import without a save path), transact() validates a cloned draft and bumps revision once, undo/redo (200 deep), atomic saveAs via temp file + rename with conflict refusal on digest mismatch, onSave listeners, currentDiskDigest.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
-                "x": 37,
+                "x": 59,
                 "y": 2
               },
               "sources": [
                 {
                   "path": "src/store.ts",
-                  "startLine": 134,
-                  "endLine": 136
-                },
-                {
-                  "path": "src/store.ts",
-                  "startLine": 367,
-                  "endLine": 397
+                  "startLine": 166,
+                  "endLine": 403,
+                  "digest": "ef21ee2c5c2454932339ff33ed190eef3785264586f0c610e19b08e0d5d7e261"
                 }
               ],
               "evidence": "observed",
               "status": "open",
+              "uses": [
+                "model-validate",
+                "model-legacy"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "store-apply",
+              "title": "applyReplacement",
+              "description": "Applies a validated document, block or diagram replacement in one transaction while preserving identity: the document keeps its id and a scoped replacement keeps the id it replaces.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/store.ts",
+                  "startLine": 405,
+                  "endLine": 482,
+                  "digest": "13d75e2a63f53d154a28e5b2a679b382c01d73a0da6ae1be375dd46b549bb140"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "model-tree"
+              ],
               "actions": {
                 "enhance": "",
                 "execute": ""
@@ -344,10 +581,10 @@
           ],
           "edges": [
             {
-              "id": "si1",
-              "from": "store-paths",
-              "to": "store-class",
-              "label": "serializes with",
+              "id": "e-store-save",
+              "from": "store-class",
+              "to": "store-serialize",
+              "label": "save serializes & digests",
               "direction": "forward",
               "routing": "auto",
               "fromPort": "auto",
@@ -359,7 +596,7 @@
       {
         "id": "actions",
         "title": "Request & proposal journal",
-        "description": "Request/proposal lifecycle: journal states (pending, staged, accepted/rejected, stale), `validateReplacement`, `retentionErrors` (settled work survives a replan or prune), and branch-token resume so a request belongs to one tree position.",
+        "description": "Request/proposal lifecycle: a request token is the only way a model influences the document — one pending request, one branch, one base revision and on-disk digest. Journal states pending → submitted/staged → accepted/rejected/discarded/failed/stale; accepting is a UI action, never a tool call.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
@@ -369,113 +606,9 @@
         "sources": [
           {
             "path": "src/actions.ts",
-            "startLine": 23,
-            "endLine": 112
-          },
-          {
-            "path": "src/actions.ts",
-            "startLine": 123,
-            "endLine": 126
-          },
-          {
-            "path": "src/actions.ts",
-            "startLine": 218,
-            "endLine": 221
-          },
-          {
-            "path": "src/actions.ts",
-            "startLine": 242,
-            "endLine": 243
-          },
-          {
-            "path": "src/actions.ts",
-            "startLine": 255,
-            "endLine": 258
-          }
-        ],
-        "evidence": "observed",
-        "status": "open",
-        "actions": {
-          "enhance": "",
-          "execute": ""
-        },
-        "children": null
-      },
-      {
-        "id": "compose",
-        "title": "Scope resolution & prompt composition",
-        "description": "Turns a scope (block / diagram / project) into blocks, edges and boundary relationships, then renders the exact prompt: proposal protocol, evidence rules, where-to-look, and the per-intent brief, with authored and retrieved text delimited as data.",
-        "expectedOutput": "",
-        "acceptanceCriteria": [],
-        "position": {
-          "x": 34,
-          "y": 8
-        },
-        "sources": [
-          {
-            "path": "src/compose.ts",
-            "startLine": 26,
-            "endLine": 56
-          },
-          {
-            "path": "src/compose.ts",
-            "startLine": 101,
-            "endLine": 105
-          },
-          {
-            "path": "src/compose.ts",
-            "startLine": 353,
-            "endLine": 362
-          }
-        ],
-        "evidence": "observed",
-        "status": "open",
-        "actions": {
-          "enhance": "",
-          "execute": ""
-        },
-        "children": null
-      },
-      {
-        "id": "flow",
-        "title": "Block flow vocabulary",
-        "description": "Pure shared vocabulary for every surface: purpose to verbs and status cycle, outline rows, page fields, project actions, plus `startDocument` and `composeRequest`.",
-        "expectedOutput": "",
-        "acceptanceCriteria": [],
-        "position": {
-          "x": 70,
-          "y": 8
-        },
-        "sources": [
-          {
-            "path": "src/flow.ts",
-            "startLine": 20,
-            "endLine": 25
-          },
-          {
-            "path": "src/flow.ts",
-            "startLine": 35,
-            "endLine": 38
-          },
-          {
-            "path": "src/flow.ts",
-            "startLine": 56,
-            "endLine": 71
-          },
-          {
-            "path": "src/flow.ts",
-            "startLine": 92,
-            "endLine": 95
-          },
-          {
-            "path": "src/flow.ts",
-            "startLine": 134,
-            "endLine": 148
-          },
-          {
-            "path": "src/flow.ts",
-            "startLine": 197,
-            "endLine": 236
+            "startLine": 1,
+            "endLine": 45,
+            "digest": "46e6853e4ddfc1dbb8759384090918ac053100fc8e700b0b3a57fe8c4b290651"
           }
         ],
         "evidence": "observed",
@@ -485,12 +618,113 @@
           "execute": ""
         },
         "children": {
-          "id": "flow-inner",
+          "id": "actions-inside",
           "blocks": [
             {
-              "id": "flow-vocab",
-              "title": "Purpose vocabulary",
-              "description": "verbsFor / statusCycle / statusLabel / statusGlyph / nextStatus, outlineRows, nextOpenBlock, progressLabel and pageFields, the labels terminal, web and markdown all read.",
+              "id": "actions-registry",
+              "title": "ActionRegistry",
+              "description": "Per-session journal (last 50): begin/beginBatch refuse while a request is active; adoptBranch marks other-branch requests stale; rebase follows the planner's own saves; stage checks token, branch, state, document id, disk digest, summary, replacement shape, retention and the projected whole document; checkApplicable refuses a project proposal after any revision bump.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/actions.ts",
+                  "startLine": 274,
+                  "endLine": 502,
+                  "digest": "eed1d624764f5a5575a9c5ce6404c0a1898e8717f8c74256584cc8c9956b6055"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "store-apply",
+                "model-validate"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "actions-validate",
+              "title": "Replacement validation & retention",
+              "description": "validateReplacement checks shape and ownership against the request's scope; retentionErrors refuses a replan/prune that drops a block the human already settled.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 24,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/actions.ts",
+                  "startLine": 129,
+                  "endLine": 241,
+                  "digest": "cec4cbcd3818efa6c21f88f07e697748166131bbe72586dcc5b0056eae831c1c"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "model-validate"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            }
+          ],
+          "edges": [
+            {
+              "id": "e-actions-stage",
+              "from": "actions-registry",
+              "to": "actions-validate",
+              "label": "stage() validates",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            }
+          ]
+        }
+      },
+      {
+        "id": "flow",
+        "title": "Shared block flow",
+        "description": "Pure (no pi-tui) flow shared by the terminal screen, web mode and the composer: which verbs a purpose offers, status names, how the outline is walked, the next step, and how requests, batches and execute dispatch are composed.",
+        "expectedOutput": "",
+        "acceptanceCriteria": [],
+        "position": {
+          "x": 36,
+          "y": 8
+        },
+        "sources": [
+          {
+            "path": "src/flow.ts",
+            "startLine": 1,
+            "endLine": 5,
+            "digest": "29228db04dc929cfefd31cba60bc70efdc5f2b9f0bcf40ad86ff7a320b9d6f24"
+          }
+        ],
+        "evidence": "observed",
+        "status": "open",
+        "actions": {
+          "enhance": "",
+          "execute": ""
+        },
+        "children": {
+          "id": "flow-inside",
+          "blocks": [
+            {
+              "id": "flow-verbs",
+              "title": "Verbs & status cycle",
+              "description": "Refine/Break down/Replan/Execute plus Sync (drift views) and Ask (file viewers); line requests add a block citing selected lines; per-purpose status cycle, labels and glyphs.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
@@ -500,13 +734,105 @@
               "sources": [
                 {
                   "path": "src/flow.ts",
-                  "startLine": 35,
-                  "endLine": 71
-                },
+                  "startLine": 47,
+                  "endLine": 138,
+                  "digest": "dad9c37582ccb79ac1994e88db213d8e5725e051f947c76827ef27b76cbc10c0"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "flow-walk",
+              "title": "Outline & focus walk",
+              "description": "Depth-first outline rows with collapse; focusNeighborhood (parent, inputs, outputs, children, uses links) and spatial cursor movement for the walk.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 30,
+                "y": 2
+              },
+              "sources": [
                 {
                   "path": "src/flow.ts",
-                  "startLine": 134,
-                  "endLine": 151
+                  "startLine": 140,
+                  "endLine": 165,
+                  "digest": "34ddbf99cfd3fcb4ac412512f4063d6f83b28125b421d1446a10e903be365ecb"
+                },
+                {
+                  "path": "src/focus.ts",
+                  "startLine": 47,
+                  "endLine": 80,
+                  "digest": "e9ca19918cc5e412509442c24b4a6f268732bd7426644ecc17297b41e1782ba0"
+                },
+                {
+                  "path": "src/focus.ts",
+                  "startLine": 97,
+                  "endLine": 145,
+                  "digest": "44e8e0ecf5d5ebc78fa9cbe7c72754d490ec84d9dd2d625cc8dd98ca5b6844a4"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "model-tree"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "flow-next",
+              "title": "Next step, uses picker & sketch",
+              "description": "useCandidates, extractedMessage, nextOpenBlock, progressLabel, and nextStep — the one next action per block, including Sketch when a surface lacks a wireframe fence.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 58,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/flow.ts",
+                  "startLine": 166,
+                  "endLine": 302,
+                  "digest": "903ffbb59cc5f21bc4db029f82cf4df87be2d8434dcb78717b8ba0b5e60ec92a"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "model-reuse"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "flow-fields",
+              "title": "Screens board, page fields & project actions",
+              "description": "screenBoard lists pages and components with navigation and usage; pageFields/fieldLabel per purpose; project actions replan, prune and change.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/flow.ts",
+                  "startLine": 303,
+                  "endLine": 443,
+                  "digest": "e8b17216ea2f4bc67124254ca34e33cfc89c90df40740956baba70883a813f1a"
                 }
               ],
               "evidence": "observed",
@@ -519,23 +845,56 @@
             },
             {
               "id": "flow-requests",
-              "title": "Start flows & composed requests",
-              "description": "projectActions, `startDocument` (draft/discover) and `composeRequest`, which pairs a registry entry with its composed prompt.",
+              "title": "Document starts & request composition",
+              "description": "startDocument (draft/discover/change), composeRequest builds the prompt and the BeginInput registry entry, codeRootFor, changeContext (map + marked starting points), composeBatch with per-member instruction files under the OS temp dir.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
-                "x": 26,
-                "y": 2
+                "x": 38,
+                "y": 8
               },
               "sources": [
                 {
                   "path": "src/flow.ts",
-                  "startLine": 186,
-                  "endLine": 236
+                  "startLine": 445,
+                  "endLine": 660,
+                  "digest": "ef7d71e5c7e48592ed8fba56a845c1c0378e2d73e5867d887fed2b5dfc109a18"
                 }
               ],
               "evidence": "observed",
               "status": "open",
+              "uses": [
+                "store-class"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "flow-dispatch",
+              "title": "Execute dispatch planning",
+              "description": "planDispatch runs only settled plan leaves with acceptance criteria; a parent is a container; a leaf waits for its own and its ancestors' uses and inbound open edges; renderDispatch writes the task text grouped by venue.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 74,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/flow.ts",
+                  "startLine": 662,
+                  "endLine": 862,
+                  "digest": "541e494cf63d5eb6bb39f69de88451cad6ce8a68367ab0f7963eae3b28bedc0d"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "model-tree"
+              ],
               "actions": {
                 "enhance": "",
                 "execute": ""
@@ -543,60 +902,31 @@
               "children": null
             }
           ],
-          "edges": [
-            {
-              "id": "fi1",
-              "from": "flow-vocab",
-              "to": "flow-requests",
-              "label": "labels",
-              "direction": "forward",
-              "routing": "auto",
-              "fromPort": "auto",
-              "toPort": "auto"
-            }
-          ]
+          "edges": []
         }
       },
       {
-        "id": "ui",
-        "title": "Terminal diagram surface",
-        "description": "The DiagramScreen overlay: pure card geometry, orthogonal edge routing with facing ports, order-insensitive document diff for proposal review, canvas painting with theme-aware panel chrome, modals and the source pane.",
+        "id": "compose",
+        "title": "Prompt composer",
+        "description": "Deterministic scope prompts: resolves a scope, then writes the exact payload with authored and retrieved content delimited as data.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 2,
-          "y": 14
+          "x": 61,
+          "y": 8
         },
         "sources": [
           {
-            "path": "src/ui.ts",
-            "startLine": 93,
-            "endLine": 95
+            "path": "src/compose.ts",
+            "startLine": 1,
+            "endLine": 2,
+            "digest": "307b16cc0b3fb6900a690de9ef5c4634c88af0577771206f3a05731702e3cb74"
           },
           {
-            "path": "src/ui.ts",
-            "startLine": 160,
-            "endLine": 166
-          },
-          {
-            "path": "src/ui.ts",
-            "startLine": 250,
-            "endLine": 253
-          },
-          {
-            "path": "src/ui.ts",
-            "startLine": 286,
-            "endLine": 296
-          },
-          {
-            "path": "src/ui.ts",
-            "startLine": 315,
-            "endLine": 318
-          },
-          {
-            "path": "src/ui.ts",
-            "startLine": 387,
-            "endLine": 390
+            "path": "src/compose.ts",
+            "startLine": 644,
+            "endLine": 741,
+            "digest": "0bf4419d2b61eaf551f493a4d8abfa55df8e6c24730012202c9f69a209e9491a"
           }
         ],
         "evidence": "observed",
@@ -606,12 +936,12 @@
           "execute": ""
         },
         "children": {
-          "id": "ui-inner",
+          "id": "compose-inside",
           "blocks": [
             {
-              "id": "ui-geometry",
-              "title": "Card geometry & edge routing",
-              "description": "Card rects on a 3-column grid, `placeNewBlock`, `tidyDiagram`, `layoutNewBlocks`, facing ports and the bounded two-bend orthogonal `routeEdge`.",
+              "id": "compose-scope",
+              "title": "Scope resolution",
+              "description": "resolveScope maps a block/diagram/project scope to its block locations, edges within it and the boundary relationships that leave it.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
@@ -620,24 +950,45 @@
               },
               "sources": [
                 {
-                  "path": "src/ui.ts",
-                  "startLine": 160,
-                  "endLine": 166
+                  "path": "src/compose.ts",
+                  "startLine": 82,
+                  "endLine": 209,
+                  "digest": "7cb493e4db0d2cb9f1717d6c1f01874ab185cc95048abaf681affa4fced4a891"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "model-tree"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "compose-sections",
+              "title": "Protocol & rule sections",
+              "description": "Proposal and batch output protocols, evidence rules, where-to-look limits, reuse rules and outside-block catalog (≤150), surface/sketch/build rules with DESIGN.md, related context (p ≥ 0.7, ≤ 8), drift and change-plan sections.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 26,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/compose.ts",
+                  "startLine": 218,
+                  "endLine": 240,
+                  "digest": "8e505b06526b9a20c4c3c10892c4c6d06142710e24f67bee425cf9f91c6cbcfe"
                 },
                 {
-                  "path": "src/ui.ts",
-                  "startLine": 192,
-                  "endLine": 206
-                },
-                {
-                  "path": "src/ui.ts",
-                  "startLine": 286,
-                  "endLine": 289
-                },
-                {
-                  "path": "src/ui.ts",
-                  "startLine": 315,
-                  "endLine": 318
+                  "path": "src/compose.ts",
+                  "startLine": 324,
+                  "endLine": 569,
+                  "digest": "0048a9768d4304d2346e42b8211b684ac794b261880ce687188868280775a25c"
                 }
               ],
               "evidence": "observed",
@@ -649,43 +1000,27 @@
               "children": null
             },
             {
-              "id": "ui-review",
-              "title": "Document diff for review",
-              "description": "`diffDocuments` compares two documents order-insensitively (blocks, edges, title/goal) so the review screen shows exactly what a proposal changed.",
+              "id": "compose-prompt",
+              "title": "Briefs & composePrompt",
+              "description": "briefFor words the task per intent, purpose and scope (replan/prune restate that settled blocks stay); composePrompt assembles it; composeBatchPrompt asks the parent to spawn one subagent per member and relay each answer.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
-                "x": 36,
+                "x": 58,
                 "y": 2
               },
               "sources": [
                 {
-                  "path": "src/ui.ts",
-                  "startLine": 378,
-                  "endLine": 390
-                }
-              ],
-              "evidence": "observed",
-              "status": "open",
-              "actions": {
-                "enhance": "",
-                "execute": ""
-              },
-              "children": null
-            },
-            {
-              "id": "ui-screen",
-              "title": "DiagramScreen outline, page & modals",
-              "description": "The interactive overlay: nested outline with the selected block page, edit/list/text/review/confirm modals, and the save confirmation.",
-              "expectedOutput": "",
-              "acceptanceCriteria": [],
-              "position": {
-                "x": 66,
-                "y": 2
-              },
-              "sources": [
+                  "path": "src/compose.ts",
+                  "startLine": 372,
+                  "endLine": 404,
+                  "digest": "da54f6ab349febcd742931b520654c90dd1c5d1d42a8b913cb7b0b1d931a5685"
+                },
                 {
-                  "path": "src/ui.ts"
+                  "path": "src/compose.ts",
+                  "startLine": 571,
+                  "endLine": 741,
+                  "digest": "0503ff6c3d1cb593db4544b5b65d70bbcc8015d4cad304b5e83d40fe8361bca2"
                 }
               ],
               "evidence": "observed",
@@ -699,20 +1034,414 @@
           ],
           "edges": [
             {
-              "id": "ui1",
-              "from": "ui-geometry",
-              "to": "ui-screen",
-              "label": "layout",
+              "id": "e-compose-scope",
+              "from": "compose-scope",
+              "to": "compose-prompt",
+              "label": "ScopeResolution",
               "direction": "forward",
               "routing": "auto",
               "fromPort": "auto",
               "toPort": "auto"
             },
             {
-              "id": "ui2",
-              "from": "ui-review",
-              "to": "ui-screen",
-              "label": "review diff",
+              "id": "e-compose-sections",
+              "from": "compose-sections",
+              "to": "compose-prompt",
+              "label": "rule & context sections",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            }
+          ]
+        }
+      },
+      {
+        "id": "related",
+        "title": "Judged related context",
+        "description": "Before a narrower-than-project, non-execute request, asks the session's System One judge one yes/no question per outside block and carries the likely ones into the prompt.",
+        "expectedOutput": "",
+        "acceptanceCriteria": [],
+        "position": {
+          "x": 2,
+          "y": 14
+        },
+        "sources": [
+          {
+            "path": "src/relevance.ts",
+            "startLine": 30,
+            "endLine": 42,
+            "digest": "35d076cef061ac3fdd21951f3340102f19783daca9c1f435d60f728fae035941"
+          },
+          {
+            "path": "src/judge.ts",
+            "startLine": 1,
+            "endLine": 8,
+            "digest": "3b2e35cb8cf025b043d254997c7764f4011429cefbda9583cf2fdda31db7431e"
+          }
+        ],
+        "evidence": "observed",
+        "status": "open",
+        "actions": {
+          "enhance": "",
+          "execute": ""
+        },
+        "children": {
+          "id": "related-inside",
+          "blocks": [
+            {
+              "id": "related-judge",
+              "title": "Judge role resolver",
+              "description": "Resolves the `judge` model role to a judgment-API model (Jev/Laya); refuses a chat model; builds a TypeSafeJudge with an 8 s per-attempt timeout.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/judge.ts",
+                  "startLine": 1,
+                  "endLine": 86,
+                  "digest": "64f20b41714d7ea26e283a02a7a5a3d4e6718b6f82474d9890a804bb39ec1cac"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "related-ranker",
+              "title": "Relevance ranker",
+              "description": "Candidates outside the scope (≤160) chunked 40 questions per request, ranked with a 10 s bound; one failed batch fails the ranking; summaries for single and batch previews.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 29,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/relevance.ts",
+                  "startLine": 30,
+                  "endLine": 200,
+                  "digest": "a7760264d80f22dfd53baa7d2e97eb27d9af4553b12f7288e503ffe2ffa6e726"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "model-tree"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            }
+          ],
+          "edges": [
+            {
+              "id": "e-related-judge",
+              "from": "related-judge",
+              "to": "related-ranker",
+              "label": "Judge for the judge role",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            }
+          ]
+        }
+      },
+      {
+        "id": "drift",
+        "title": "Citation drift",
+        "description": "Compares each citation's stored fingerprint with the code now, reports fresh/moved/changed/missing/unstamped/unchecked plus uncited files changed since the git baseline, and resolves them.",
+        "expectedOutput": "",
+        "acceptanceCriteria": [],
+        "position": {
+          "x": 32,
+          "y": 14
+        },
+        "sources": [
+          {
+            "path": "src/drift.ts",
+            "startLine": 1,
+            "endLine": 2,
+            "digest": "0c5558bd5fb610cb1190810c19fd1b8f62d8bd3ac96ff66a2b22562c4650d9dc"
+          },
+          {
+            "path": "src/drift.ts",
+            "startLine": 24,
+            "endLine": 56,
+            "digest": "ce9c32159fdb86ddd75f97a27d7e3e26fe7ed98c716920962a352a0e4d7bd3f2"
+          }
+        ],
+        "evidence": "observed",
+        "status": "open",
+        "actions": {
+          "enhance": "",
+          "execute": ""
+        },
+        "children": {
+          "id": "drift-inside",
+          "blocks": [
+            {
+              "id": "drift-fingerprint",
+              "title": "Fingerprinting",
+              "description": "linesDigest (sha256, trailing whitespace ignored), refKey, stampSources/stampMissing, stampReplacement (overwrites whatever a model supplied), carryDigests across accepted proposals.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/drift.ts",
+                  "startLine": 57,
+                  "endLine": 160,
+                  "digest": "011ee7283683ad9ab09f5b10de09340264617970dd9141c2d60359f58b8abf87"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "store-serialize"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "drift-check",
+              "title": "Drift check",
+              "description": "git HEAD, per-citation state including relocation search (bounded work), uncovered changed/untracked files (≤200), checkDrift report.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 24,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/drift.ts",
+                  "startLine": 162,
+                  "endLine": 253,
+                  "digest": "0bad3c43f6d391e04c2744ffd0d235ae15605349c2fa2d80724263db9083b727"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "files"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "drift-resolve",
+              "title": "Re-anchor, Sync & baseline",
+              "description": "driftedBlockIds, syncTargets (outermost drifted blocks), syncContext for Sync prompts, reanchorMoved, prepareBaseline, changedCheck for 'still true'.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 43,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/drift.ts",
+                  "startLine": 255,
+                  "endLine": 334,
+                  "digest": "642ffba42c503de31ac8e54e6b85f0b4bd9bf1c4f9f6eaf8fe1d70372b8b6f26"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            }
+          ],
+          "edges": [
+            {
+              "id": "e-drift-fp",
+              "from": "drift-fingerprint",
+              "to": "drift-check",
+              "label": "stored digests compared",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            },
+            {
+              "id": "e-drift-report",
+              "from": "drift-check",
+              "to": "drift-resolve",
+              "label": "DriftReport",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            }
+          ]
+        }
+      },
+      {
+        "id": "tui",
+        "title": "Terminal overlay",
+        "description": "The TUI surface: one fullscreen overlay that renders its own lists, confirmations and review screens and mounts pi-tui's native Editor for text fields.",
+        "expectedOutput": "",
+        "acceptanceCriteria": [],
+        "position": {
+          "x": 54,
+          "y": 14
+        },
+        "sources": [
+          {
+            "path": "src/ui.ts",
+            "startLine": 1,
+            "endLine": 206,
+            "digest": "779a6410880a6fc019066d062c74d7d73876c9cdda25631e16e61a9a4e061411"
+          }
+        ],
+        "evidence": "observed",
+        "status": "open",
+        "uses": [
+          "flow",
+          "actions",
+          "drift",
+          "related",
+          "insight",
+          "editing",
+          "store",
+          "model"
+        ],
+        "actions": {
+          "enhance": "",
+          "execute": ""
+        },
+        "children": {
+          "id": "tui-inside",
+          "blocks": [
+            {
+              "id": "tui-screen",
+              "title": "DiagramScreen",
+              "description": "The overlay component (outline, block page, walk, map, source view, modals for edit/list/text/review/confirm/close, single and batch previews); returns closed, submit or submit-batch to the entry point.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 0,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/ui.ts",
+                  "startLine": 798,
+                  "endLine": 935,
+                  "digest": "118c1949b3e24e85223d7651f7354491951de8b4b75d8bc1bf37178130837524"
+                },
+                {
+                  "path": "src/ui.ts",
+                  "startLine": 937,
+                  "endLine": 4536,
+                  "digest": "22f3e2bbbb2c6a8409df4ecf97ced15227523b4173aaa892c7cf379f148df00d"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "tui-geometry",
+              "title": "Layout, routing & review diff",
+              "description": "Card geometry, placeNewBlock/insertLineBlock, grid tidy and layoutNewBlocks, acceptReplacement (how every surface applies a reviewed proposal), bounded orthogonal edge routing, diffDocuments/diffIsEmpty for review.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 23,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/ui.ts",
+                  "startLine": 207,
+                  "endLine": 611,
+                  "digest": "229b39a91e18c63295d48445a6a2967b1f4849812f72ce5aae71a33055c8c209"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "store-apply"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "tui-canvas",
+              "title": "Canvas & panel chrome",
+              "description": "Styled cell Grid, panel chrome mirroring pi-tui's overlay-box with the host theme, and numbered syntax-highlighted source lines.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 59,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/ui.ts",
+                  "startLine": 613,
+                  "endLine": 796,
+                  "digest": "8aeec1dde8531bd8edb70619da0c1f9aa46e32404a56d19ba14d885cfc347f98"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            }
+          ],
+          "edges": [
+            {
+              "id": "e-tui-geo",
+              "from": "tui-screen",
+              "to": "tui-geometry",
+              "label": "layout, routing, review diff",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            },
+            {
+              "id": "e-tui-canvas",
+              "from": "tui-screen",
+              "to": "tui-canvas",
+              "label": "paints",
               "direction": "forward",
               "routing": "auto",
               "fromPort": "auto",
@@ -723,54 +1452,46 @@
       },
       {
         "id": "web",
-        "title": "Web mode server & operations",
-        "description": "On-demand loopback Bun server for one session: token-cookie auth, DNS-rebinding and origin checks, an `/api/state` projection in the same flow vocabulary, and validated operations that each become one store transaction.",
+        "title": "Web mode",
+        "description": "On-demand loopback server bound to the session's own store and journal, so the browser, the overlay and a model's proposal see one document; nothing applies a proposal without a human Accept.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 32,
-          "y": 14
+          "x": 2,
+          "y": 20
         },
         "sources": [
           {
             "path": "src/web.ts",
-            "startLine": 66,
-            "endLine": 91
-          },
-          {
-            "path": "src/web.ts",
-            "startLine": 134,
-            "endLine": 137
-          },
-          {
-            "path": "src/web.ts",
-            "startLine": 201,
-            "endLine": 204
-          },
-          {
-            "path": "src/web.ts",
-            "startLine": 395,
-            "endLine": 398
-          },
-          {
-            "path": "src/web.ts",
-            "startLine": 489,
-            "endLine": 492
+            "startLine": 1,
+            "endLine": 14,
+            "digest": "2d6020c1094da56b0820efe00c15abff9bc4d7f817ecb960c79f75cacab3ef88"
           }
         ],
         "evidence": "observed",
         "status": "open",
+        "uses": [
+          "flow",
+          "actions",
+          "drift",
+          "related",
+          "insight",
+          "store",
+          "model",
+          "files",
+          "tui-geometry"
+        ],
         "actions": {
           "enhance": "",
           "execute": ""
         },
         "children": {
-          "id": "web-inner",
+          "id": "web-inside",
           "blocks": [
             {
               "id": "web-server",
-              "title": "Loopback server, token auth & request handling",
-              "description": "Process-wide server registry that survives a plugin reload, `startWeb`/`stopWeb`, secure headers, timing-safe token comparison and the request handler.",
+              "title": "Loopback server & access control",
+              "description": "127.0.0.1 only; per-server token exchanged for an HttpOnly SameSite=Strict cookie, Host check against DNS rebinding, Origin check on writes, strict CSP; routes /api/state, /api/files, /api/file, /api/insight, /api/outline, /api/symbol, /api/op; process-wide registry survives plugin reloads.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
@@ -780,23 +1501,35 @@
               "sources": [
                 {
                   "path": "src/web.ts",
-                  "startLine": 66,
-                  "endLine": 91
-                },
+                  "startLine": 116,
+                  "endLine": 374,
+                  "digest": "e28c3d8cdd066893167591b23da34bef83c5f5cbafd38b706844c6bd531a043a"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "web-state",
+              "title": "State projection",
+              "description": "stateOf projects the session into WebState: focus, flow labels from flow.ts, review diff for a staged proposal, drift summary, breadcrumb.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 38,
+                "y": 2
+              },
+              "sources": [
                 {
                   "path": "src/web.ts",
-                  "startLine": 134,
-                  "endLine": 137
-                },
-                {
-                  "path": "src/web.ts",
-                  "startLine": 149,
-                  "endLine": 166
-                },
-                {
-                  "path": "src/web.ts",
-                  "startLine": 182,
-                  "endLine": 204
+                  "startLine": 373,
+                  "endLine": 601,
+                  "digest": "cbe8836c40a6e3ba875a8c8fbcbaf9907eaa348b5f6077903f39c36c937808e7"
                 }
               ],
               "evidence": "observed",
@@ -809,24 +1542,58 @@
             },
             {
               "id": "web-ops",
-              "title": "State projection & validated ops",
-              "description": "`stateOf` (flow, breadcrumb, staged review) and `applyOp`, where unknown ops and fields are refused by name and a submit against unsaved edits answers 409.",
+              "title": "Op dispatcher",
+              "description": "applyOp: every op is one validated store transaction or navigation change, unknown ops/fields refused by name; composePreview ranks related context; unsaved edits answer 409 unless saveFirst; submitStart and batch requests.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
-                "x": 38,
+                "x": 62,
                 "y": 2
               },
               "sources": [
                 {
                   "path": "src/web.ts",
-                  "startLine": 331,
-                  "endLine": 398
+                  "startLine": 603,
+                  "endLine": 1385,
+                  "digest": "dffd29e6200ededc2c904cd4e10692ff6c44b47495f0da94132710bd8af92ded"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "web-page",
+              "title": "Browser page",
+              "description": "web-page.html is a self-contained Svelte bundle: scripts/build-web.ts compiles web/ into one HTML file, served verbatim by web-page.ts (WEB_PAGE). No session data is interpolated; the page polls GET /api/state (?since=version) and writes via POST /api/op; labels, verbs and statuses come from state.flow; OpenCode DESIGN.md tokens.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 8
+              },
+              "sources": [
+                {
+                  "path": "src/web-page.ts",
+                  "startLine": 1,
+                  "endLine": 9,
+                  "digest": "4a90b87119d42f3d63d708b2efae947147a4cf017ce2c74064fbc3cfa45a6e5c"
                 },
                 {
-                  "path": "src/web.ts",
-                  "startLine": 489,
-                  "endLine": 492
+                  "path": "src/web-page.html",
+                  "startLine": 1,
+                  "endLine": 11,
+                  "digest": "dd13aa1be058551c88819988f50599d900dd0674651636bb2512df949d0979dc"
+                },
+                {
+                  "path": "web/app.svelte.ts",
+                  "startLine": 140,
+                  "endLine": 179,
+                  "digest": "6653623c2d46979ca8268c7481f0bf9142259b399f2185f33a70b1413c58f3dc"
                 }
               ],
               "evidence": "observed",
@@ -840,10 +1607,30 @@
           ],
           "edges": [
             {
-              "id": "wi1",
+              "id": "e-web-fetch",
+              "from": "web-page",
+              "to": "web-server",
+              "label": "fetch /api/*",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            },
+            {
+              "id": "e-web-state",
+              "from": "web-server",
+              "to": "web-state",
+              "label": "GET /api/state",
+              "direction": "forward",
+              "routing": "auto",
+              "fromPort": "auto",
+              "toPort": "auto"
+            },
+            {
+              "id": "e-web-op",
               "from": "web-server",
               "to": "web-ops",
-              "label": "dispatches to",
+              "label": "POST /api/op",
               "direction": "forward",
               "routing": "auto",
               "fromPort": "auto",
@@ -853,59 +1640,28 @@
         }
       },
       {
-        "id": "webpage",
-        "title": "Browser page (static shell)",
-        "description": "One static HTML string: no session data is interpolated, everything arrives through /api/state and is rendered with textContent, and the labels come from state.flow so the page invents no vocabulary.",
-        "expectedOutput": "",
-        "acceptanceCriteria": [],
-        "position": {
-          "x": 66,
-          "y": 14
-        },
-        "sources": [
-          {
-            "path": "src/web-page.ts",
-            "startLine": 8,
-            "endLine": 11
-          }
-        ],
-        "evidence": "observed",
-        "status": "open",
-        "actions": {
-          "enhance": "",
-          "execute": ""
-        },
-        "children": null
-      },
-      {
         "id": "files",
         "title": "Workspace file access",
-        "description": "Read-only workspace listing (`git ls-files` when the workspace is a repo, else a bounded walk skipping dependency and build dirs) and file reads resolved then real-pathed so neither `..` nor a symlink escapes the workspace.",
+        "description": "Read-only workspace access: paths resolved and real-pathed so neither `..` nor a symlink escapes; listing via `git ls-files` (gitignore applies) or a bounded walk skipping dependency/build dirs; 5000-file and 5000-line caps.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 2,
+          "x": 18,
           "y": 20
         },
         "sources": [
           {
             "path": "src/workspace-files.ts",
-            "startLine": 14,
-            "endLine": 35
-          },
-          {
-            "path": "src/workspace-files.ts",
-            "startLine": 37,
-            "endLine": 40
-          },
-          {
-            "path": "src/workspace-files.ts",
-            "startLine": 70,
-            "endLine": 84
+            "startLine": 1,
+            "endLine": 100,
+            "digest": "a9f2e32cbc2ccd13e350f13b0d672b0a64ebf9bf2b608cc00c9baf71dddd857c"
           }
         ],
         "evidence": "observed",
         "status": "open",
+        "uses": [
+          "store-paths"
+        ],
         "actions": {
           "enhance": "",
           "execute": ""
@@ -913,30 +1669,33 @@
         "children": null
       },
       {
-        "id": "syntax",
-        "title": "Syntax insight & highlighting",
-        "description": "What a cited line actually belongs to, from the native Tree-sitter grammars: the enclosing block range plus the node chain, and token-class highlighting. Both state the syntax-only limitation; no language server is queried.",
+        "id": "insight",
+        "title": "Code viewer insight",
+        "description": "What the file viewers can say about code: token-class highlighting, Tree-sitter syntax ranges, and on-demand language-server lookups.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 29,
+          "x": 47,
           "y": 20
         },
         "sources": [
           {
-            "path": "src/code-evidence.ts",
-            "startLine": 21,
-            "endLine": 28
-          },
-          {
-            "path": "src/code-evidence.ts",
-            "startLine": 67,
-            "endLine": 70
-          },
-          {
             "path": "src/highlight.ts",
-            "startLine": 10,
-            "endLine": 37
+            "startLine": 1,
+            "endLine": 6,
+            "digest": "950df9ddca8602909cc7452443c4eb81f25f0ea5053dd845599a331da874fef0"
+          },
+          {
+            "path": "src/code-evidence.ts",
+            "startLine": 1,
+            "endLine": 17,
+            "digest": "d460a1864b24d574fcef5dad0385131d9295c3f03c4693fe4d4c9c5834852156"
+          },
+          {
+            "path": "src/code-intel.ts",
+            "startLine": 127,
+            "endLine": 131,
+            "digest": "7269d6601bc5d682c960468dd1c8fab477c5bb7cd1037f3b7552e3221fe65a6c"
           }
         ],
         "evidence": "observed",
@@ -946,12 +1705,12 @@
           "execute": ""
         },
         "children": {
-          "id": "syntax-inner",
+          "id": "insight-inside",
           "blocks": [
             {
-              "id": "syntax-inspect",
-              "title": "Cited-line inspection",
-              "description": "`inspectSource` resolves the outermost parser block beginning on a line plus up to 8 enclosing nodes, reading only through the workspace-file reader.",
+              "id": "insight-highlight",
+              "title": "Syntax highlighting spans",
+              "description": "Runs the native highlighter with one marker color per token class and reads the ANSI back as [class, text] spans, so file text never becomes markup.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
@@ -960,14 +1719,10 @@
               },
               "sources": [
                 {
-                  "path": "src/code-evidence.ts",
-                  "startLine": 21,
-                  "endLine": 28
-                },
-                {
-                  "path": "src/code-evidence.ts",
-                  "startLine": 67,
-                  "endLine": 70
+                  "path": "src/highlight.ts",
+                  "startLine": 1,
+                  "endLine": 65,
+                  "digest": "eb1e1e9c542811dc3acb58ee80e3e6e9430ab63f10531200607e0da215ec7d47"
                 }
               ],
               "evidence": "observed",
@@ -979,20 +1734,124 @@
               "children": null
             },
             {
-              "id": "syntax-highlight",
-              "title": "Token-class highlighting",
-              "description": "`highlightLines` runs the native highlighter with per-class ANSI markers, then re-reads those markers into `[class, text]` spans the web page styles itself.",
+              "id": "insight-syntax",
+              "title": "Tree-sitter source insight",
+              "description": "inspectSource: outermost syntax block starting on a cited line plus the enclosing node chain (≤8); explicitly syntax-only, never starts a language server.",
               "expectedOutput": "",
               "acceptanceCriteria": [],
               "position": {
-                "x": 29,
+                "x": 35,
                 "y": 2
               },
               "sources": [
                 {
-                  "path": "src/highlight.ts",
-                  "startLine": 10,
-                  "endLine": 37
+                  "path": "src/code-evidence.ts",
+                  "startLine": 1,
+                  "endLine": 103,
+                  "digest": "123b8dee3ec185f2f432b1536ba50b8d1fc95359584598daefc4e8d272f0c3c4"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "files"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "insight-lsp",
+              "title": "LSP code intel",
+              "description": "Outline and symbol facts (hover, definition, references ≤100) through OMP's LSP client, loaded dynamically so a missing internal module only fails the lookup; 20 s timeout.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 69,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/code-intel.ts",
+                  "startLine": 30,
+                  "endLine": 231,
+                  "digest": "23219212429032ccaf62485844fa102d2b574c5dacaf8220b982da8b99ecf227"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "files"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "a08c18a2-b4ff-4565-b7e2-33d51a29590c",
+              "title": "current implementation shows textual and not readable representation of symbols and other intel",
+              "description": "Both file viewers print language-server and Tree-sitter intel as raw one-line strings.\n\n- Outline: every row is `indent + kind + name + \"  :\" + line` (web-page.html:1401, ui.ts:2459). Nesting is only leading spaces, the LSP kind word (\"function\", \"property\"…) takes as much room as the name, and the line number is glued to the end.\n- Hover: `extractHoverText` output (code-intel.ts:224) is dumped verbatim, as a `<pre>` cut to 12 lines in the browser (web-page.html:1406) and as 8 indented lines in the terminal (ui.ts:2397-2398). Markdown fences, `---` rules and emphasis markers show up literally, and the signature is not highlighted.\n- Definitions/references: a flat list of `path:line  preview` buttons (web-page.html:1398, 1407-1408) or →/← rows (ui.ts:2401). No grouping by file, no per-file counts, and the preview line is plain text.\n- Syntax insight in the terminal is a status message of raw grammar kinds, `syntax: function_declaration › statement_block · block a–b` (ui.ts:2348-2349).\n\nThe data is already there: `OutlineSymbol` has name/kind/depth/lines, and `SymbolFacts` has hover/definitions/references/truncated (code-intel.ts:30-50). This block is about presentation only.",
+              "expectedOutput": "The outline, symbol (hover/definition/references) and syntax-insight views in the browser and the terminal show intel a person can scan: structured, highlighted and grouped. Formatting comes from one shared pure helper, so the two surfaces show the same labels. The `/api/outline` and `/api/symbol` payloads and the LSP lookups are unchanged.",
+              "acceptanceCriteria": [
+                "Hover renders its markdown: fenced code appears as syntax-highlighted code (highlightLines in the browser, the native highlighter in the terminal), prose wraps as text, and `---` becomes a separator; no literal ``` or `---` is visible for a TypeScript hover from the TS server.",
+                "Outline rows show a short kind label (e.g. fn, class, method, prop, var) visually distinct from the emphasized symbol name, with the line number dimmed and right-aligned; children are drawn as a tree under their parent, not just as extra spaces.",
+                "Definitions and references are grouped by file, with a per-file count and the currently open file first; each row shows its line number and a syntax-highlighted preview; `truncated` still shows as a `+` on the total.",
+                "Terminal syntax insight humanizes node kinds (`function_declaration` → `function declaration`) and says which block range it covers, and still states it is syntax only.",
+                "File text and server text never become markup: the browser builds nodes with textContent/token spans only, and the terminal strips terminal escape sequences from server text before rendering.",
+                "Unit tests cover the shared formatter: a hover with a fenced signature plus prose, a nested outline with mixed kinds, and references across two files with truncation; `bun test` and `bun run check` pass."
+              ],
+              "position": {
+                "x": 2,
+                "y": 6
+              },
+              "sources": [
+                {
+                  "path": "src/web-page.html",
+                  "startLine": 1390,
+                  "endLine": 1408,
+                  "digest": "0298d65caf16625959dbc6a19fd96bd75640561cec86f460d1fdbddbeb6ea97d"
+                },
+                {
+                  "path": "src/ui.ts",
+                  "startLine": 2348,
+                  "endLine": 2349,
+                  "digest": "697176cd04fcd3f39615711b4d717a96a892edad5a9005c02e6ddc4cf5b10ee2"
+                },
+                {
+                  "path": "src/ui.ts",
+                  "startLine": 2396,
+                  "endLine": 2401,
+                  "digest": "8601587cbe556f44ca4915ae6795d3b070d438fef84aad1d9c8933b1b96863a9"
+                },
+                {
+                  "path": "src/ui.ts",
+                  "startLine": 2458,
+                  "endLine": 2459,
+                  "digest": "a4049325a0123a7983721105a32450a47f7044b24696a5d31f154f9bff57d205"
+                },
+                {
+                  "path": "src/code-intel.ts",
+                  "startLine": 30,
+                  "endLine": 57,
+                  "digest": "179a12b034bf4036b633af2cc316ddbb237ea23a1e3252170efbbff82caa5052"
+                },
+                {
+                  "path": "src/code-intel.ts",
+                  "startLine": 224,
+                  "endLine": 227,
+                  "digest": "238fcf521b460556b541afcd973c49325fe8d2dd1cb00c54cf0e466120932250"
+                },
+                {
+                  "path": "src/ui.ts",
+                  "digest": "f0d5c3f77aabf65dd9547dec8925fa332ad0e98bdd0d9fc94f77512e9d2e0b47"
+                },
+                {
+                  "path": "src/web-page.html",
+                  "digest": "b24a7aa9d1072eb8312455afc38b9ab9eab42cbf778d02ee85b1db797798973b"
                 }
               ],
               "evidence": "observed",
@@ -1009,34 +1868,112 @@
       },
       {
         "id": "editing",
-        "title": "Editor handoff & block markdown",
-        "description": "Hands a block to `$VISUAL`/`$EDITOR` as a markdown file (`# Title`, free-markdown body, `## field` sections) and reads the edited file back; a non-zero editor exit means discard.",
+        "title": "External block editing",
+        "description": "Edit one block as markdown in the user's own editor.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 64,
-          "y": 20
+          "x": 2,
+          "y": 26
         },
         "sources": [
           {
+            "path": "src/block-markdown.ts",
+            "startLine": 1,
+            "endLine": 9,
+            "digest": "e70f25db452b5f8948ecb69a19583fd87d971c00a5045afefa96b5c5dbaecb81"
+          },
+          {
             "path": "src/editor.ts",
-            "startLine": 11,
-            "endLine": 22
-          },
+            "startLine": 1,
+            "endLine": 6,
+            "digest": "3b0e8a7aadef222f2fe352ef22b9538e1bfcdde020afd7210c555e3771f9be61"
+          }
+        ],
+        "evidence": "observed",
+        "status": "open",
+        "actions": {
+          "enhance": "",
+          "execute": ""
+        },
+        "children": {
+          "id": "editing-inside",
+          "blocks": [
+            {
+              "id": "editing-markdown",
+              "title": "Block ↔ markdown codec",
+              "description": "`# Title`, free-markdown body, then one `## <field>` section per structured field the purpose uses; only a known-field `##` ends the body and fenced code stays text; a deleted section clears its field.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 2,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/block-markdown.ts",
+                  "startLine": 1,
+                  "endLine": 130,
+                  "digest": "67627e97f9474daf974ddbbc9599fae59f1b859c4b0fa61f045ad67c3cac41e7"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "uses": [
+                "flow-fields"
+              ],
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            },
+            {
+              "id": "editing-editor",
+              "title": "$VISUAL/$EDITOR launcher",
+              "description": "Writes a temp .md, runs `sh -c '<cmd> \"$1\"'` with the terminal inherited, returns the saved text or null on non-zero exit, always removes the file.",
+              "expectedOutput": "",
+              "acceptanceCriteria": [],
+              "position": {
+                "x": 32,
+                "y": 2
+              },
+              "sources": [
+                {
+                  "path": "src/editor.ts",
+                  "startLine": 1,
+                  "endLine": 35,
+                  "digest": "17eef11ba71a0bff5e6bea27a65ccae5bd9bbd9a908399e53639453d8a0d587f"
+                }
+              ],
+              "evidence": "observed",
+              "status": "open",
+              "actions": {
+                "enhance": "",
+                "execute": ""
+              },
+              "children": null
+            }
+          ],
+          "edges": []
+        }
+      },
+      {
+        "id": "skill",
+        "title": "Decompose skill",
+        "description": "Markdown fallback when no planner document is open: one PLAN.md of nested two-space bullets (Logseq-style) with note/status/venue/id fields, one node per turn, /tree as history; defers to the visual_planner tools when available.",
+        "expectedOutput": "",
+        "acceptanceCriteria": [],
+        "position": {
+          "x": 32,
+          "y": 26
+        },
+        "sources": [
           {
-            "path": "src/block-markdown.ts",
-            "startLine": 10,
-            "endLine": 11
-          },
-          {
-            "path": "src/block-markdown.ts",
-            "startLine": 47,
-            "endLine": 49
-          },
-          {
-            "path": "src/block-markdown.ts",
-            "startLine": 82,
-            "endLine": 85
+            "path": "skills/decompose/SKILL.md",
+            "startLine": 1,
+            "endLine": 35,
+            "digest": "06bbda985c28aeea901c88e27ede12a9d1675fed139b24317e37397011f91b55"
           }
         ],
         "evidence": "observed",
@@ -1049,28 +1986,34 @@
       },
       {
         "id": "demo",
-        "title": "Demo recorder & fixture tooling",
-        "description": "Model-free reproduction of the tour: `fixture.ts` builds a throwaway workspace document with the planner's own create* helpers, `scenario_full.py` drives real OMP in a pty, `render.py` turns the asciicast into the GIF and MP4.",
+        "title": "Demo recording tooling",
+        "description": "fixture.ts writes a disposable explore workspace (copies of src/flow.ts and src/actions.ts plus a small cited document); scenario_full.py drives real `omp -e src/index.ts` in a pty and records a model-free tour to an asciicast.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 2,
+          "x": 55,
           "y": 26
         },
         "sources": [
           {
             "path": "scripts/demo/fixture.ts",
             "startLine": 1,
-            "endLine": 6
+            "endLine": 43,
+            "digest": "1cdc26e682d6452f63927d5fc5a47473fa6c179329d46c0c25af0c475ad1aa18"
           },
           {
             "path": "scripts/demo/scenario_full.py",
             "startLine": 1,
-            "endLine": 30
+            "endLine": 33,
+            "digest": "d472960736330cbc25cd371643b0a24de37c74ec0f5c6d2235966ea29892cb30"
           }
         ],
         "evidence": "observed",
         "status": "open",
+        "uses": [
+          "model-tree",
+          "store-serialize"
+        ],
         "actions": {
           "enhance": "",
           "execute": ""
@@ -1079,19 +2022,26 @@
       },
       {
         "id": "tests",
-        "title": "Test suite (bun test)",
-        "description": "Eleven bun test files pinning model, flow, compose, actions, ui, web, store, code-evidence, highlighting and block-markdown behaviour; run with `bun test`, typecheck with `bun run check`.",
+        "title": "Test suite",
+        "description": "`bun test` over test/*.test.ts, one file per module (model, store, actions, compose, flow, dispatch, drift, relevance, judge, ui, screen, web, highlight, code-evidence, code-intel, block-markdown); `tsc --noEmit` is the check script.",
         "expectedOutput": "",
         "acceptanceCriteria": [],
         "position": {
-          "x": 38,
-          "y": 26
+          "x": 2,
+          "y": 32
         },
         "sources": [
           {
+            "path": "package.json",
+            "startLine": 13,
+            "endLine": 16,
+            "digest": "cfe978b5724ae6a02db12050ae930483d70cf421b77d2f9dd0cea6ff66a33bfa"
+          },
+          {
             "path": "test/model.test.ts",
             "startLine": 1,
-            "endLine": 20
+            "endLine": 27,
+            "digest": "1989a3d4b8608eb6210f6542948ea6193650dc4c880cdd7030b29872d7968776"
           }
         ],
         "evidence": "observed",
@@ -1105,350 +2055,70 @@
     ],
     "edges": [
       {
-        "id": "r1",
-        "from": "model",
-        "to": "store",
-        "label": "validated and serialized by",
+        "id": "e-entry-tui",
+        "from": "entry",
+        "to": "tui",
+        "label": "/diagram opens the overlay",
         "direction": "forward",
         "routing": "auto",
         "fromPort": "auto",
         "toPort": "auto"
       },
       {
-        "id": "r2",
-        "from": "model",
-        "to": "flow",
-        "label": "types",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r3",
-        "from": "model",
-        "to": "compose",
-        "label": "types",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r4",
-        "from": "model",
-        "to": "actions",
-        "label": "replacement shapes",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r5",
-        "from": "model",
-        "to": "ui",
-        "label": "block and diagram reads",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r6",
-        "from": "model",
+        "id": "e-entry-web",
+        "from": "entry",
         "to": "web",
-        "label": "document shapes",
+        "label": "/diagram web starts; shutdown stops",
         "direction": "forward",
         "routing": "auto",
         "fromPort": "auto",
         "toPort": "auto"
       },
       {
-        "id": "r7",
-        "from": "model",
-        "to": "editing",
-        "label": "block fields",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r8",
-        "from": "store",
-        "to": "flow",
-        "label": "document store",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r9",
-        "from": "store",
-        "to": "ui",
-        "label": "store and applyReplacement",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r10",
-        "from": "store",
-        "to": "web",
-        "label": "store and paths",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r11",
-        "from": "store",
-        "to": "files",
-        "label": "byte limit and project dir",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r12",
-        "from": "actions",
-        "to": "flow",
-        "label": "ActionKind and BeginInput",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r13",
-        "from": "actions",
-        "to": "ui",
-        "label": "journal entries",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r14",
-        "from": "actions",
-        "to": "web",
-        "label": "registry and entries",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r15",
+        "id": "e-flow-compose",
         "from": "flow",
         "to": "compose",
-        "label": "status vocabulary",
-        "direction": "both",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r16",
-        "from": "flow",
-        "to": "ui",
-        "label": "verbs, labels, fields",
+        "label": "composePrompt(scope, intent)",
         "direction": "forward",
         "routing": "auto",
         "fromPort": "auto",
         "toPort": "auto"
       },
       {
-        "id": "r17",
-        "from": "flow",
-        "to": "web",
-        "label": "flow projection",
+        "id": "e-related-compose",
+        "from": "related",
+        "to": "compose",
+        "label": "RelatedContext (p ≥ 0.7, ≤ 8)",
         "direction": "forward",
         "routing": "auto",
         "fromPort": "auto",
         "toPort": "auto"
       },
       {
-        "id": "r18",
-        "from": "flow",
-        "to": "editing",
-        "label": "page fields",
+        "id": "e-drift-compose",
+        "from": "drift",
+        "to": "compose",
+        "label": "SyncContext for Sync",
         "direction": "forward",
         "routing": "auto",
         "fromPort": "auto",
         "toPort": "auto"
       },
       {
-        "id": "r19",
-        "from": "compose",
-        "to": "ext-entry",
-        "label": "scope resolution",
+        "id": "e-skill-entry",
+        "from": "skill",
+        "to": "entry",
+        "label": "defers to planner tools",
         "direction": "forward",
         "routing": "auto",
         "fromPort": "auto",
         "toPort": "auto"
       },
       {
-        "id": "r20",
-        "from": "actions",
-        "to": "ext-entry",
-        "label": "request journal",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r21",
-        "from": "ui",
-        "to": "ext-entry",
-        "label": "terminal screen",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r22",
-        "from": "web",
-        "to": "ext-entry",
-        "label": "web mode",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r23",
-        "from": "editing",
-        "to": "ext-entry",
-        "label": "editor handoff",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r24",
-        "from": "ui",
-        "to": "web",
-        "label": "diff, replacement, layout",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r25",
-        "from": "webpage",
-        "to": "web",
-        "label": "static page",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r26",
-        "from": "syntax",
-        "to": "web",
-        "label": "spans and source insight",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r27",
-        "from": "files",
-        "to": "web",
-        "label": "file tree and reader",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r28",
-        "from": "files",
-        "to": "syntax",
-        "label": "workspace reader",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r29",
-        "from": "editing",
-        "to": "ui",
-        "label": "block as markdown",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r30",
-        "from": "model",
-        "to": "demo",
-        "label": "fixture builders",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r31",
-        "from": "store",
-        "to": "demo",
-        "label": "document serializer",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r32",
-        "from": "model",
-        "to": "tests",
-        "label": "under test",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r33",
-        "from": "flow",
-        "to": "tests",
-        "label": "under test",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r34",
-        "from": "ui",
-        "to": "tests",
-        "label": "under test",
-        "direction": "forward",
-        "routing": "auto",
-        "fromPort": "auto",
-        "toPort": "auto"
-      },
-      {
-        "id": "r35",
-        "from": "web",
-        "to": "tests",
-        "label": "under test",
+        "id": "e-demo-entry",
+        "from": "demo",
+        "to": "entry",
+        "label": "drives omp -e src/index.ts",
         "direction": "forward",
         "routing": "auto",
         "fromPort": "auto",
